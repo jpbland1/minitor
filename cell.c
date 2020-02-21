@@ -71,7 +71,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
       // pack relay payload
       pack_relay_payload(
         &packed_cell,
-        unpacked_cell->payload,
+        ( (PayloadRelay*)unpacked_cell->payload )->relay_payload,
         ( (PayloadRelay*)unpacked_cell->payload )->command,
         ( (PayloadRelay*)unpacked_cell->payload )->length
         );
@@ -397,7 +397,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 
       // TODO possibly better to preprocess this so its easier to deal with
       // pack all of the characters from address and port into the cell
-      while ( ( (RelayPayloadBegin*)payload )->address_and_port[i] != '\0' ) {
+      while ( i == 0 || ( (RelayPayloadBegin*)payload )->address_and_port[i - 1] != '\0' ) {
         **packed_cell = (unsigned char)( (RelayPayloadBegin*)payload )->address_and_port[i];
         *packed_cell += 1;
         i += 1;
