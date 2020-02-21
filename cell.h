@@ -13,7 +13,7 @@
 #define TAP_S_HANDSHAKE_LEN DH_LEN+HASH_LEN
 #define LEGACY_RENDEZVOUS_PAYLOAD_LEN 168
 
-#define NTOR_HANDSHAKE_TAG "ntorNTORntorNTOR"
+#define NTOR_HANDSHAKE_TAG "ntorNTORntorNTOR\0"
 
 typedef enum Command{
   PADDING = 0,
@@ -206,21 +206,21 @@ typedef struct PayloadNetInfo {
 struct PayloadRelayEarly {
 };
 
-struct PayloadCreate2 {
+typedef struct PayloadCreate2 {
   HandshakeType handshake_type;
   unsigned short handshake_length;
   unsigned char* handshake_data;
-};
+} PayloadCreate2;
 
 typedef struct PayloadCreated2 {
   unsigned short handshake_length;
   unsigned char* handshake_data;
 } PayloadCreated2;
 
-struct PayloadCreate {
-  char* handshake_tag;
+typedef struct PayloadCreate {
+  char handshake_tag[16];
   unsigned char* handshake_data;
-};
+} PayloadCreate;
 
 typedef struct PayloadCreated {
   unsigned char* handshake_data;
@@ -247,11 +247,11 @@ typedef struct PayloadAuthChallenge {
   unsigned short* methods;
 } PayloadAuthChallenge;
 
-struct PayloadAuthenticate {
+typedef struct PayloadAuthenticate {
   unsigned short auth_type;
   unsigned short auth_length;
   void* authentication;
-};
+} PayloadAuthenticate;
 
 typedef enum LinkSpecifierType {
   IPv4Link = 0x00,
@@ -294,15 +294,21 @@ typedef struct IntroExtension {
   void* intro_extension_field;
 } IntroExtension;
 
-// EstablishIntro
-struct EstablishIntroLegacy {
+typedef enum EstablishIntroType {
+  ESTABLISH_INTRO_LEGACY = 0,
+  ESTABLISH_INTRO_CURRENT = 1,
+} EstablishIntroType;
+
+typedef struct EstablishIntroLegacy {
   unsigned short key_length;
   unsigned char* key;
   unsigned char handshake_auth[20];
+  // not actually part of a cell, for packing sanity
+  int signature_length;
   unsigned char* signature;
-};
+} EstablishIntroLegacy;
 
-struct EstablishIntroCurrent {
+typedef struct EstablishIntroCurrent {
   AuthKeyType auth_key_type;
   unsigned short auth_key_length;
   unsigned char* auth_key;
@@ -310,8 +316,8 @@ struct EstablishIntroCurrent {
   IntroExtension** extensions;
   unsigned char handshake_auth[MAC_LEN];
   unsigned short signature_length;
-  unsigned char signature;
-};
+  unsigned char* signature;
+} EstablishIntroCurrent;
 
 typedef enum IntroduceAckStatus {
   Success = 0x0000,
@@ -348,25 +354,25 @@ struct EncryptedIntroduce1 {
 };
 
 // RelayPayload
-struct RelayPayloadExtend2 {
+typedef struct RelayPayloadExtend2 {
   unsigned char specifier_count;
   LinkSpecifier** link_specifiers;
   HandshakeType handshake_type;
   unsigned short handshake_length;
-  unsigned char handshake_data;
-};
+  unsigned char* handshake_data;
+} RelayPayloadExtend2;
 
-struct RelayPayloadExtend {
+typedef struct RelayPayloadExtend {
   unsigned int address;
   unsigned short port;
   unsigned char onion_skin[TAP_C_HANDSHAKE_LEN];
   unsigned  char identity_fingerprint[HASH_LEN];
-};
+} RelayPayloadExtend;
 
-struct RelayPayloadBegin {
+typedef struct RelayPayloadBegin {
   char* address_and_port;
   unsigned int flags;
-};
+} RelayPayloadBegin;
 
 struct RelayPayloadBeginDir {
 };
@@ -385,9 +391,9 @@ typedef struct RelayPayloadEnd {
   RelayEndCode reason;
 } RelayPayloadEnd;
 
-struct RelayPayloadResolve {
+typedef struct RelayPayloadResolve {
   char* hostname;
-};
+} RelayPayloadResolve;
 
 typedef struct RelayPayloadResolved {
   RelayResolvedType type;
@@ -402,9 +408,10 @@ typedef struct RelayPayloadSendMe {
   unsigned char* data;
 } RelayPayloadSendMe;
 
-struct RelayPayloadEstablishIntro {
+typedef struct RelayPayloadEstablishIntro {
   void* establish_intro;
-};
+  EstablishIntroType type;
+} RelayPayloadEstablishIntro;
 
 typedef struct RelayPayloadIntroEstablished {
   unsigned char extension_count;
@@ -431,16 +438,22 @@ struct RelayPayloadCommandEstablishRendezvous {
   unsigned char rendezvous_cookie[20];
 };
 
-struct RelayPayloadCommandRendezvous1 {
+typedef struct RelayPayloadCommandRendezvous1 {
   unsigned char rendezvous_cookie[20];
-  RendezvousHandshakeInfo handshake_infro;
-};
+  RendezvousHandshakeInfo* handshake_info;
+} RelayPayloadCommandRendezvous1;
 
-unsigned char* pack_and_free( Cell* unpacked_cell, unsigned char command );
+unsigned char* pack_and_free( Cell* unpacked_cell );
+
+void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length );
 
 Cell* unpack_and_free( unsigned char* packed_cell );
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length );
+
+void free_cell( Cell* unpacked_cell );
+
+void free_relay_payload( void * payload, unsigned char command );
 
 unsigned int unpack_four_bytes( unsigned char** packed_cell );
 
@@ -449,3 +462,11 @@ unsigned short unpack_two_bytes( unsigned char** packed_cell );
 void unpack_buffer( unsigned char* buffer, int length, unsigned char** packed_cell );
 
 void unpack_buffer_short( unsigned short* buffer, int length, unsigned char** packed_cell );
+
+void pack_four_bytes( unsigned char** packed_cell, unsigned int value );
+
+void pack_two_bytes( unsigned char** packed_cell, unsigned short value );
+
+void pack_buffer( unsigned char** packed_cell, unsigned char* buffer, int length );
+
+void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int length );
