@@ -246,12 +246,12 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
   if ( unpacked_cell->command != VERSIONS && unpacked_cell->command < VPADDING ) {
     // relay and relay early cells need random padding
     if ( unpacked_cell->command == RELAY || unpacked_cell->command == RELAY_EARLY ) {
-      while ( ( packed_cell - packed_cell_start ) > CELL_LEN ) {
+      while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) {
         *packed_cell = (unsigned char)rand();
         packed_cell += 1;
       }
     } else {
-      while ( ( packed_cell - packed_cell_start ) > CELL_LEN ) {
+      while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) {
         *packed_cell = (unsigned char)0;
         packed_cell += 1;
       }
@@ -634,8 +634,6 @@ Cell* unpack_and_free( unsigned char* packed_cell ) {
       break;
     case CREATED:
       unpacked_cell->payload = malloc( sizeof( PayloadCreated ) );
-      // create the buffer for the handshake data
-      ( (PayloadCreated*) unpacked_cell->payload )->handshake_data = malloc( sizeof( unsigned char ) * TAP_S_HANDSHAKE_LEN );
       // unpack the handshake data into the struct
       unpack_buffer(
         ( (PayloadCreated*) unpacked_cell->payload )->handshake_data,
@@ -952,8 +950,6 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_EXTENDED:
       result = malloc( sizeof( PayloadCreated ) );
-      // create the buffer for the handshake data
-      ( (PayloadCreated*)result )->handshake_data = malloc( sizeof( unsigned char ) * TAP_S_HANDSHAKE_LEN );
       // unpack the handshake data into the buffer
       unpack_buffer(
         ( (PayloadCreated*)result )->handshake_data,
@@ -1244,10 +1240,8 @@ void free_cell( Cell* unpacked_cell ) {
       free( ( (PayloadCreate*)unpacked_cell->payload )->handshake_data );
 
       break;
+    // nothing to do, no malloc pointers
     case CREATED:
-      // free the handshake data buffer
-      free( ( (PayloadCreated*)unpacked_cell->payload )->handshake_data );
-
       break;
     case RELAY:
       // free the relay payload

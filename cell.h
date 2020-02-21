@@ -223,7 +223,7 @@ typedef struct PayloadCreate {
 } PayloadCreate;
 
 typedef struct PayloadCreated {
-  unsigned char* handshake_data;
+  unsigned char handshake_data[TAP_S_HANDSHAKE_LEN];
 } PayloadCreated;
 
 typedef struct PayloadPaddingNegotiate {
