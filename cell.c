@@ -1,5 +1,5 @@
-#include "./cell.h"
 #include <stdlib.h>
+#include "./cell.h"
 
 //
 // PACK CELL
@@ -47,7 +47,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
       // pack the handshake data
       pack_buffer(
         &packed_cell,
-        ( unsigned char* )( (PayloadCreate*)unpacked_cell->payload )->handshake_tag,
+        ( unsigned char* )( (PayloadCreate*)unpacked_cell->payload )->handshake_data,
         TAP_C_HANDSHAKE_LEN - 16
         );
 
@@ -1335,8 +1335,8 @@ void free_cell( Cell* unpacked_cell ) {
 
   // free the payload buffer
   free( unpacked_cell->payload );
-  // free the cell
-  free( unpacked_cell );
+  // free the cell, may not need to do this if we don't create malloc cells
+  // free( unpacked_cell );
 }
 
 void free_relay_payload( void * payload, unsigned char command ) {
