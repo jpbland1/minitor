@@ -15,6 +15,9 @@
 
 #define NTOR_HANDSHAKE_TAG "ntorNTORntorNTOR\0"
 
+#define AUTH_ONE_TYPE_STRING "AUTH0001"
+#define AUTH_THREE_TYPE_STRING "AUTH0003"
+
 typedef enum Command{
   PADDING = 0,
   CREATE = 1,
@@ -117,6 +120,21 @@ typedef enum HandshakeType {
   NTOR = 0x0003,
 } HandshakeType;
 
+typedef enum CertType {
+  LINK_KEY = 1,
+  IDENTITY_CERT = 2,
+  RSA_AUTH_CERT = 3,
+  SIGNING_KEY = 4,
+  TLS_LINK_CERT = 5,
+  ED_AUTH_KEY = 6,
+  ED_IDENTITY = 7,
+} CertType;
+
+typedef enum AuthType {
+  AUTH_ONE = 0x0001,
+  AUTH_THREE = 0x0003,
+} AuthType;
+
 typedef struct Cell {
   unsigned int circ_id;
   Command command;
@@ -131,13 +149,13 @@ typedef struct Address {
 } Address;
 
 typedef struct Cert {
-  unsigned char cert_type;
+  CertType cert_type;
   unsigned short cert_length;
   unsigned char* cert;
 } Cert;
 
 // Authentication
-struct AuthenticationOne {
+typedef struct AuthenticationOne {
   // [0x41, 0x55, 0x54, 0x48, 0x30, 0x30, 0x30, 0x31],
   unsigned char type[8];
   unsigned char client_id[32];
@@ -145,12 +163,12 @@ struct AuthenticationOne {
   unsigned char server_log[32];
   unsigned char client_log[32];
   unsigned char server_cert[32];
-  unsigned char tls_secreets[32];
+  unsigned char tls_secrets[32];
   unsigned char rand[24];
   unsigned char* signature;
-};
+} AuthenticationOne;
 
-struct AuthenticationThree {
+typedef struct AuthenticationThree {
   // [0x41, 0x55, 0x54, 0x48, 0x30, 0x30, 0x30, 0x33],
   unsigned char type[8];
   unsigned char client_id[32];
@@ -160,10 +178,10 @@ struct AuthenticationThree {
   unsigned char server_log[32];
   unsigned char client_log[32];
   unsigned char server_cert[32];
-  unsigned char tls_secreets[32];
+  unsigned char tls_secrets[32];
   unsigned char rand[24];
   unsigned char* signature;
-};
+} AuthenticationThree;
 
 // Payload
 typedef struct PayloadPadding {
@@ -248,7 +266,7 @@ typedef struct PayloadAuthChallenge {
 } PayloadAuthChallenge;
 
 typedef struct PayloadAuthenticate {
-  unsigned short auth_type;
+  AuthType auth_type;
   unsigned short auth_length;
   void* authentication;
 } PayloadAuthenticate;

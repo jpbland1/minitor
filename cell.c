@@ -228,12 +228,137 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
         &packed_cell,
         ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_length
         );
-      // pack the authentication buffer with the correct length
-      pack_buffer(
-        &packed_cell,
-        ( (PayloadAuthenticate*)unpacked_cell->payload )->authentication,
-        ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_length
-        );
+      switch ( ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_type ) {
+        // TODO this is hella not DRY, need to find a better scheme to do this
+        // pack the authentication struct, whatever it may be
+        case AUTH_ONE:
+          // pack the type
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->type,
+            8
+            );
+          // pack the client id
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->client_id,
+            32
+            );
+          // pack the server id
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_id,
+            32
+            );
+          // pack the server log
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_log,
+            32
+            );
+          // pack the client log
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->client_log,
+            32
+            );
+          // pack the server cert
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_cert,
+            32
+            );
+          // pack the tls secrets
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->tls_secrets,
+            32
+            );
+          // pack the rand
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->rand,
+            24
+            );
+          // pack the signature
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature,
+            ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_length - ( 8 + 32 * 6 + 24 )
+            );
+
+
+          break;
+        case AUTH_THREE:
+          // pack the type
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->type,
+            8
+            );
+          // pack the client id
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->client_id,
+            32
+            );
+          // pack the server id
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_id,
+            32
+            );
+          // pack the client id ed
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->client_id_ed,
+            32
+            );
+          // pack the server id ed
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_id_ed,
+            32
+            );
+          // pack the server log
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_log,
+            32
+            );
+          // pack the client log
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->client_log,
+            32
+            );
+          // pack the server cert
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->server_cert,
+            32
+            );
+          // pack the tls secrets
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->tls_secrets,
+            32
+            );
+          // pack the rand
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->rand,
+            24
+            );
+          // pack the signature
+          pack_buffer(
+            &packed_cell,
+            ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature,
+            ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_length - ( 8 + 32 * 8 + 24 )
+            );
+
+          break;
+      }
 
       break;
     // TODO reserved for later use
@@ -1322,6 +1447,19 @@ void free_cell( Cell* unpacked_cell ) {
 
       break;
     case AUTHENTICATE:
+      switch ( ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_type ) {
+        case AUTH_ONE:
+          // free the signature
+          free( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature );
+
+          break;
+        case AUTH_THREE:
+          // free the signature
+          free( ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature );
+
+          break;
+      }
+
       // free the authentication buffer
       free( ( (PayloadAuthenticate*)unpacked_cell->payload )->authentication );
 
