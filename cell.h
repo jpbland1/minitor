@@ -228,7 +228,7 @@ typedef struct PayloadCreated {
 
 typedef struct PayloadPaddingNegotiate {
   unsigned char version;
-  unsigned char command;
+  PaddingCommand command;
   unsigned short timeout_low_ms;
   unsigned short timeout_high_ms;
 } PayloadPaddingNegotiate;
