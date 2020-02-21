@@ -1271,13 +1271,15 @@ void free_cell( Cell* unpacked_cell ) {
       // go through all of my addresses
       for ( i = 0; i < ( (PayloadNetInfo*)unpacked_cell->payload )->address_count; i++ ) {
         // free the address buffer
-        free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses[0]->address );
+        free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses[i]->address );
         // free the address struct
-        free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses[0] );
+        free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses[i] );
       }
 
-      // free the array of structs
-      free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses );
+      // if we have addresses, free the array of structs
+      if ( ( (PayloadNetInfo*)unpacked_cell->payload )->address_count > 0 ) {
+        free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses );
+      }
 
       break;
     // nothing to do, no malloc pointers
@@ -1308,8 +1310,10 @@ void free_cell( Cell* unpacked_cell ) {
         free( ( (PayloadCerts*)unpacked_cell->payload )->certs[i] );
       }
 
-      // free the array of structs
-      free( ( (PayloadCerts*)unpacked_cell->payload )->certs );
+      // if we have certs, free the array of structs
+      if ( ( (PayloadCerts*)unpacked_cell->payload )->cert_count > 0 ) {
+        free( ( (PayloadCerts*)unpacked_cell->payload )->certs );
+      }
 
       break;
     case AUTH_CHALLENGE:
@@ -1399,8 +1403,11 @@ void free_relay_payload( void * payload, unsigned char command ) {
         free( ( (RelayPayloadExtend2*)payload )->link_specifiers[i]->specifier );
       }
 
-      // free the array of structs
-      free( ( (RelayPayloadExtend2*)payload )->link_specifiers );
+      // if we have specifiers, free the array of structs
+      if ( ( (RelayPayloadExtend2*)payload )->specifier_count > 0 ) {
+        free( ( (RelayPayloadExtend2*)payload )->link_specifiers );
+      }
+
       // free the handshake data
       free( ( (RelayPayloadExtend2*)payload )->handshake_data );
 
@@ -1429,8 +1436,11 @@ void free_relay_payload( void * payload, unsigned char command ) {
           free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extensions[i] );
         }
 
-        // free the array of structs
-        free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extensions );
+        // if we have extensions, free the array of structs
+        if ( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extension_count > 0 ) {
+          free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extensions );
+        }
+
         // free the signature of the current establish intro
         free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature );
       }
@@ -1456,8 +1466,11 @@ void free_relay_payload( void * payload, unsigned char command ) {
         free( ( (RelayPayloadIntroduce1*)payload )->extensions[i] );
       }
 
-      // free the array of structs
-      free( ( (RelayPayloadIntroduce1*)payload )->extensions );
+      // if we have extensions, free the array of structs
+      if ( ( (RelayPayloadIntroduce1*)payload )->extension_count > 0 ) {
+        free( ( (RelayPayloadIntroduce1*)payload )->extensions );
+      }
+
       // TODO figure out how to properly handle the encrypted data
       // free the encrypted data
       free( ( (RelayPayloadIntroduce1*)payload )->encrypted );
@@ -1478,8 +1491,10 @@ void free_relay_payload( void * payload, unsigned char command ) {
         free( ( (RelayPayloadIntroEstablished*)payload )->extensions[i] );
       }
 
-      // free the array of structs
-      free( ( (RelayPayloadIntroEstablished*)payload )->extensions );
+      // if we have extensions, free the array of structs
+      if ( ( (RelayPayloadIntroEstablished*)payload )->extension_count > 0 ) {
+        free( ( (RelayPayloadIntroEstablished*)payload )->extensions );
+      }
 
       break;
     // TODO we shouldn't need to free this since we're not running a client
