@@ -1508,8 +1508,10 @@ void free_relay_payload( void * payload, unsigned char command ) {
       free( ( (PayloadCreated*)payload )->handshake_data );
 
       break;
-    // nothing to do, no malloc pointers
+    // we need to return so it doesn't try to double free the body
     case RELAY_TRUNCATE:
+      return;
+
       break;
     // nothing to do, no malloc pointers
     case RELAY_TRUNCATED:
