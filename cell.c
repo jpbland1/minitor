@@ -1507,9 +1507,8 @@ void free_relay_payload( void * payload, unsigned char command ) {
     // nothing to do, no malloc pointers
     case RELAY_EXTEND:
       break;
+    // nothing to do, no malloc pointers
     case RELAY_EXTENDED:
-      // free the handshake data
-      free( ( (PayloadCreated*)payload )->handshake_data );
 
       break;
     // nothing to do, no malloc pointers
