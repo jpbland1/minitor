@@ -387,7 +387,6 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
   return packed_cell_start;
 }
 
-// TODO pack the relay payload
 void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length ) {
   int i;
 
@@ -403,7 +402,6 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
         i += 1;
       }
 
-      // TODO I'm pretty sure this works and our pointer position will be valid but make sure
       // pack the flags
       pack_four_bytes(
         packed_cell,
@@ -489,7 +487,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 
       // until we hit a nul terminator, pack the hostname into the cell
       // one byte at a time
-      while ( ( (RelayPayloadResolve*)payload )->hostname[i] != '\0' ) {
+      while ( i == 0 || ( (RelayPayloadResolve*)payload )->hostname[i - 1] != '\0' ) {
         **packed_cell = (unsigned char)( (RelayPayloadResolve*)payload )->hostname[i];
         *packed_cell += 1;
         i += 1;
@@ -1521,9 +1519,6 @@ void free_relay_payload( void * payload, unsigned char command ) {
       free( ( (RelayPayloadResolved*)payload )->value );
 
       break;
-    // nothing to do, no malloc pointers
-    case RELAY_BEGIN_DIR:
-      break;
     case RELAY_EXTEND2:
       // go through and free each link specifier
       for ( i = 0; i < ( (RelayPayloadExtend2*)payload )->specifier_count; i++ ) {
@@ -1636,6 +1631,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
     // we need to return so it doesn't try to double free the body
     case RELAY_TRUNCATE:
     case RELAY_DROP:
+    case RELAY_BEGIN_DIR:
       return;
 
       break;
