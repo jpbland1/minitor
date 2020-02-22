@@ -1093,7 +1093,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       packed_cell += 1;
 
       break;
-      // long range dummy, cell is dropped
+    // long range dummy, cell is dropped
     case RELAY_DROP:
       break;
     // TODO we shouldn't need to unpack a relay resolve because this isn't a router
@@ -1508,16 +1508,8 @@ void free_relay_payload( void * payload, unsigned char command ) {
       free( ( (PayloadCreated*)payload )->handshake_data );
 
       break;
-    // we need to return so it doesn't try to double free the body
-    case RELAY_TRUNCATE:
-      return;
-
-      break;
     // nothing to do, no malloc pointers
     case RELAY_TRUNCATED:
-      break;
-    // nothing to do, no malloc pointers
-    case RELAY_DROP:
       break;
     case RELAY_RESOLVE:
       // free the hostname
@@ -1640,6 +1632,12 @@ void free_relay_payload( void * payload, unsigned char command ) {
       break;
     // TODO we shouldn't need to free this since we're not running a client
     case RELAY_COMMAND_INTRODUCE_ACK:
+      break;
+    // we need to return so it doesn't try to double free the body
+    case RELAY_TRUNCATE:
+    case RELAY_DROP:
+      return;
+
       break;
   }
 
