@@ -1023,6 +1023,8 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
         *( packed_cell + 3 ) == 0 &&
         *( packed_cell + 4 ) == 6
       ) {
+        // move the pointer ahead 5 positions
+        packed_cell += 5;
         // make the address 16 chars to hold the IPv6 address
         ( (RelayPayloadConnected*)result )->address = malloc( sizeof( unsigned char ) * 16 );
         // unpack the contents of the address
