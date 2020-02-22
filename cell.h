@@ -279,8 +279,8 @@ typedef struct PayloadAuthenticate {
 typedef enum LinkSpecifierType {
   IPv4Link = 0x00,
   IPv6Link = 0x01,
-  LEGACY = 0x02,
-  ED = 0x03,
+  LEGACYLink = 0x02,
+  EDLink = 0x03,
 } LinkSpecifierType;
 
 typedef struct LinkSpecifier {

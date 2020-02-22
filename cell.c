@@ -1525,7 +1525,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
         // free the specifier buffer
         free( ( (RelayPayloadExtend2*)payload )->link_specifiers[i]->specifier );
         // free the specifier struct
-        free( ( (RelayPayloadExtend2*)payload )->link_specifiers[i]->specifier );
+        free( ( (RelayPayloadExtend2*)payload )->link_specifiers[i] );
       }
 
       // if we have specifiers, free the array of structs
