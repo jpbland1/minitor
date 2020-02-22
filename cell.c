@@ -55,8 +55,8 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
     // TODO we shouldn't need to pack a created cell since this isn't a relay
     case CREATED:
       break;
-    case RELAY_EARLY:
     case RELAY:
+    case RELAY_EARLY:
       // pack the relay command
       *packed_cell = ( (PayloadRelay*)unpacked_cell->payload )->command;
       packed_cell += 1;
@@ -1369,6 +1369,7 @@ void free_cell( Cell* unpacked_cell ) {
     case CREATED:
       break;
     case RELAY:
+    case RELAY_EARLY:
       // free the relay payload
       free_relay_payload( ( (PayloadRelay*)unpacked_cell->payload )->relay_payload, ( (PayloadRelay*)unpacked_cell->payload )->command );
 
@@ -1406,9 +1407,6 @@ void free_cell( Cell* unpacked_cell ) {
         free( ( (PayloadNetInfo*)unpacked_cell->payload )->my_addresses );
       }
 
-      break;
-    // nothing to do, no malloc pointers
-    case RELAY_EARLY:
       break;
     case CREATE2:
       // free the handshake data

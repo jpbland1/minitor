@@ -135,6 +135,11 @@ typedef enum AuthType {
   AUTH_THREE = 0x0003,
 } AuthType;
 
+typedef enum SendMeVersion {
+  SENDME_IGNORE = 0x00,
+  SENDME_AUTH = 0x01,
+} SendMeVersion;
+
 typedef struct Cell {
   unsigned int circ_id;
   Command command;
@@ -384,7 +389,7 @@ typedef struct RelayPayloadExtend {
   unsigned int address;
   unsigned short port;
   unsigned char onion_skin[TAP_C_HANDSHAKE_LEN];
-  unsigned  char identity_fingerprint[HASH_LEN];
+  unsigned char identity_fingerprint[HASH_LEN];
 } RelayPayloadExtend;
 
 typedef struct RelayPayloadBegin {
@@ -421,7 +426,7 @@ typedef struct RelayPayloadResolved {
 } RelayPayloadResolved;
 
 typedef struct RelayPayloadSendMe {
-  unsigned char version;
+  SendMeVersion version;
   unsigned short data_length;
   unsigned char* data;
 } RelayPayloadSendMe;
