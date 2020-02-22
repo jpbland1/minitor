@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include "./config.h"
 #include "./cell.h"
 
 //
@@ -975,7 +976,10 @@ Cell* unpack_and_free( unsigned char* packed_cell ) {
       break;
   }
 
-  free( packed_cell_start );
+  #ifndef TEST
+    free( packed_cell_start );
+  #endif
+
   return unpacked_cell;
 }
 
