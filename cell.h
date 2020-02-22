@@ -302,7 +302,7 @@ typedef enum AuthKeyType {
 } AuthKeyType;
 
 typedef enum IntroExtensionType {
-  Ed25519 = 0x02,
+  ED25519 = 0x02,
 } IntroExtensionType;
 
 typedef struct IntroExtensionFieldEd25519 {
@@ -433,6 +433,7 @@ typedef struct RelayPayloadSendMe {
 
 typedef struct RelayPayloadEstablishIntro {
   void* establish_intro;
+  // not actually part of the cell, just here for packing sanity
   EstablishIntroType type;
 } RelayPayloadEstablishIntro;
 

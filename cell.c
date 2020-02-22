@@ -592,7 +592,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
           *packed_cell += 1;
 
           switch ( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extensions[i]->type ) {
-            case Ed25519:
+            case ED25519:
               // pack the nonce to length 16
               pack_buffer(
                 packed_cell,
@@ -1188,7 +1188,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
 
         // check which type of extension we're dealing with
         switch( ( (RelayPayloadIntroduce1*)result )->extensions[i]->type ) {
-          case Ed25519:
+          case ED25519:
             // create a buffer for the extension
             ( (RelayPayloadIntroduce1*)result )->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
             // unpack the the nonce and move the buffer
@@ -1250,7 +1250,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
 
         // check which type of extension we're dealing with
         switch( ( (RelayPayloadIntroduce1*)result )->extensions[i]->type ) {
-          case Ed25519:
+          case ED25519:
             // create a buffer for the extension
             ( (RelayPayloadIntroduce1*)result )->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
             // unpack the the nonce and move the buffer
