@@ -1,5 +1,5 @@
 #include <stdlib.h>
-#include "./config.h"
+/* #include "./config.h" */
 #include "./cell.h"
 
 //
@@ -985,7 +985,7 @@ Cell* unpack_and_free( unsigned char* packed_cell ) {
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length ) {
   int i;
-  void* result;
+  void* result = -1;
   unsigned char* packed_cell_relay_end = packed_cell + payload_length;
 
   // unpack the correct relay struct based on the command
