@@ -3,7 +3,9 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_system.h"
+#include "esp_event.h"
 #include "esp_log.h"
 
 #include "lwip/err.h"
@@ -11,21 +13,31 @@
 #include "lwip/sys.h"
 #include "lwip/netdb.h"
 
+#include "user_settings.h"
+#include "wolfssl/ssl.h"
+#include "wolfssl/internal.h"
+#include "wolfssl/wolfcrypt/ed25519.h"
+#include "wolfssl/wolfcrypt/asn.h"
+#include "wolfssl/wolfcrypt/asn_public.h"
+#include "wolfssl/wolfcrypt/rsa.h"
+#include "wolfssl/wolfcrypt/sha256.h"
+#include "wolfssl/wolfcrypt/hmac.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
 
-#include "../include/config.h"
-#include "../include/minitor.h"
-#include "../include/cell.h"
+#include "config.h"
+#include "minitor.h"
+#include "cell.h"
 
 #define WEB_SERVER "192.168.1.138"
 #define WEB_PORT 7001
 #define WEB_URL "/tor/status-vote/current/consensus"
 
-static const char* TAG = "MINITOR: ";
+WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
-static const char *REQUEST = "GET " WEB_URL " HTTP/1.0\r\n"
-    "Host: "WEB_SERVER"\r\n"
-    "User-Agent: esp-idf/1.0 esp3266\r\n"
-    "\r\n";
+// TODO shared state must be protected by mutex
+static int circ_id_counter;
+
+static const char* MINITOR_TAG = "MINITOR: ";
 
 static NetworkConsensus network_consensus = {
   .method = 0,
@@ -40,38 +52,62 @@ static DoublyLinkedOnionRelayList suitable_relays = {
   .tail = NULL,
 };
 
+static DoublyLinkedOnionCircuitList circuits = {
+  .length = 0,
+  .head = NULL,
+  .tail = NULL,
+};
+
 static const char* base64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
+  if ( store->error == ASN_NO_SIGNER_E ) {
+    return SSL_SUCCESS;
+  }
+  ESP_LOGE( MINITOR_TAG, "SSL callback error %d", store->error );
+
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "couldn't connect to relay, wolfssl error code: %d", store->error );
+#endif
+
+  return 0;
+}
 
 // intialize tor
 int v_minitor_INIT() {
+  wolfSSL_Init();
+  wolfSSL_Debugging_ON();
+
+  /* if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfSSLv23_client_method() ) ) == NULL ) { */
+  if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't setup wolfssl context" );
+#endif
+
+    return -1;
+  }
+
+  /* if ( wolfSSL_CTX_set_cipher_list( xMinitorWolfSSL_Context, "TLS_DHE_RSA_WITH_AES_256_CBC_SHA:TLS_DHE_RSA_WITH_AES_128_CBC_SHA:SSL_DHE_RSA_WITH_3DES_EDE_CBC_SHA" ) != SSL_SUCCESS ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to set cipher suite" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+
   // fetch network consensus
   if ( d_fetch_consensus_info() < 0 ) {
     return -1;
   }
+
   // TODO setup starting circuits
+  if ( d_setup_init_circuits() < 0 ) {
+    return -1;
+  }
 
   return 1;
 }
-
-// create a tor circuit
-/* TorCircuit* x_build_circuit( QueueHandle_t rx_queue ) { */
-  // TODO find 3 suitable circuits from our directory information
-  // TODO make the first create cell and  send it to the first hop
-  // TODO make an extend cell and send it to the second hop
-  // TODO make an extend cell and send it to the thrid hop
-  // TODO register a tx_queue
-  // TODO spawn a task to block on the tx_queue and cells from the queue to the tls buffer
-  // TODO spawn a task to block on the tls buffer and put the data into the rx_queue
-  // TODO return the circ_id and tx_queue back to the caller
-/* } */
-
-// destroy a tor circuit
-/* void v_destroy_circuit( int circ_id ) { */
-  // TODO send a destroy cell to the first hop
-  // TODO clean up the rx,tx queues
-  // TODO clean up the tls socket
-  // TODO clean up any circuit specific data
-/* } */
 
 // register a hidden service
 /* HiddenService x_setup_hidden_service( char* onion_address, unsigned char* private_key, QueueHandle_t rx_queue ) { */
@@ -102,7 +138,12 @@ int v_minitor_INIT() {
 
 /* } */
 
+// fetch the network consensus so we can correctly create circuits
 int d_fetch_consensus_info() {
+  const char* REQUEST = "GET /tor/status-vote/current/consensus HTTP/1.0\r\n"
+      "Host: 192.168.1.138\r\n"
+      "User-Agent: esp-idf/1.0 esp3266\r\n"
+      "\r\n";
   // we will have multiple threads trying to read the network consensus so we can't
   // edit the global one outside of a critical section. We want to keep our critical
   // sections short so we're going to store everything in a local variable and then
@@ -189,7 +230,7 @@ int d_fetch_consensus_info() {
   // holds one octect of an ipv4 address
   unsigned char address_byte = 0;
   // offsset to shift the octect
-  int address_offset = 24;
+  int address_offset = 0;
   // string matching variables for possible tags
   const char* fast = "Fast";
   int fast_found = 0;
@@ -207,21 +248,19 @@ int d_fetch_consensus_info() {
   char end_header = 0;
   // buffer thath holds data returned from the socket
   char rx_buffer[512];
-  char addr_str[128];
   struct sockaddr_in dest_addr;
 
   // set the address of the directory server
   dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" );
   dest_addr.sin_family = AF_INET;
-  dest_addr.sin_port = htons( WEB_PORT );
-  inet_ntoa_r( dest_addr.sin_addr, addr_str, sizeof( addr_str ) - 1 );
+  dest_addr.sin_port = htons( 7000 );
 
   // create a socket to access the consensus
   sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
 
   if ( sock_fd < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( TAG, "couldn't create a socket to http server\n" );
+    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server\n" );
 #endif
 
     return -1;
@@ -232,14 +271,14 @@ int d_fetch_consensus_info() {
 
   if ( err != 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( TAG, "couldn't connect to http server" );
+    ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
 #endif
 
     return -1;
   }
 
 #ifdef DEBUG_MINITOR
-  ESP_LOGI( TAG, "connected to http socket" );
+  ESP_LOGE( MINITOR_TAG, "connected to http socket" );
 #endif
 
   // send the http request to the dir server
@@ -247,14 +286,14 @@ int d_fetch_consensus_info() {
 
   if ( err < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( TAG, "couldn't send to http server" );
+    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
 #endif
 
     return -1;
   }
 
 #ifdef DEBUG_MINITOR
-  ESP_LOGI( TAG, "sent to http socket" );
+  ESP_LOGE( MINITOR_TAG, "sent to http socket" );
 #endif
 
   // keep reading forever, we will break inside when the transfer is over
@@ -265,7 +304,7 @@ int d_fetch_consensus_info() {
     // if we got less than 0 we encoutered an error
     if ( rx_length < 0 ) {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( TAG, "couldn't recv http server" );
+      ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
 #endif
 
       return -1;
@@ -276,7 +315,7 @@ int d_fetch_consensus_info() {
     }
 
 #ifdef DEBUG_MINITOR
-    ESP_LOGI( TAG, "recved from http socket" );
+    ESP_LOGE( MINITOR_TAG, "recved from http socket" );
 #endif
 
     // iterate over each byte we got back from the socket recv
@@ -426,12 +465,7 @@ int d_fetch_consensus_info() {
                 canidate_relay->relay->address |= ( (int)address_byte ) << address_offset;
                 // reset the address byte and offset for next relay
                 address_byte = 0;
-                address_offset = 24;
-
-#ifdef MINITOR_CHUTNEY
-                // override the address if we're using chutney
-                canidate_relay->relay->address = MINITOR_CHUTNEY_ADDRESS;
-#endif
+                address_offset = 0;
               }
 
               // move on to the next relay element
@@ -479,7 +513,7 @@ int d_fetch_consensus_info() {
                     // add the address to the byte at the correct offset
                     canidate_relay->relay->address |= ( (int)address_byte ) << address_offset;
                     // move the offset and reset the byte
-                    address_offset -= 8;
+                    address_offset += 8;
                     address_byte = 0;
                   // otherwise add the character to the byte
                   } else {
@@ -610,38 +644,42 @@ int d_fetch_consensus_info() {
 #ifdef DEBUG_MINITOR
   // print all the info we got from the directory server
   DoublyLinkedOnionRelay* node;
-  ESP_LOGI( TAG, "Consensus method: %d", network_consensus.method );
-  ESP_LOGI( TAG, "Consensus valid after: %u", network_consensus.valid_after );
-  ESP_LOGI( TAG, "Consensus fresh until: %u", network_consensus.fresh_until );
-  ESP_LOGI( TAG, "Consensus valid until: %u", network_consensus.valid_until );
+  ESP_LOGE( MINITOR_TAG, "Consensus method: %d", network_consensus.method );
+  ESP_LOGE( MINITOR_TAG, "Consensus valid after: %u", network_consensus.valid_after );
+  ESP_LOGE( MINITOR_TAG, "Consensus fresh until: %u", network_consensus.fresh_until );
+  ESP_LOGE( MINITOR_TAG, "Consensus valid until: %u", network_consensus.valid_until );
 
-  ESP_LOGI( TAG, "Previous shared random value:" );
-
-  for ( i = 0; i < 32; i++ ) {
-    ESP_LOGI( TAG, "%x", network_consensus.previous_shared_rand[i] );
-  }
-
-  ESP_LOGI( TAG, "Shared random value:" );
+  ESP_LOGE( MINITOR_TAG, "Previous shared random value:" );
 
   for ( i = 0; i < 32; i++ ) {
-    ESP_LOGI( TAG, "%x", network_consensus.shared_rand[i] );
+    ESP_LOGE( MINITOR_TAG, "%x", network_consensus.previous_shared_rand[i] );
   }
 
-  ESP_LOGI( TAG, "Found %d suitable relays:", suitable_relays.length );
+  ESP_LOGE( MINITOR_TAG, "Shared random value:" );
+
+  for ( i = 0; i < 32; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "%x", network_consensus.shared_rand[i] );
+  }
+
+  ESP_LOGE( MINITOR_TAG, "Found %d suitable relays:", suitable_relays.length );
   node = suitable_relays.head;
 
   while ( node != NULL ) {
-    ESP_LOGI( TAG, "address: %u, or_port: %d, dir_port: %d", node->relay->address, node->relay->or_port, node->relay->dir_port );
-    ESP_LOGI( TAG, "identity:" );
+    ESP_LOGE( MINITOR_TAG, "address: %x, or_port: %d, dir_port: %d", node->relay->address, node->relay->or_port, node->relay->dir_port );
+#ifdef MINITOR_CHUTNEY
+    // override the address if we're using chutney
+    node->relay->address = MINITOR_CHUTNEY_ADDRESS;
+#endif
+    ESP_LOGE( MINITOR_TAG, "identity:" );
 
     for ( i = 0; i < ID_LENGTH; i++ ) {
-      ESP_LOGI( TAG, "%x", node->relay->identity[i] );
+      ESP_LOGE( MINITOR_TAG, "%x", node->relay->identity[i] );
     }
 
-    ESP_LOGI( TAG, "digest:" );
+    ESP_LOGE( MINITOR_TAG, "digest:" );
 
     for ( i = 0; i < ID_LENGTH; i++ ) {
-      ESP_LOGI( TAG, "%x", node->relay->digest[i] );
+      ESP_LOGE( MINITOR_TAG, "%x", node->relay->digest[i] );
     }
 
     node = node->next;
@@ -806,4 +844,1283 @@ void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayLi
 
   // increase the length of the list
   list->length++;
+}
+
+// create two, three hop circuits that can quickly be turned into introduction points
+int d_setup_init_circuits() {
+  DoublyLinkedOnionCircuit* standby_one = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+  DoublyLinkedOnionCircuit* standby_two = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+
+  if ( d_build_onion_circuit( standby_one ) < 0 || d_build_onion_circuit( standby_two ) < 0 ) {
+    free( standby_one );
+    free( standby_two );
+    return -1;
+  }
+
+  return 0;
+}
+
+// create a tor circuit
+int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
+  /* ed25519_key handshake_key; */
+  /* ed25519_key signing_key; */
+  /* ed25519_key identity_key; */
+  /* int ed_result; */
+  /* Sha256 client_identity_sha; */
+  /* Sha256 server_identity_sha; */
+  /* unsigned char rsa_verify[74]; */
+  struct sockaddr_in dest_addr;
+  int sock_fd;
+  WOLFSSL* ssl;
+
+  // init the ed keys and rng
+  /* wc_ed25519_init( &handshake_key ); */
+  /* wc_ed25519_init( &signing_key ); */
+  /* wc_ed25519_init( &identity_key ); */
+  /* wc_ed25519_make_key( &rng, 32, &handshake_key ); */
+  // init the sha objects
+  /* wc_InitSha256( &client_identity_sha ); */
+  /* wc_InitSha256( &server_identity_sha ); */
+
+  // TODO find 3 suitable relays from our directory information
+  linked_circuit->status = CIRCUIT_STANDBY;
+  linked_circuit->rx_queue = xQueueCreate( 3, sizeof( CircuitCommand ) );
+  // TODO shared state like this must be protected by a mutex
+  linked_circuit->circuit.circ_id = ++circ_id_counter;
+
+  // TODO shared state like this must be protected by a mutex
+  if ( suitable_relays.length < 3 ) {
+    return -1;
+  }
+
+  // set the head node of the suitable relays as our head node
+  linked_circuit->circuit.relay_list.head = suitable_relays.head;
+  // set the 3rd node of the suitable relays as our tail node
+  linked_circuit->circuit.relay_list.tail = suitable_relays.head->next->next;
+
+  // set the fourth node of the suiteable relays previous node to NULL
+  if ( suitable_relays.length > 3 ) {
+    suitable_relays.head->next->next->next->previous = NULL;
+  }
+
+  // set the head of the suitable relays to the fourth node
+  suitable_relays.head = suitable_relays.head->next->next->next;
+  // set the tail of our lists next node to NULL
+  linked_circuit->circuit.relay_list.tail->next = NULL;
+  // set the head of our lists previous node to NULL
+  linked_circuit->circuit.relay_list.head->previous = NULL;
+  // set our length to 3
+  linked_circuit->circuit.relay_list.length = 3;
+  // set the suitable relays length to -= 3
+  suitable_relays.length -= 3;
+  // TODO end of mutex
+
+  // get the relay's ntor onion keys
+  if ( d_fetch_descriptor_info( linked_circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
+#endif
+
+    return -1;
+  }
+
+  // connect to the relay over ssl
+  dest_addr.sin_addr.s_addr = linked_circuit->circuit.relay_list.head->relay->address;
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_port = htons( linked_circuit->circuit.relay_list.head->relay->or_port );
+
+  sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
+
+  if ( sock_fd < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to create socket" );
+#endif
+
+    return -1;
+  }
+
+  if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to connect socket" );
+#endif
+
+    return -1;
+  }
+
+  if ( ( ssl = wolfSSL_new( xMinitorWolfSSL_Context ) ) == NULL ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
+#endif
+
+    return -1;
+  }
+
+  wolfSSL_set_verify( ssl, SSL_VERIFY_PEER, d_ignore_ca_callback );
+  wolfSSL_KeepArrays( ssl );
+
+  ESP_LOGE( MINITOR_TAG, "Setting sock_fd" );
+  if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to set ssl fd" );
+#endif
+
+    return -1;
+  }
+
+  if ( wolfSSL_connect( ssl ) != SSL_SUCCESS ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to wolfssl_connect" );
+#endif
+
+    return -1;
+  }
+
+  if ( d_router_handshake( ssl ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to handshake with first relay" );
+#endif
+
+    return -1;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "Finished link handshake" );
+
+  return -1;
+
+  // make a create2 cell
+  /* Cell create2_cell = { */
+    /* .circ_id = linked_circuit->circuit.circ_id, */
+    /* .command = CREATE2, */
+    /* .payload = malloc( sizeof( PayloadCreate2 ) ), */
+  /* }; */
+  /* // set the handshake type and malloc the handshake data */
+  /* ( (PayloadCreate2*)create2_cell.payload )->handshake_type = NTOR; */
+  /* ( (PayloadCreate2*)create2_cell.payload )->handshake_data = malloc( sizeof( unsigned char ) * ( ID_LENGTH + H_LENGTH + G_LENGTH ) ); */
+
+  /* // fill the handhsake data with the correct values */
+  /* for ( i = 0; i < ID_LENGTH; i++ ) { */
+    /* ( (PayloadCreate2*)create2_cell.payload )->handshake_data[i] = linked_circuit->circuit.relay_list.head->relay->identity[i]; */
+  /* } */
+
+  /* for ( j = 0; j < H_LENGTH; i++, j++ ) { */
+    /* ( (PayloadCreate2*)create2_cell.payload )->handshake_data[i] = linked_circuit->circuit.relay_list.head->relay->ntor_onion_key[j]; */
+  /* } */
+
+  /* for ( j = 0; j < G_LENGTH; i++, j++ ) { */
+    /* ( (PayloadCreate2*)create2_cell.payload )->handshake_data[i] = handshake_key.p[i]; */
+  /* } */
+
+  /* unsigned char* packed_create2_cell = pack_and_free( &create2_cell ); */
+
+  /* // send the packed cell */
+  /* if ( wolfSSL_send( ssl, packed_create2_cell, CELL_LEN, 0 ) <= 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to send create2 cell" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* // recv and unpack the created2 cell */
+  /* if ( d_recv_cell( ssl, &return_created2_cell, CIRCID_LEN, NULL ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to recv created2 cell" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* ESP_LOGE( MINITOR_TAG, "circ_id: %d, command: %d, handshake_length: %d", return_created2_cell->circ_id, return_created2_cell->command, ( (PayloadCreated2*)return_created2_cell->payload )->handshake_length ); */
+  /* ESP_LOGE( MINITOR_TAG, "handshake_data:" ); */
+
+  /* for ( i = 0; i < ( (PayloadCreated2*)return_created2_cell->payload )->handshake_length; i++ ) { */
+    /* ESP_LOGE( MINITOR_TAG, "%x", ( (PayloadCreated2*)return_created2_cell->payload )->handshake_data[i] ); */
+  /* } */
+
+  /* shutdown( sock_fd, 0 ); */
+  /* close( sock_fd ); */
+  // generate key_seed and verify AUTH
+
+  // TODO make an extend cell and send it to the second hop
+  // TODO make an extend cell and send it to the thrid hop
+  // TODO spawn a task to block on the tls buffer and put the data into the rx_queue
+  // TODO return the circ_id and tx_queue back to the caller
+  return 0;
+}
+
+int d_router_handshake( WOLFSSL* ssl ) {
+  int i;
+  int wolf_succ;
+  WOLFSSL_X509* peer_cert;
+  Sha256 reusable_sha;
+  unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
+  Hmac tls_secrets_hmac;
+  unsigned char tls_secrets_digest[WC_SHA256_DIGEST_SIZE];
+  Cell unpacked_cell;
+  unsigned char* packed_cell;
+  Sha256 initiator_sha;
+  unsigned char initiator_sha_sum[WC_SHA256_DIGEST_SIZE];
+  Sha256 responder_sha;
+  unsigned char responder_sha_sum[WC_SHA256_DIGEST_SIZE];
+  unsigned char* responder_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 2048 );
+  int responder_rsa_identity_key_der_size;
+  unsigned char* initiator_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 2048 );
+  int initiator_rsa_identity_key_der_size;
+  unsigned char* initiator_rsa_identity_cert_der = malloc( sizeof( unsigned char ) * 2048 );
+  int initiator_rsa_identity_cert_der_size;
+  RsaKey initiator_rsa_auth_key;
+  unsigned char* initiator_rsa_auth_cert_der = malloc( sizeof( unsigned char ) * 2048 );
+  int initiator_rsa_auth_cert_der_size;
+  WC_RNG rng;
+  unsigned char my_address_length;
+  unsigned char* my_address;
+  unsigned char other_address_length;
+  unsigned char* other_address;
+
+  wc_InitSha256( &reusable_sha );
+  wc_InitSha256( &initiator_sha );
+  wc_InitSha256( &responder_sha );
+
+  wc_InitRng( &rng );
+
+  // get the peer cert
+  peer_cert = wolfSSL_get_peer_certificate( ssl );
+
+  if ( peer_cert == NULL ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed get peer cert" );
+#endif
+
+    return -1;
+  }
+
+  for ( i = 0; i < SECRET_LEN; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "master %d: %.2x", i, ssl->arrays->masterSecret[i] );
+  }
+
+  for ( i = 0; i < RAN_LEN; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "client %d: %.2x", i, ssl->arrays->clientRandom[i] );
+  }
+
+  for ( i = 0; i < RAN_LEN; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "server %d: %.2x", i, ssl->arrays->serverRandom[i] );
+  }
+
+  for ( i = 0; i < strlen( "Tor V3 handshake TLS cross-certification" ) + 1; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "magic %d: %.2x", i, "Tor V3 handshake TLS cross-certification"[i] );
+  }
+
+  // set the hmac key to the master secret that was negotiated
+  wc_HmacSetKey( &tls_secrets_hmac, SHA256, ssl->arrays->masterSecret, SECRET_LEN );
+  // update the hmac
+  wc_HmacUpdate( &tls_secrets_hmac, ssl->arrays->clientRandom, RAN_LEN );
+  wc_HmacUpdate( &tls_secrets_hmac, ssl->arrays->serverRandom, RAN_LEN );
+  wc_HmacUpdate( &tls_secrets_hmac, (unsigned char*)"Tor V3 handshake TLS cross-certification", strlen( "Tor V3 handshake TLS cross-certification" ) + 1 );
+  // finalize the hmac
+  wc_HmacFinal( &tls_secrets_hmac, tls_secrets_digest );
+  // free the temporary arrays
+  wolfSSL_FreeArrays( ssl );
+
+  // make a versions cell
+  unpacked_cell.circ_id = 0;
+  unpacked_cell.command = VERSIONS;
+  unpacked_cell.length = 4;
+  unpacked_cell.payload = malloc( sizeof( PayloadVersions ) );
+
+  ( (PayloadVersions*)unpacked_cell.payload )->versions = malloc( sizeof( unsigned short ) * 2 );
+  ( (PayloadVersions*)unpacked_cell.payload )->versions[0] = 3;
+  ( (PayloadVersions*)unpacked_cell.payload )->versions[1] = 4;
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  wc_Sha256Update( &initiator_sha, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length );
+
+  // send the versions cell
+  ESP_LOGE( MINITOR_TAG, "sending versions cell" );
+
+  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send versions cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
+#endif
+
+    return -1;
+  }
+
+  // reset the packed cell
+  free( packed_cell );
+
+  ESP_LOGE( MINITOR_TAG, "recving versions cell" );
+
+  // recv and unpack the versions cell
+  if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, &responder_sha ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv versions cell" );
+#endif
+
+    return -1;
+  }
+
+  for ( i = 0; i < unpacked_cell.length / 2; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "Relay Version: %d", ( (PayloadVersions*)unpacked_cell.payload )->versions[i] );
+  }
+
+  // free the unpacked cell
+  free_cell( &unpacked_cell );
+
+  ESP_LOGE( MINITOR_TAG, "recving certs cell" );
+
+  // recv and unpack the certs cell
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, &responder_sha ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv certs cell" );
+#endif
+
+    return -1;
+  }
+
+  // verify certs
+  if ( d_verify_certs( &unpacked_cell, peer_cert, &responder_rsa_identity_key_der_size, responder_rsa_identity_key_der ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to verify certs" );
+#endif
+
+    return -1;
+  }
+
+  // recv and unpack the auth challenge cell
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, &responder_sha ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv auth challenge cell" );
+#endif
+
+    return -1;
+  }
+
+  // free the unpacked cell
+  free_cell( &unpacked_cell );
+
+  // generate certs for certs cell
+  if ( d_generate_certs( &initiator_rsa_identity_key_der_size, initiator_rsa_identity_key_der, initiator_rsa_identity_cert_der, &initiator_rsa_identity_cert_der_size, initiator_rsa_auth_cert_der, &initiator_rsa_auth_cert_der_size, &initiator_rsa_auth_key, &rng ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to generate rsa certificates" );
+#endif
+
+    return -1;
+  }
+
+  // generate a certs cell of our own
+  unpacked_cell.circ_id = 0;
+  unpacked_cell.command = CERTS;
+  unpacked_cell.length = 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size;
+  unpacked_cell.payload = malloc( sizeof( PayloadCerts ) );
+
+  ( (PayloadCerts*)unpacked_cell.payload )->cert_count = 2;
+  ( (PayloadCerts*)unpacked_cell.payload )->certs = malloc( sizeof( MinitorCert* ) * 2 );
+
+  for ( i = 0; i < ( (PayloadCerts*)unpacked_cell.payload )->cert_count; i++ ) {
+    ( (PayloadCerts*)unpacked_cell.payload )->certs[i] = malloc( sizeof( MinitorCert ) );
+  }
+
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_type = IDENTITY_CERT;
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_length = initiator_rsa_identity_cert_der_size;
+
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert = malloc( sizeof( unsigned char ) * initiator_rsa_identity_cert_der_size );
+
+  memcpy( ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert, initiator_rsa_identity_cert_der, ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_length );
+
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_type = RSA_AUTH_CERT;
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_length = initiator_rsa_auth_cert_der_size;
+
+  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert = malloc( sizeof( unsigned char ) * initiator_rsa_auth_cert_der_size );
+
+  memcpy( ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert, initiator_rsa_auth_cert_der, ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_length );
+
+  free( initiator_rsa_identity_cert_der );
+  free( initiator_rsa_auth_cert_der );
+
+  packed_cell = pack_and_free( &unpacked_cell );
+  wc_Sha256Update( &initiator_sha, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length );
+
+  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send certs cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
+#endif
+
+    return -1;
+  }
+
+  // generate answer for auth challenge
+  unpacked_cell.circ_id = 0;
+  unpacked_cell.command = AUTHENTICATE;
+  unpacked_cell.length = 4 + 352;
+  unpacked_cell.payload = malloc( sizeof( PayloadAuthenticate ) );
+
+  ( (PayloadAuthenticate*)unpacked_cell.payload )->auth_type = AUTH_ONE;
+  ( (PayloadAuthenticate*)unpacked_cell.payload )->auth_length = 352;
+  ( (PayloadAuthenticate*)unpacked_cell.payload )->authentication = malloc( sizeof( AuthenticationOne ) );
+
+  // fill in type
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->type, "AUTH0001", 8 );
+  // create the hash of the clients identity key and fill the authenticate cell with it
+  wc_Sha256Update( &reusable_sha, initiator_rsa_identity_key_der, initiator_rsa_identity_key_der_size );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_id, reusable_sha_sum, 32 );
+  // create the hash of the server's identity key and fill the authenticate cell with it
+  wc_Sha256Update( &reusable_sha, responder_rsa_identity_key_der, responder_rsa_identity_key_der_size );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_id, reusable_sha_sum, 32 );
+  // create the hash of all server cells so far and fill the authenticate cell with it
+  wc_Sha256Final( &responder_sha, responder_sha_sum );
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_log, responder_sha_sum, 32 );
+  // create the hash of all cilent cells so far and fill the authenticate cell with it
+  wc_Sha256Final( &initiator_sha, initiator_sha_sum );
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_log, initiator_sha_sum, 32 );
+  // create a sha hash of the tls cert and copy it in
+  wc_Sha256Update( &reusable_sha, peer_cert->derCert->buffer, peer_cert->derCert->length );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_cert, reusable_sha_sum, 32 );
+  // copy the tls secrets digest in
+  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->tls_secrets, tls_secrets_digest, 32 );
+  // fill the rand array
+  wc_RNG_GenerateBlock( &rng, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->rand, 24 );
+  // create the signature
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->type, 8 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_id, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_id, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_log, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_log, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_cert, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->tls_secrets, 32 );
+  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->rand, 24 );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+
+  wolf_succ = wc_RsaSSL_Sign( reusable_sha_sum, 32, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->signature, 128, &initiator_rsa_auth_key, &rng );
+
+  free( responder_rsa_identity_key_der );;
+  free( initiator_rsa_identity_key_der );;
+
+  if (wolf_succ  < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to sign authenticate cell, error code: %d", wolf_succ );
+#endif
+  }
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send authenticate cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
+#endif
+
+    return -1;
+  }
+
+  free( packed_cell );
+
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
+#endif
+
+    return -1;
+  }
+
+  my_address_length = ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->length;
+  my_address = malloc( sizeof( unsigned char ) * my_address_length );
+  memcpy( my_address, ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address, my_address_length );
+
+  other_address_length = ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->length;
+  other_address = malloc( sizeof( unsigned char ) * other_address_length );
+  memcpy( other_address, ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address, other_address_length );
+
+  free_cell( &unpacked_cell );
+
+  unpacked_cell.circ_id = 0;
+  unpacked_cell.command = NETINFO;
+  unpacked_cell.payload = malloc( sizeof( PayloadNetInfo ) );
+
+  time( &( (PayloadNetInfo*)unpacked_cell.payload )->time );
+  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address = malloc( sizeof( Address ) );
+
+  if ( other_address_length == 4 ) {
+    ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address_type = IPv4;
+  } else {
+    ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address_type = IPv6;
+  }
+
+  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->length = other_address_length;
+  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address = other_address;
+
+  ( (PayloadNetInfo*)unpacked_cell.payload )->address_count = 1;
+  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses = malloc( sizeof( Address* ) );
+  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0] = malloc( sizeof( Address ) );
+
+  if ( my_address_length == 4 ) {
+    ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address_type = IPv4;
+  } else {
+    ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address_type = IPv6;
+  }
+
+  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->length = my_address_length;
+  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address = my_address;
+
+  // this will also free my_address and other_address
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CELL_LEN, 0 ) ) <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send NETINFO cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
+#endif
+
+    return -1;
+  }
+
+  free( packed_cell );
+
+  return 0;
+}
+
+int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der ) {
+  int i;
+  time_t now;
+  WOLFSSL_X509* certificate = NULL;
+  WOLFSSL_X509* link_key_certificate = NULL;
+  unsigned int cert_date;
+  int link_key_count = 0;
+  int identity_count = 0;
+  /* int signing_count = 0; */
+  /* int tls_link_count = 0; */
+  /* int ed_identity_count = 0; */
+  unsigned int idx;
+  int wolf_succ;
+  RsaKey responder_rsa_identity_key;
+  unsigned char* temp_array;
+
+  wc_InitRsaKey( &responder_rsa_identity_key, NULL );
+
+  // verify the certs
+  ESP_LOGE( MINITOR_TAG, "verifying certs cell" );
+
+  time( &now );
+
+  for ( i = 0; i < ( (PayloadCerts*)certs_cell->payload )->cert_count; i++ ) {
+    if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type > IDENTITY_CERT ) {
+      break;
+    }
+
+    certificate = wolfSSL_X509_load_certificate_buffer(
+      ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert,
+      ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length,
+      WOLFSSL_FILETYPE_ASN1 );
+
+    if ( certificate == NULL ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Invalid certificate" );
+#endif
+
+      return -1;
+    }
+
+    cert_date = ud_get_cert_date( certificate->notBefore.data, certificate->notBefore.length );
+
+    if ( cert_date == 0 || cert_date > now ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Invalid not before time" );
+#endif
+
+      return -1;
+    }
+
+    cert_date = ud_get_cert_date( certificate->notAfter.data, certificate->notAfter.length );
+
+    if ( cert_date == 0 || cert_date < now ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Invalid not after time" );
+#endif
+
+      return -1;
+    }
+
+    if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == LINK_KEY ) {
+      link_key_certificate = certificate;
+      link_key_count++;
+
+      if ( link_key_count > 1 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Too many LINK_KEYs" );
+#endif
+
+        return -1;
+      }
+
+      if ( memcmp( certificate->pubKey.buffer, peer_cert->pubKey.buffer, certificate->pubKey.length ) != 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to match LINK_KEY with tls key" );
+#endif
+
+        return -1;
+      }
+    } else if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == IDENTITY_CERT ) {
+      identity_count++;
+
+      if ( identity_count > 1 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Too many IDENTITY_CERTs" );
+#endif
+
+        return -1;
+      }
+
+      idx = 0;
+      wolf_succ = wc_RsaPublicKeyDecode( certificate->pubKey.buffer, &idx, &responder_rsa_identity_key, certificate->pubKey.length );
+      if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to parse IDENTITY_CERT, error code: %d", wolf_succ );
+#endif
+
+        return -1;
+      }
+
+      memcpy( responder_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
+      *responder_rsa_identity_key_der_size = certificate->pubKey.length;
+
+      temp_array = malloc( sizeof( unsigned char ) * 128 );
+
+      // verify the signatures on the keys
+      wolf_succ = wc_RsaSSL_Verify(
+        link_key_certificate->sig.buffer,
+        link_key_certificate->sig.length,
+        temp_array,
+        128,
+        &responder_rsa_identity_key
+      );
+
+      if ( wolf_succ <= 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to verify LINK_KEY signature, error code: %d", wolf_succ );
+#endif
+
+          return -1;
+      }
+
+      wolf_succ = wc_RsaSSL_Verify(
+        certificate->sig.buffer,
+        certificate->sig.length,
+        temp_array,
+        128,
+        &responder_rsa_identity_key
+      );
+
+      free( temp_array );
+
+      if ( wolf_succ <= 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to verify IDENTITY_CERT signature, error code: %d", wolf_succ );
+#endif
+
+          return -1;
+      }
+    }
+
+    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == SIGNING_KEY ) { */
+      /* signing_count++; */
+
+      /* if ( signing_count > 1 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Too many SIGNING_KEYs" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* if ( wc_ed25519_import_public( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 44, 32, &identity_key ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Failed to import identity_key" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* wolf_succ = wc_ed25519_verify_msg( */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
+        /* 64, */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert, */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
+        /* &ed_result, */
+        /* &identity_key */
+      /* ); */
+
+      /* if ( wolf_succ != 0 || ed_result != 1 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Failed to verify SIGNING_KEY signature, error code: %d", wolf_succ ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* if ( wc_ed25519_import_public( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 7, 32, &signing_key ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Failed to import SIGNING_KEY" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+    /* } */
+
+    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == TLS_LINK_CERT ) { */
+      /* tls_link_count++; */
+
+      /* if ( tls_link_count > 1 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Too many TLS_LINK_CERTs" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* wolf_succ = wc_ed25519_verify_msg( */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
+        /* 64, */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert, */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
+        /* &ed_result, */
+        /* &signing_key */
+      /* ); */
+
+      /* if ( wolf_succ < 0 || ed_result < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Failed to verify TLS_LINK_CERT signature" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* wc_Sha256Update( &tls_sha, peer_cert->derCert->buffer, peer_cert->derCert->length ); */
+      /* wc_Sha256Final( &tls_sha, tls_sha_sum ); */
+
+      /* if ( memcmp( tls_sha_sum, ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 7, 32 ) != 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Invalid TLS_LINK_CERT" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+    /* } */
+
+    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == ED_IDENTITY ) { */
+      /* ed_identity_count++; */
+
+      /* if ( ed_identity_count > 1 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "Too many ED_IDENTITYs" ); */
+/* #endif */
+
+        /* return -1; */
+      /* } */
+
+      /* for ( j = 0; j < 32; j++ ) { */
+        /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert[j] != identity_key.p[j] ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "ED_IDENTITY cross_cert does not match the descriptor" ); */
+/* #endif */
+
+          /* return -1; */
+        /* } */
+      /* } */
+
+      /* // TODO possibly need to hash the cell then do rsa verification */
+      /* wolf_succ = wc_RsaSSL_Verify( */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 37, */
+        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert[36], */
+        /* rsa_verify, */
+        /* 37 + 37, */
+        /* &responder_rsa_identity_key */
+      /* ); */
+
+      /* if ( wolf_succ < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+        /* ESP_LOGE( MINITOR_TAG, "failed to verify ED_IDENTITY cross_cert identity, error code: %d", wolf_succ ); */
+/* #endif */
+
+          /* return -1; */
+      /* } */
+    /* } */
+  }
+
+  if ( link_key_count == 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "No LINK_KEYs" );
+#endif
+
+    return -1;
+  }
+
+  if ( identity_count == 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "No IDENTITY_CERTs" );
+#endif
+
+    return -1;
+  }
+
+  /* if ( signing_count == 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "No SIGNING_KEYs" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* if ( tls_link_count == 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "No TLS_LINK_CERTs" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* if ( ed_identity_count == 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "No ED_IDENTITYs" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  wolfSSL_X509_free( certificate );
+  wolfSSL_X509_free( link_key_certificate );
+
+  return 0;
+}
+
+int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng ) {
+  int wolf_succ;
+  RsaKey initiator_rsa_identity_key;
+  Cert initiator_rsa_identity_cert;
+  Cert initiator_rsa_auth_cert;
+  WOLFSSL_X509* certificate = NULL;
+
+  // init the rsa key
+  wc_InitRsaKey( &initiator_rsa_identity_key, NULL );
+  wc_InitRsaKey( initiator_rsa_auth_key, NULL );
+
+  // make and export the identity cert
+  wolf_succ = wc_MakeRsaKey( &initiator_rsa_identity_key, 1024, 65537, rng );
+
+  if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity key, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  /* *initiator_rsa_identity_key_der_size = wc_RsaKeyToPublicDer( &initiator_rsa_identity_key, initiator_rsa_identity_key_der, 2048 ); */
+
+  /* if ( *initiator_rsa_identity_key_der_size < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to export initiator rsa identity key to der buffer, error code: %d", wolf_succ ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  // make and export the auth cert
+  wolf_succ = wc_MakeRsaKey( initiator_rsa_auth_key, 1024, 65537, rng );
+
+  if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to make rsa auth key, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  wc_InitCert( &initiator_rsa_identity_cert );
+
+  // TODO randomize these
+  strncpy( initiator_rsa_identity_cert.subject.country, "US", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.state, "OR", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.locality, "Portland", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.org, "yaSSL", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.unit, "Development", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.commonName, "www.wolfssl.com", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_identity_cert.subject.email, "info@wolfssl.com", CTC_NAME_SIZE );
+
+  *initiator_rsa_identity_cert_der_size = wc_MakeSelfCert( &initiator_rsa_identity_cert, initiator_rsa_identity_cert_der, 2048, &initiator_rsa_identity_key, rng );
+
+  if ( *initiator_rsa_identity_cert_der_size <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity cert der, error code: %d", *initiator_rsa_identity_cert_der_size );
+#endif
+
+    return -1;
+  }
+
+  certificate = wolfSSL_X509_load_certificate_buffer(
+    initiator_rsa_identity_cert_der,
+    *initiator_rsa_identity_cert_der_size,
+    WOLFSSL_FILETYPE_ASN1 );
+
+  if ( certificate == NULL ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Invalid identity certificate" );
+#endif
+
+    return -1;
+  }
+
+  memcpy( initiator_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
+  *initiator_rsa_identity_key_der_size = certificate->pubKey.length;
+
+  wolfSSL_X509_free( certificate );
+
+  wc_InitCert( &initiator_rsa_auth_cert );
+
+  // TODO randomize these
+  strncpy( initiator_rsa_auth_cert.subject.country, "US", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.state, "OR", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.locality, "Portland", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.org, "yaSSL", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.unit, "Development", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.commonName, "www.wolfssl.com", CTC_NAME_SIZE );
+  strncpy( initiator_rsa_auth_cert.subject.email, "info@wolfssl.com", CTC_NAME_SIZE );
+
+  wc_SetIssuerBuffer( &initiator_rsa_auth_cert, initiator_rsa_identity_cert_der, *initiator_rsa_identity_cert_der_size );
+
+  *initiator_rsa_auth_cert_der_size = wc_MakeCert( &initiator_rsa_auth_cert, initiator_rsa_auth_cert_der, 2048, initiator_rsa_auth_key, NULL, rng );
+
+  if ( *initiator_rsa_auth_cert_der_size <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to make rsa auth cert der, error code: %d", *initiator_rsa_auth_cert_der_size );
+#endif
+
+    return -1;
+  }
+
+  wolf_succ = wc_SignCert( *initiator_rsa_auth_cert_der_size, initiator_rsa_auth_cert.sigType, initiator_rsa_auth_cert_der, 2048, &initiator_rsa_identity_key, NULL, rng );
+
+  if ( wolf_succ <= 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to sign rsa auth cert der, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  *initiator_rsa_auth_cert_der_size = wolf_succ;
+
+  return 0;
+}
+
+// destroy a tor circuit
+void v_destroy_onion_circuit( int circ_id ) {
+  // TODO send a destroy cell to the first hop
+  // TODO clean up the rx,tx queues
+  // TODO clean up the tls socket
+  // TODO clean up any circuit specific data
+}
+
+// fetch the descriptor info for the list of relays
+int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
+  const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
+      "Host: 192.168.1.138\r\n"
+      "User-Agent: esp-idf/1.0 esp3266\r\n"
+      "\r\n";
+  char REQUEST[126];
+
+  const char* ntor_onion_key = "\nntor-onion-key ";
+  int ntor_onion_key_found = 0;
+  char ntor_onion_key_64[43] = { 0 };
+  int ntor_onion_key_64_length = 0;
+
+  int i;
+  int retries;
+  int rx_length;
+  int sock_fd;
+  int err;
+  char end_header = 0;
+  // buffer thath holds data returned from the socket
+  char rx_buffer[512];
+  struct sockaddr_in dest_addr;
+
+  // copy the string into editable memory
+  strcpy( REQUEST, REQUEST_CONST );
+
+  // set the address of the directory server
+  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" );
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_port = htons( 7000 );
+
+  DoublyLinkedOnionRelay* node = linked_circuit->circuit.relay_list.head;
+
+  while ( node != NULL ) {
+    retries = 0;
+    end_header = 0;
+    ntor_onion_key_found = 0;
+    ntor_onion_key_64_length = 0;
+
+    while ( retries < 3 ) {
+      // create a socket to access the descriptor
+      sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
+
+      if ( sock_fd < 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
+#endif
+
+        return -1;
+      }
+
+      // connect the socket to the dir server address
+      err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
+
+      if ( err != 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
+#endif
+
+        shutdown( sock_fd, 0 );
+        close( sock_fd );
+
+        if ( retries >= 2 ) {
+          return -1;
+        } else {
+          retries++;
+        }
+      } else {
+        retries = 3;
+      }
+    }
+
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "connected to http socket" );
+#endif
+
+    for ( i = 0; i < 20; i++ ) {
+      if ( node->relay->digest[i] >> 4 < 10 ) {
+        REQUEST[18 + 2 * i] = 48 + ( node->relay->digest[i] >> 4 );
+      } else {
+        REQUEST[18 + 2 * i] = 65 + ( ( node->relay->digest[i] >> 4 ) - 10 );
+      }
+
+      if ( ( node->relay->digest[i] & 0x0f ) < 10  ) {
+        REQUEST[18 + 2 * i + 1] = 48 + ( node->relay->digest[i] & 0x0f );
+      } else {
+        REQUEST[18 + 2 * i + 1] = 65 + ( ( node->relay->digest[i] & 0x0f ) - 10 );
+      }
+    }
+
+    ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
+
+    // send the http request to the dir server
+    err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
+
+    if ( err < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
+#endif
+
+      return -1;
+    }
+
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "sent to http socket" );
+#endif
+
+    // keep reading forever, we will break inside when the transfer is over
+    while ( 1 ) {
+      // recv data from the destination and fill the rx_buffer with the data
+      rx_length = recv( sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
+
+      // if we got less than 0 we encoutered an error
+      if ( rx_length < 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
+#endif
+
+        return -1;
+      // we got 0 bytes back then the connection closed and we're done getting
+      // consensus data
+      } else if ( rx_length == 0 ) {
+        break;
+      }
+
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "recved from http socket" );
+#endif
+
+      // iterate over each byte we got back from the socket recv
+      // NOTE that we can't rely on all the data being there, we
+      // have to treat each byte as though we only have that byte
+      for ( i = 0; i < rx_length; i++ ) {
+        // skip over the http header, when we get two \r\n s in a row we
+        // know we're at the end
+        if ( end_header < 4 ) {
+          // increment end_header whenever we get part of a carrage retrun
+          if ( rx_buffer[i] == '\r' || rx_buffer[i] == '\n' ) {
+            end_header++;
+          // otherwise reset the count
+          } else {
+            end_header = 0;
+          }
+        // if we have 4 end_header we're onto the actual data
+        } else {
+          if ( ntor_onion_key_found != -1 ) {
+            if ( ntor_onion_key_found == strlen( ntor_onion_key ) ) {
+              ntor_onion_key_64[ntor_onion_key_64_length] = rx_buffer[i];
+              ntor_onion_key_64_length++;
+
+              if ( ntor_onion_key_64_length == 43 ) {
+                v_base_64_decode_buffer( node->relay->ntor_onion_key, ntor_onion_key_64, 43 );
+                ntor_onion_key_found = -1;
+              }
+            } else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] ) {
+              ntor_onion_key_found++;
+            } else {
+              ntor_onion_key_found = 0;
+            }
+          }
+        }
+      }
+    }
+
+    node = node->next;
+    shutdown( sock_fd, 0 );
+    close( sock_fd );
+  }
+
+
+  return 0;
+}
+
+// recv a cell from our ssl connection
+int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* sha ) {
+  int i;
+  int rx_length;
+  int rx_length_total = 0;
+  // length of the header may change if we run into a variable length cell
+  int header_length = circ_id_length + 1;
+  // limit will change
+  int rx_limit = header_length;
+  // we want to make it big enough for an entire cell to fit
+  unsigned char rx_buffer[CELL_LEN];
+  // initially just make the packed cell big enough for a standard header,
+  // we'll realloc it later
+  unsigned char* packed_cell = malloc( sizeof( unsigned char ) * header_length );
+  // variable length of the cell if there is one
+  unsigned short length = 0;
+
+  ESP_LOGE( MINITOR_TAG, "starting cell recv" );
+  while ( 1 ) {
+    // read in at most rx_length, rx_length will be either the length of
+    // the cell or the length of the header
+    ESP_LOGE( MINITOR_TAG, "rx_limit: %d, rx_length_total: %d", rx_limit, rx_length_total );
+    if ( rx_limit - rx_length_total > CELL_LEN ) {
+      rx_length = wolfSSL_recv( ssl, rx_buffer, CELL_LEN, 0 );
+    } else {
+      rx_length = wolfSSL_recv( ssl, rx_buffer, rx_limit - rx_length_total, 0 );
+    }
+    ESP_LOGE( MINITOR_TAG, "recvd: %d bytes", rx_length );
+
+    // if rx_length is 0 then we've hit an error and should return -1
+    if ( rx_length <= 0 ) {
+      ESP_LOGE( MINITOR_TAG, "error code: %d", wolfSSL_get_error( ssl, rx_length ) );
+      free( packed_cell );
+      return -1;
+    }
+
+    // put the contents of the rx_buffer into the packed cell and increment the
+    // rx_length_total
+    for ( i = 0; i < rx_length; i++ ) {
+      packed_cell[rx_length_total] = rx_buffer[i];
+      rx_length_total++;
+    }
+
+    // if the total number of bytes we've read in is the fixed header length,
+    // check for a versions variable length cell, if we have one, extend the
+    // header length to include the length field
+    if ( rx_length_total == circ_id_length + 1 ) {
+      if ( packed_cell[circ_id_length] == VERSIONS || packed_cell[circ_id_length] >= VPADDING ) {
+        header_length = circ_id_length + 3;
+        rx_limit = header_length;
+        packed_cell = realloc( packed_cell, header_length );
+      }
+    }
+
+    // if we've reached the header we're ready to realloc and move the rx_limit
+    // to the length of the cell
+    if ( rx_length_total == header_length ) {
+      // set the rx_limit to the length of the cell
+      if ( packed_cell[circ_id_length] == VERSIONS || packed_cell[circ_id_length] >= VPADDING ) {
+        length = ( (unsigned short)packed_cell[circ_id_length + 1] ) << 8;
+        length |= (unsigned short)packed_cell[circ_id_length + 2];
+        ESP_LOGE( MINITOR_TAG, "variable length: %d", length );
+        rx_limit = header_length + length;
+      } else {
+        rx_limit = CELL_LEN;
+      }
+
+      // realloc the cell to the correct size
+      packed_cell = realloc( packed_cell, rx_limit );
+    }
+
+    // if we've hit the rx_limit then we're done recv-ing the packed cell,
+    // the rx_limit will increase after we've recv-ed the header so we
+    // won't hit this prematurely
+    if ( rx_length_total == rx_limit ) {
+      break;
+    }
+  }
+
+  if ( sha != NULL ) {
+    wc_Sha256Update( sha, packed_cell, rx_limit );
+  }
+
+  // set the unpacked cell and return success
+  return unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
+}
+
+unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {
+  int i = 0;
+  struct tm temp_time;
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  for ( i = 0; i < date_size; i++ ) {
+    if ( i < 2 ) {
+      year *= 10;
+      year += date_buffer[i] & 0x0f;
+    } else if ( i < 4 ) {
+      month *= 10;
+      month += date_buffer[i] & 0x0f;
+    } else if ( i < 6 ) {
+      day *= 10;
+      day += date_buffer[i] & 0x0f;
+    } else if ( i < 8 ) {
+      hour *= 10;
+      hour += date_buffer[i] & 0x0f;
+    } else if ( i < 10 ) {
+      minute *= 10;
+      minute += date_buffer[i] & 0x0f;
+    } else if ( i < 12 ) {
+      second *= 10;
+      second += date_buffer[i] & 0x0f;
+    } else {
+      temp_time.tm_year = ( year + 100 );
+      temp_time.tm_mon = month - 1;
+      temp_time.tm_mday = day;
+      temp_time.tm_hour = hour;
+      temp_time.tm_min = minute;
+      temp_time.tm_sec = second;
+
+      return mktime( &temp_time );
+    }
+  }
+
+  return 0;
 }

@@ -1,5 +1,9 @@
+#ifndef MINITOR_CELL_H
+#define MINITOR_CELL_H
+
 #define CELL_LEN 514
 #define CIRCID_LEN 4
+#define LEGACY_CIRCID_LEN 2
 #define KEY_LEN 16
 #define DH_LEN 128
 #define DH_SEC_LEN 40
@@ -120,7 +124,7 @@ typedef enum HandshakeType {
   NTOR = 0x0003,
 } HandshakeType;
 
-typedef enum CertType {
+typedef enum MinitorCertType {
   LINK_KEY = 1,
   IDENTITY_CERT = 2,
   RSA_AUTH_CERT = 3,
@@ -128,7 +132,7 @@ typedef enum CertType {
   TLS_LINK_CERT = 5,
   ED_AUTH_KEY = 6,
   ED_IDENTITY = 7,
-} CertType;
+} MinitorCertType;
 
 typedef enum AuthType {
   AUTH_ONE = 0x0001,
@@ -153,11 +157,11 @@ typedef struct Address {
   unsigned char* address;
 } Address;
 
-typedef struct Cert {
-  CertType cert_type;
+typedef struct MinitorCert {
+  MinitorCertType cert_type;
   unsigned short cert_length;
   unsigned char* cert;
-} Cert;
+} MinitorCert;
 
 // Authentication
 typedef struct AuthenticationOne {
@@ -170,7 +174,7 @@ typedef struct AuthenticationOne {
   unsigned char server_cert[32];
   unsigned char tls_secrets[32];
   unsigned char rand[24];
-  unsigned char* signature;
+  unsigned char signature[128];
 } AuthenticationOne;
 
 typedef struct AuthenticationThree {
@@ -185,7 +189,7 @@ typedef struct AuthenticationThree {
   unsigned char server_cert[32];
   unsigned char tls_secrets[32];
   unsigned char rand[24];
-  unsigned char* signature;
+  unsigned char signature[128];
 } AuthenticationThree;
 
 // Payload
@@ -261,7 +265,7 @@ typedef struct PayloadVpadding {
 
 typedef struct PayloadCerts {
   unsigned char cert_count;
-  Cert** certs;
+  MinitorCert** certs;
 } PayloadCerts;
 
 typedef struct PayloadAuthChallenge {
@@ -471,7 +475,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell );
 
 void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length );
 
-Cell* unpack_and_free( unsigned char* packed_cell );
+int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length );
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length );
 
@@ -494,3 +498,5 @@ void pack_two_bytes( unsigned char** packed_cell, unsigned short value );
 void pack_buffer( unsigned char** packed_cell, unsigned char* buffer, int length );
 
 void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int length );
+
+#endif

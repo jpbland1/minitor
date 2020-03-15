@@ -1,6 +1,6 @@
 #include <stdlib.h>
 /* #include "./config.h" */
-#include "./cell.h"
+#include "../include/cell.h"
 
 //
 // PACK CELL
@@ -15,7 +15,11 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
     // TODO cells must calculate their length before we get to this point
     // its easier to  keep track of the length as the cell is constructed
     // than to calculate it at the end
-    packed_cell = malloc( sizeof( unsigned char ) * ( CIRCID_LEN + 3 + unpacked_cell->length ) );
+    if ( unpacked_cell->command == VERSIONS ) {
+      packed_cell = malloc( sizeof( unsigned char ) * ( LEGACY_CIRCID_LEN + 3 + unpacked_cell->length ) );
+    } else {
+      packed_cell = malloc( sizeof( unsigned char ) * ( CIRCID_LEN + 3 + unpacked_cell->length ) );
+    }
   } else {
     packed_cell = malloc( sizeof( unsigned char ) * CELL_LEN );
   }
@@ -23,7 +27,11 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
   // mark the start so we can return it
   packed_cell_start = packed_cell;
   // pack the circ_id
-  pack_four_bytes( &packed_cell, unpacked_cell->circ_id );
+  if ( unpacked_cell->command == VERSIONS ) {
+    pack_two_bytes( &packed_cell, ( unsigned short )unpacked_cell->circ_id );
+  } else {
+    pack_four_bytes( &packed_cell, unpacked_cell->circ_id );
+  }
   // pack the command
   *packed_cell = unpacked_cell->command;
   packed_cell += 1;
@@ -222,7 +230,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
       // pack the auth type
       pack_two_bytes(
         &packed_cell,
-        ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_type
+        ( unsigned short )( (PayloadAuthenticate*)unpacked_cell->payload )->auth_type
         );
       // pack the auth length
       pack_two_bytes(
@@ -285,7 +293,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
           pack_buffer(
             &packed_cell,
             ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature,
-            ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_length - ( 8 + 32 * 6 + 24 )
+            128
             );
 
 
@@ -723,13 +731,16 @@ void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int
 //
 // UNPACK CELL
 //
-Cell* unpack_and_free( unsigned char* packed_cell ) {
+int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length ) {
   int i;
   unsigned char* packed_cell_start = packed_cell;
-  Cell* unpacked_cell = malloc( sizeof( Cell ) );
 
   // get the circ_id out of the packed cell, circ_id is 0th - 3rd byte
-  unpacked_cell->circ_id = unpack_four_bytes( &packed_cell );
+  if ( circ_id_length == CIRCID_LEN ) {
+    unpacked_cell->circ_id = unpack_four_bytes( &packed_cell );
+  } else if ( circ_id_length == LEGACY_CIRCID_LEN ) {
+    unpacked_cell->circ_id = ( unsigned int )unpack_two_bytes( &packed_cell );
+  }
 
   // get the command out of the packed cell, 4th byte
   unpacked_cell->command = *packed_cell;
@@ -924,12 +935,12 @@ Cell* unpack_and_free( unsigned char* packed_cell ) {
       ( (PayloadCerts*)unpacked_cell->payload )->cert_count = *packed_cell;
       packed_cell += 1;
       // create buffer for certs array
-      ( (PayloadCerts*)unpacked_cell->payload )->certs = malloc( sizeof( Cert* ) * ( (PayloadCerts*)unpacked_cell->payload )->cert_count );
+      ( (PayloadCerts*)unpacked_cell->payload )->certs = malloc( sizeof( MinitorCert* ) * ( (PayloadCerts*)unpacked_cell->payload )->cert_count );
 
       // unpack all the certs
       for ( i = 0; i < ( (PayloadCerts*)unpacked_cell->payload )->cert_count; i++ ) {
         // create a buffer to hold the cert
-        ( (PayloadCerts*)unpacked_cell->payload )->certs[i] = malloc( sizeof( Cert ) );
+        ( (PayloadCerts*)unpacked_cell->payload )->certs[i] = malloc( sizeof( MinitorCert ) );
         // unpack the cert type
         ( (PayloadCerts*)unpacked_cell->payload )->certs[i]->cert_type = *packed_cell;
         packed_cell += 1;
@@ -976,11 +987,9 @@ Cell* unpack_and_free( unsigned char* packed_cell ) {
       break;
   }
 
-  #ifndef TEST
-    free( packed_cell_start );
-  #endif
+  free( packed_cell_start );
 
-  return unpacked_cell;
+  return 0;
 }
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length ) {
@@ -1323,7 +1332,7 @@ unsigned short unpack_two_bytes( unsigned char** packed_cell ) {
   // shorts are small endian so need to move the first byte up one position and the second can just be ored
   unsigned short result = ( (unsigned short) **packed_cell ) << 8;
   *packed_cell += 1;
-  result |= (unsigned int) **packed_cell;
+  result |= (unsigned short) **packed_cell;
   *packed_cell += 1;
 
   return result;
@@ -1448,16 +1457,17 @@ void free_cell( Cell* unpacked_cell ) {
       free( ( (PayloadAuthChallenge*)unpacked_cell->payload )->methods );
 
       break;
+    // possibly nothing to do, may need to use dynamic signature
     case AUTHENTICATE:
       switch ( ( (PayloadAuthenticate*)unpacked_cell->payload )->auth_type ) {
         case AUTH_ONE:
           // free the signature
-          free( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature );
+          /* free( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature ); */
 
           break;
         case AUTH_THREE:
           // free the signature
-          free( ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature );
+          /* free( ( (AuthenticationThree*)( (PayloadAuthenticate*)unpacked_cell->payload )->authentication )->signature ); */
 
           break;
       }
