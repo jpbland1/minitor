@@ -13,14 +13,29 @@
 
 typedef struct ed25519_key ed25519_key;
 
+#define SERVER_STR "Server"
+#define SERVER_STR_LENGTH 6
+#define PROTOID "ntor-curve25519-sha256-1"
+#define PROTOID_LENGTH 24
+#define PROTOID_MAC PROTOID ":mac"
+#define PROTOID_MAC_LENGTH PROTOID_LENGTH + 4
+#define PROTOID_KEY PROTOID ":key_extract"
+#define PROTOID_KEY_LENGTH PROTOID_LENGTH + 12
+#define PROTOID_VERIFY PROTOID ":verify"
+#define PROTOID_VERIFY_LENGTH PROTOID_LENGTH + 7
+#define PROTOID_EXPAND PROTOID ":key_expand"
+#define PROTOID_EXPAND_LENGTH PROTOID_LENGTH + 11
 #define H_LENGTH 32
 #define ID_LENGTH 20
 #define G_LENGTH 32
+#define SECRET_INPUT_LENGTH 32 * 5 + ID_LENGTH + PROTOID_LENGTH
+#define AUTH_INPUT_LENGTH 32 * 4 + ID_LENGTH + PROTOID_LENGTH + SERVER_STR_LENGTH
 
 typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
 
 typedef enum CircuitStatus {
+  CIRCUIT_BUILDING,
   CIRCUIT_STANDBY,
 } CircuitStatus;
 
@@ -37,6 +52,10 @@ typedef struct OnionRelay {
   unsigned char identity[ID_LENGTH];
   unsigned char digest[ID_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
+  unsigned char forward_digest[HASH_LEN];
+  unsigned char backward_digest[HASH_LEN];
+  unsigned char forward_key[KEY_LEN];
+  unsigned char backward_key[KEY_LEN];
   ed25519_key* ed_identity_key;
   unsigned int address;
   short or_port;
@@ -97,6 +116,7 @@ void v_base_64_decode_buffer( unsigned char* destination, char* source, int sour
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 int d_setup_init_circuits();
 int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit );
+int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit );
 int d_router_handshake( WOLFSSL* ssl );
 int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der );
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );

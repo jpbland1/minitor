@@ -121,7 +121,7 @@ typedef enum AddressLength {
 
 typedef enum HandshakeType {
   TAP = 0x0000,
-  NTOR = 0x0003,
+  NTOR = 0x0002,
 } HandshakeType;
 
 typedef enum MinitorCertType {
