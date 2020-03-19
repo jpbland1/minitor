@@ -1681,129 +1681,6 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
       }
     }
 
-    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == SIGNING_KEY ) { */
-      /* signing_count++; */
-
-      /* if ( signing_count > 1 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Too many SIGNING_KEYs" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* if ( wc_ed25519_import_public( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 44, 32, &identity_key ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Failed to import identity_key" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* wolf_succ = wc_ed25519_verify_msg( */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
-        /* 64, */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert, */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
-        /* &ed_result, */
-        /* &identity_key */
-      /* ); */
-
-      /* if ( wolf_succ != 0 || ed_result != 1 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Failed to verify SIGNING_KEY signature, error code: %d", wolf_succ ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* if ( wc_ed25519_import_public( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 7, 32, &signing_key ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Failed to import SIGNING_KEY" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-    /* } */
-
-    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == TLS_LINK_CERT ) { */
-      /* tls_link_count++; */
-
-      /* if ( tls_link_count > 1 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Too many TLS_LINK_CERTs" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* wolf_succ = wc_ed25519_verify_msg( */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
-        /* 64, */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert, */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length - 64, */
-        /* &ed_result, */
-        /* &signing_key */
-      /* ); */
-
-      /* if ( wolf_succ < 0 || ed_result < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Failed to verify TLS_LINK_CERT signature" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* wc_Sha256Update( &tls_sha, peer_cert->derCert->buffer, peer_cert->derCert->length ); */
-      /* wc_Sha256Final( &tls_sha, tls_sha_sum ); */
-
-      /* if ( memcmp( tls_sha_sum, ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 7, 32 ) != 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Invalid TLS_LINK_CERT" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-    /* } */
-
-    /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == ED_IDENTITY ) { */
-      /* ed_identity_count++; */
-
-      /* if ( ed_identity_count > 1 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "Too many ED_IDENTITYs" ); */
-/* #endif */
-
-        /* return -1; */
-      /* } */
-
-      /* for ( j = 0; j < 32; j++ ) { */
-        /* if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert[j] != identity_key.p[j] ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "ED_IDENTITY cross_cert does not match the descriptor" ); */
-/* #endif */
-
-          /* return -1; */
-        /* } */
-      /* } */
-
-      /* // TODO possibly need to hash the cell then do rsa verification */
-      /* wolf_succ = wc_RsaSSL_Verify( */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert + 37, */
-        /* ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert[36], */
-        /* rsa_verify, */
-        /* 37 + 37, */
-        /* &responder_rsa_identity_key */
-      /* ); */
-
-      /* if ( wolf_succ < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-        /* ESP_LOGE( MINITOR_TAG, "failed to verify ED_IDENTITY cross_cert identity, error code: %d", wolf_succ ); */
-/* #endif */
-
-          /* return -1; */
-      /* } */
-    /* } */
   }
 
   if ( link_key_count == 0 ) {
@@ -1821,30 +1698,6 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
 
     return -1;
   }
-
-  /* if ( signing_count == 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "No SIGNING_KEYs" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
-
-  /* if ( tls_link_count == 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "No TLS_LINK_CERTs" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
-
-  /* if ( ed_identity_count == 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "No ED_IDENTITYs" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
 
   wolfSSL_X509_free( certificate );
   wolfSSL_X509_free( link_key_certificate );
@@ -1873,16 +1726,6 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 
     return -1;
   }
-
-  /* *initiator_rsa_identity_key_der_size = wc_RsaKeyToPublicDer( &initiator_rsa_identity_key, initiator_rsa_identity_key_der, 2048 ); */
-
-  /* if ( *initiator_rsa_identity_key_der_size < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "Failed to export initiator rsa identity key to der buffer, error code: %d", wolf_succ ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
 
   // make and export the auth cert
   wolf_succ = wc_MakeRsaKey( initiator_rsa_auth_key, 1024, 65537, rng );
