@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include "esp_system.h"
 /* #include "./config.h" */
 #include "../include/cell.h"
 
@@ -381,7 +382,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
     // relay and relay early cells need random padding
     if ( unpacked_cell->command == RELAY || unpacked_cell->command == RELAY_EARLY ) {
       while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) {
-        *packed_cell = (unsigned char)rand();
+        *packed_cell = (unsigned char)esp_random();
         packed_cell += 1;
       }
     } else {
@@ -540,7 +541,6 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
         ( (RelayPayloadExtend2*)payload )->handshake_data,
         ( (RelayPayloadExtend2*)payload )->handshake_length
         );
-
 
       break;
     // TODO we shouldn't need to pack a relay extended 2 cell since we're not running a relay

@@ -13,21 +13,7 @@
 #include "lwip/sys.h"
 #include "lwip/netdb.h"
 
-#include "user_settings.h"
-#include "wolfssl/ssl.h"
-#include "wolfssl/internal.h"
-#include "wolfssl/wolfcrypt/curve25519.h"
-#include "wolfssl/wolfcrypt/ed25519.h"
-#include "wolfssl/wolfcrypt/asn.h"
-#include "wolfssl/wolfcrypt/asn_public.h"
-#include "wolfssl/wolfcrypt/rsa.h"
-#include "wolfssl/wolfcrypt/sha256.h"
-#include "wolfssl/wolfcrypt/hmac.h"
-#include "wolfssl/wolfcrypt/error-crypt.h"
-
-#include "config.h"
 #include "minitor.h"
-#include "cell.h"
 
 #define WEB_SERVER "192.168.1.138"
 #define WEB_PORT 7001
@@ -133,7 +119,8 @@ int v_minitor_INIT() {
 // fetch the network consensus so we can correctly create circuits
 int d_fetch_consensus_info() {
   const char* REQUEST = "GET /tor/status-vote/current/consensus HTTP/1.0\r\n"
-      "Host: 192.168.1.138\r\n"
+      /* "Host: 192.168.1.138\r\n" */
+      "Host: 192.168.1.16\r\n"
       "User-Agent: esp-idf/1.0 esp3266\r\n"
       "\r\n";
   // we will have multiple threads trying to read the network consensus so we can't
@@ -243,7 +230,8 @@ int d_fetch_consensus_info() {
   struct sockaddr_in dest_addr;
 
   // set the address of the directory server
-  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" );
+  /* dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" ); */
+  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.16" );
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons( 7000 );
 
@@ -951,7 +939,10 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
-  if ( d_router_handshake( ssl ) < 0 ) {
+  // attach the ssl object to the circuit
+  linked_circuit->circuit.ssl = ssl;
+
+  if ( d_router_handshake( linked_circuit->circuit.ssl ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to handshake with first relay" );
 #endif
@@ -959,46 +950,230 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
-  if ( d_router_create2( ssl, &linked_circuit->circuit ) < 0 ) {
+  if ( d_router_create2( &linked_circuit->circuit ) < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create2 with first relay" );
+    ESP_LOGE( MINITOR_TAG, "Failed to CREATE2 with first relay" );
 #endif
 
     return -1;
   }
 
-  // TODO make an extend cell and send it to the second hop
-  // TODO make an extend cell and send it to the thrid hop
+
+  // make an extend cell and send it to the second hop
+  if ( d_router_extend2( &linked_circuit->circuit, 1 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with second relay" );
+#endif
+
+    return -1;
+  }
+
+  // make an extend cell and send it to the thrid hop
+  if ( d_router_extend2( &linked_circuit->circuit, 2 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with third relay" );
+#endif
+
+    return -1;
+  }
+
   // TODO spawn a task to block on the tls buffer and put the data into the rx_queue
   // TODO return the circ_id and tx_queue back to the caller
 
   return -1;
 }
 
-int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
+int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   int i;
   int wolf_succ;
-  unsigned int idx;
+  WC_RNG rng;
+  DoublyLinkedOnionRelay* relay;
+  DoublyLinkedOnionRelay* target_relay;
+  Cell unpacked_cell;
+  unsigned char* packed_cell;
+  curve25519_key extend2_handshake_key;
+  unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
+  unsigned char zeros[4] = { 0 };
+  curve25519_key extended2_handshake_public_key;
+  curve25519_key ntor_onion_key;
+
+  wc_curve25519_init( &extend2_handshake_key );
+  wc_curve25519_init( &extended2_handshake_public_key );
+  wc_curve25519_init( &ntor_onion_key );
+  wc_InitRng( &rng );
+
+  wolf_succ = wc_curve25519_make_key( &rng, 32, &extend2_handshake_key );
+
+  if ( wolf_succ != 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to make extend2_handshake_key, error code %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  relay = onion_circuit->relay_list.head;
+
+  for ( i = 0; i < node_index; i++ ) {
+    relay = relay->next;
+  }
+
+  target_relay = relay;
+
+  // TODO construct link specifiers
+  unpacked_cell.circ_id = onion_circuit->circ_id;
+  unpacked_cell.command = RELAY_EARLY;
+  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+
+  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_EXTEND2;
+  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->length = 35 + ID_LENGTH + H_LENGTH + G_LENGTH;
+  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadExtend2 ) );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->specifier_count = 2;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers = malloc( sizeof( LinkSpecifier* ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->specifier_count );
+
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0] = malloc( sizeof( LinkSpecifier ) );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->type = IPv4Link;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->length = 6;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->length );
+
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[3] = (unsigned char)( target_relay->relay->address >> 24 );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[2] = (unsigned char)( target_relay->relay->address >> 16 );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[1] = (unsigned char)( target_relay->relay->address >> 8 );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[0] = (unsigned char)target_relay->relay->address;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[4] = (unsigned char)target_relay->relay->or_port >> 8;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[5] = (unsigned char)target_relay->relay->or_port;
+
+
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1] = malloc( sizeof( LinkSpecifier ) );
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->type = LEGACYLink;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->length = ID_LENGTH;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->specifier = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->length );
+
+  memcpy( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->specifier, target_relay->relay->identity, ID_LENGTH );
+
+  // construct our side of the handshake
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_type = NTOR;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
+  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length );
+
+  if ( d_ntor_handshake_start( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
+#endif
+
+    return -1;
+  }
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  // TODO update the running digest
+  relay = target_relay->previous;
+
+  wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
+  wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest );
+
+  memcpy( packed_cell + 10, temp_digest, 4 );
+
+  // TODO encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
+  for ( i = node_index - 1; i >= 0; i-- ) {
+    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    relay = relay->previous;
+  }
+
+  // TODO send the RELAY_EARLY to the first node in the circuit
+  if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
+#endif
+
+    return -1;
+  }
+
+  free( packed_cell );
+
+  // TODO recv EXTENDED2 cell and perform the second half of the handshake
+  if ( d_recv_packed_cell( onion_circuit->ssl, &packed_cell, CIRCID_LEN ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_EXTENDED2 cell" );
+#endif
+
+    return -1;
+  }
+
+  relay = onion_circuit->relay_list.head;
+
+  for ( i = 0; i < node_index; i++ ) {
+    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_backward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    relay = relay->next;
+  }
+
+  if ( packed_cell[6] != 0 || packed_cell[7] != 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Relay recognized cell was not set to 0" );
+#endif
+
+    return -1;
+  }
+
+  relay = target_relay->previous;
+
+  wc_ShaUpdate( &relay->relay->running_sha_backward, packed_cell + 5, 5 );
+  wc_ShaUpdate( &relay->relay->running_sha_backward, zeros, 4 );
+  wc_ShaUpdate( &relay->relay->running_sha_backward, packed_cell + 14, PAYLOAD_LEN - 9 );
+  wc_ShaGetHash( &relay->relay->running_sha_backward, temp_digest );
+
+  if ( memcmp( packed_cell + 10, temp_digest, 4 ) != 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to verify the digest" );
+#endif
+
+    return -1;
+  }
+
+  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
+
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
+#endif
+
+    return -1;
+  }
+
+  free_cell( &unpacked_cell );
+
+  return 0;
+}
+
+int d_router_create2( OnionCircuit* onion_circuit ) {
+  int wolf_succ;
   WC_RNG rng;
   Cell unpacked_cell;
   unsigned char* packed_cell;
   curve25519_key create2_handshake_key;
-  curve25519_key created2_handshake_public_key;
-  curve25519_key ntor_onion_key;
-  unsigned char* secret_input = malloc( sizeof( unsigned char ) * SECRET_INPUT_LENGTH );
-  unsigned char* working_secret_input = secret_input;
-  unsigned char* auth_input = malloc( sizeof( unsigned char ) * AUTH_INPUT_LENGTH );
-  unsigned char* working_auth_input = auth_input;
-  Hmac reusable_hmac;
-  unsigned char reusable_hmac_digest[WC_SHA256_DIGEST_SIZE];
-  unsigned char key_seed[WC_SHA256_DIGEST_SIZE];
-  unsigned char expand_i;
-  int bytes_written;
-  int bytes_remaining;
 
   wc_curve25519_init( &create2_handshake_key );
-  wc_curve25519_init( &created2_handshake_public_key );
-  wc_curve25519_init( &ntor_onion_key );
   wc_InitRng( &rng );
 
   wolf_succ = wc_curve25519_make_key( &rng, 32, &create2_handshake_key );
@@ -1006,17 +1181,6 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
   if ( wolf_succ != 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to make create2_handshake_key, error code %d", wolf_succ );
-#endif
-
-    return -1;
-  }
-
-  /* wolf_succ = wc_curve25519_import_public( onion_circuit->relay_list.head->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key ); */
-  wolf_succ = wc_curve25519_import_public_ex( onion_circuit->relay_list.head->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
-
-  if ( wolf_succ < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to import ntor onion public key, error code %d", wolf_succ );
 #endif
 
     return -1;
@@ -1030,14 +1194,10 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
   ( (PayloadCreate2*)unpacked_cell.payload )->handshake_type = NTOR;
   ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
   ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length );
-  memcpy( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head->relay->identity, ID_LENGTH );
-  memcpy( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data + ID_LENGTH, onion_circuit->relay_list.head->relay->ntor_onion_key, H_LENGTH );
-  idx = 32;
-  wolf_succ = wc_curve25519_export_public_ex( &create2_handshake_key, ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data + ID_LENGTH + H_LENGTH, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ != 0 ) {
+  if ( d_ntor_handshake_start( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head->relay, &create2_handshake_key ) < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into unpacked_cell, error code: %d", wolf_succ );
+    ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into unpacked_cell" );
 #endif
 
     return -1;
@@ -1045,9 +1205,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  ESP_LOGE( MINITOR_TAG, "Sending CREATE2 cell" );
-
-  if ( wolfSSL_send( ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+  if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send CREATE2 cell" );
 #endif
@@ -1057,9 +1215,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
 
   free( packed_cell );
 
-  ESP_LOGE( MINITOR_TAG, "Recving CREATED2 cell" );
-
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL ) < 0 ) {
+  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv CREATED2 cell" );
 #endif
@@ -1067,11 +1223,83 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
     return -1;
   }
 
-  wolf_succ = wc_curve25519_import_public_ex( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, G_LENGTH, &created2_handshake_public_key, EC25519_LITTLE_ENDIAN );
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head->relay, &create2_handshake_key ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to finish CREATED2 handshake" );
+#endif
+
+    return -1;
+  }
+
+  wc_FreeRng( &rng );
+
+  free_cell( &unpacked_cell );
+
+  return 0;
+}
+
+int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key ) {
+  int wolf_succ;
+  unsigned int idx;
+
+  memcpy( handshake_data, relay->identity, ID_LENGTH );
+  memcpy( handshake_data + ID_LENGTH, relay->ntor_onion_key, H_LENGTH );
+
+  idx = 32;
+  wolf_succ = wc_curve25519_export_public_ex( key, handshake_data + ID_LENGTH + H_LENGTH, &idx, EC25519_LITTLE_ENDIAN );
+
+  if ( wolf_succ != 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to export curve25519_key into handshake_data, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key ) {
+  int i;
+  int wolf_succ;
+  unsigned int idx;
+  curve25519_key responder_handshake_public_key;
+  curve25519_key ntor_onion_key;
+  unsigned char* secret_input = malloc( sizeof( unsigned char ) * SECRET_INPUT_LENGTH );
+  unsigned char* working_secret_input = secret_input;
+  unsigned char* auth_input = malloc( sizeof( unsigned char ) * AUTH_INPUT_LENGTH );
+  unsigned char* working_auth_input = auth_input;
+  Hmac reusable_hmac;
+  unsigned char reusable_hmac_digest[WC_SHA256_DIGEST_SIZE];
+  unsigned char reusable_aes_key[KEY_LEN];
+  unsigned char aes_iv[16] = { 0 };
+  unsigned char key_seed[WC_SHA256_DIGEST_SIZE];
+  unsigned char expand_i;
+  int bytes_written;
+  int bytes_remaining;
+
+  wc_curve25519_init( &responder_handshake_public_key );
+  wc_curve25519_init( &ntor_onion_key );
+  wc_InitSha( &relay->running_sha_forward );
+  wc_InitSha( &relay->running_sha_backward );
+  wc_AesInit( &relay->aes_forward, NULL, INVALID_DEVID );
+  wc_AesInit( &relay->aes_backward, NULL, INVALID_DEVID );
+
+  wolf_succ = wc_curve25519_import_public_ex( handshake_data, G_LENGTH, &responder_handshake_public_key, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to import CREATED2 public key, error code %d", wolf_succ );
+    ESP_LOGE( MINITOR_TAG, "Failed to import responder public key, error code %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  wolf_succ = wc_curve25519_import_public_ex( relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
+
+  if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to import ntor onion public key, error code %d", wolf_succ );
 #endif
 
     return -1;
@@ -1079,7 +1307,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
 
   // create secret_input
   idx = 32;
-  wolf_succ = wc_curve25519_shared_secret_ex( &create2_handshake_key, &created2_handshake_public_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_shared_secret_ex( key, &responder_handshake_public_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 || idx != 32 ) {
 #ifdef DEBUG_MINITOR
@@ -1092,7 +1320,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
   working_secret_input += 32;
 
   idx = 32;
-  wolf_succ = wc_curve25519_shared_secret_ex( &create2_handshake_key, &ntor_onion_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_shared_secret_ex( key, &ntor_onion_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 || idx != 32 ) {
 #ifdef DEBUG_MINITOR
@@ -1104,18 +1332,18 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
 
   working_secret_input += 32;
 
-  memcpy( working_secret_input, onion_circuit->relay_list.head->relay->identity, ID_LENGTH );
+  memcpy( working_secret_input, relay->identity, ID_LENGTH );
   working_secret_input += ID_LENGTH;
 
-  memcpy( working_secret_input, onion_circuit->relay_list.head->relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_secret_input, relay->ntor_onion_key, H_LENGTH );
   working_secret_input += H_LENGTH;
 
   idx = 32;
-  wolf_succ = wc_curve25519_export_public_ex( &create2_handshake_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_export_public_ex( key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ != 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into working_secret_input, error code: %d", wolf_succ );
+    ESP_LOGE( MINITOR_TAG, "Failed to export handshake key into working_secret_input, error code: %d", wolf_succ );
 #endif
 
     return -1;
@@ -1123,7 +1351,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
 
   working_secret_input += 32;
 
-  memcpy( working_secret_input, ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, G_LENGTH );
+  memcpy( working_secret_input, handshake_data, G_LENGTH );
   working_secret_input += G_LENGTH;
 
   memcpy( working_secret_input, PROTOID, PROTOID_LENGTH );
@@ -1134,21 +1362,21 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
   wc_HmacFinal( &reusable_hmac, working_auth_input );
   working_auth_input += WC_SHA256_DIGEST_SIZE;
 
-  memcpy( working_auth_input, onion_circuit->relay_list.head->relay->identity, ID_LENGTH );
+  memcpy( working_auth_input, relay->identity, ID_LENGTH );
   working_auth_input += ID_LENGTH;
 
-  memcpy( working_auth_input, onion_circuit->relay_list.head->relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_auth_input, relay->ntor_onion_key, H_LENGTH );
   working_auth_input += H_LENGTH;
 
-  memcpy( working_auth_input, ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, G_LENGTH );
+  memcpy( working_auth_input, handshake_data, G_LENGTH );
   working_auth_input += G_LENGTH;
 
   idx = 32;
-  wolf_succ = wc_curve25519_export_public_ex( &create2_handshake_key, working_auth_input, &idx, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_export_public_ex( key, working_auth_input, &idx, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ != 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into working_auth_input, error code: %d", wolf_succ );
+    ESP_LOGE( MINITOR_TAG, "Failed to export handshake key into working_auth_input, error code: %d", wolf_succ );
 #endif
 
     return -1;
@@ -1165,7 +1393,7 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
   wc_HmacUpdate( &reusable_hmac, auth_input, AUTH_INPUT_LENGTH );
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
-  if ( memcmp( reusable_hmac_digest, ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data + G_LENGTH, WC_SHA256_DIGEST_SIZE ) != 0 ) {
+  if ( memcmp( reusable_hmac_digest, handshake_data + G_LENGTH, WC_SHA256_DIGEST_SIZE ) != 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to match AUTH with our own digest" );
 #endif
@@ -1173,48 +1401,59 @@ int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit ) {
     return -1;
   }
 
+  // create the key seed
   wc_HmacSetKey( &reusable_hmac, SHA256, (unsigned char*)PROTOID_KEY, PROTOID_KEY_LENGTH );
   wc_HmacUpdate( &reusable_hmac, secret_input, SECRET_INPUT_LENGTH );
   wc_HmacFinal( &reusable_hmac, key_seed );
 
+  // generate the first 32 bytes
   wc_HmacSetKey( &reusable_hmac, SHA256, key_seed, WC_SHA256_DIGEST_SIZE );
   wc_HmacUpdate( &reusable_hmac, (unsigned char*)PROTOID_EXPAND, PROTOID_EXPAND_LENGTH );
   expand_i = 1;
   wc_HmacUpdate( &reusable_hmac, &expand_i, 1 );
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
-  memcpy( onion_circuit->relay_list.head->relay->forward_digest, reusable_hmac_digest, HASH_LEN );
-  memcpy( onion_circuit->relay_list.head->relay->backward_digest, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
+  // seed the forward sha
+  wc_ShaUpdate( &relay->running_sha_forward, reusable_hmac_digest, HASH_LEN );
+  // seed the first 16 bytes of backwards sha
+  wc_ShaUpdate( &relay->running_sha_backward, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
+  // mark how many bytes we've written to the backwards sha and how many remain
   bytes_written = WC_SHA256_DIGEST_SIZE - HASH_LEN;
   bytes_remaining = HASH_LEN - bytes_written;
 
+  // generate the second 32 bytes
   wc_HmacUpdate( &reusable_hmac, reusable_hmac_digest, WC_SHA256_DIGEST_SIZE );
   wc_HmacUpdate( &reusable_hmac, (unsigned char*)PROTOID_EXPAND, PROTOID_EXPAND_LENGTH );
   expand_i = 2;
   wc_HmacUpdate( &reusable_hmac, &expand_i, 1 );
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
-  memcpy( onion_circuit->relay_list.head->relay->backward_digest + bytes_written, reusable_hmac_digest, bytes_remaining );
-  memcpy( onion_circuit->relay_list.head->relay->forward_key, reusable_hmac_digest + bytes_remaining, KEY_LEN );
-  memcpy( onion_circuit->relay_list.head->relay->backward_key, reusable_hmac_digest + bytes_remaining + KEY_LEN, WC_SHA256_DIGEST_SIZE - bytes_remaining - KEY_LEN );
+  // seed the last 8 bytes of backward sha
+  wc_ShaUpdate( &relay->running_sha_backward, reusable_hmac_digest, bytes_remaining );
+  // set the forward aes key
+  memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining, KEY_LEN );
+  wc_AesSetKeyDirect( &relay->aes_forward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+  // copy the first part of the backward key into the buffer
+  memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining + KEY_LEN, WC_SHA256_DIGEST_SIZE - bytes_remaining - KEY_LEN );
+  // mark how many bytes we've written to the backwards key and how many remain
   bytes_written = WC_SHA256_DIGEST_SIZE - bytes_remaining - KEY_LEN;
   bytes_remaining = KEY_LEN - bytes_written;
 
+  // generate the third 32 bytes
   wc_HmacUpdate( &reusable_hmac, reusable_hmac_digest, WC_SHA256_DIGEST_SIZE );
   wc_HmacUpdate( &reusable_hmac, (unsigned char*)PROTOID_EXPAND, PROTOID_EXPAND_LENGTH );
   expand_i = 3;
   wc_HmacUpdate( &reusable_hmac, &expand_i, 1 );
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
-  memcpy( onion_circuit->relay_list.head->relay->backward_key + bytes_written, reusable_hmac_digest, bytes_remaining );
+  // copy the last part of the key into the buffer and initialize the key
+  memcpy( reusable_aes_key + bytes_written, reusable_hmac_digest, bytes_remaining );
+  wc_AesSetKeyDirect( &relay->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
 
   // free all the heap resources
-  wc_curve25519_free( &create2_handshake_key );
-  wc_curve25519_free( &created2_handshake_public_key );
+  wc_curve25519_free( key );
+  wc_curve25519_free( &responder_handshake_public_key );
   wc_curve25519_free( &ntor_onion_key );
-  wc_FreeRng( &rng );
-
-  free_cell( &unpacked_cell );
 
   free( secret_input );
   free( auth_input );
@@ -1329,6 +1568,7 @@ int d_router_handshake( WOLFSSL* ssl ) {
 
   // recv and unpack the certs cell
   if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, &responder_sha ) < 0 ) {
+  /* if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, &responder_sha ) < 0 ) { */
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv certs cell" );
 #endif
@@ -1547,9 +1787,6 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
   unsigned int cert_date;
   int link_key_count = 0;
   int identity_count = 0;
-  /* int signing_count = 0; */
-  /* int tls_link_count = 0; */
-  /* int ed_identity_count = 0; */
   unsigned int idx;
   int wolf_succ;
   RsaKey responder_rsa_identity_key;
@@ -1558,8 +1795,6 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
   wc_InitRsaKey( &responder_rsa_identity_key, NULL );
 
   // verify the certs
-  ESP_LOGE( MINITOR_TAG, "verifying certs cell" );
-
   time( &now );
 
   for ( i = 0; i < ( (PayloadCerts*)certs_cell->payload )->cert_count; i++ ) {
@@ -1826,7 +2061,8 @@ void v_destroy_onion_circuit( int circ_id ) {
 // fetch the descriptor info for the list of relays
 int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
   const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
-      "Host: 192.168.1.138\r\n"
+      /* "Host: 192.168.1.138\r\n" */
+      "Host: 192.168.1.16\r\n"
       "User-Agent: esp-idf/1.0 esp3266\r\n"
       "\r\n";
   char REQUEST[126];
@@ -1850,7 +2086,8 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
   strcpy( REQUEST, REQUEST_CONST );
 
   // set the address of the directory server
-  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" );
+  /* dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" ); */
+  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.16" );
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons( 7000 );
 
@@ -1912,8 +2149,6 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
         REQUEST[18 + 2 * i + 1] = 65 + ( ( node->relay->digest[i] & 0x0f ) - 10 );
       }
     }
-
-    ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
 
     // send the http request to the dir server
     err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
@@ -1998,6 +2233,28 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
 
 // recv a cell from our ssl connection
 int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* sha ) {
+  int rx_limit;
+  unsigned char* packed_cell;
+
+  rx_limit = d_recv_packed_cell( ssl, &packed_cell, circ_id_length );
+
+  if ( rx_limit < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't recv packed cell" );
+#endif
+
+    return -1;
+  }
+
+  if ( sha != NULL ) {
+    wc_Sha256Update( sha, packed_cell, rx_limit );
+  }
+
+  // set the unpacked cell and return success
+  return unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
+}
+
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length ) {
   int i;
   int rx_length;
   int rx_length_total = 0;
@@ -2007,35 +2264,36 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* 
   int rx_limit = header_length;
   // we want to make it big enough for an entire cell to fit
   unsigned char rx_buffer[CELL_LEN];
-  // initially just make the packed cell big enough for a standard header,
-  // we'll realloc it later
-  unsigned char* packed_cell = malloc( sizeof( unsigned char ) * header_length );
   // variable length of the cell if there is one
   unsigned short length = 0;
 
-  ESP_LOGE( MINITOR_TAG, "starting cell recv" );
+  // initially just make the packed cell big enough for a standard header,
+  // we'll realloc it later
+  *packed_cell = malloc( sizeof( unsigned char ) * header_length );
+
   while ( 1 ) {
     // read in at most rx_length, rx_length will be either the length of
     // the cell or the length of the header
-    ESP_LOGE( MINITOR_TAG, "rx_limit: %d, rx_length_total: %d", rx_limit, rx_length_total );
     if ( rx_limit - rx_length_total > CELL_LEN ) {
       rx_length = wolfSSL_recv( ssl, rx_buffer, CELL_LEN, 0 );
     } else {
       rx_length = wolfSSL_recv( ssl, rx_buffer, rx_limit - rx_length_total, 0 );
     }
-    ESP_LOGE( MINITOR_TAG, "recvd: %d bytes", rx_length );
 
     // if rx_length is 0 then we've hit an error and should return -1
     if ( rx_length <= 0 ) {
+#ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "error code: %d", wolfSSL_get_error( ssl, rx_length ) );
-      free( packed_cell );
+#endif
+
+      free( *packed_cell );
       return -1;
     }
 
     // put the contents of the rx_buffer into the packed cell and increment the
     // rx_length_total
     for ( i = 0; i < rx_length; i++ ) {
-      packed_cell[rx_length_total] = rx_buffer[i];
+      (*packed_cell)[rx_length_total] = rx_buffer[i];
       rx_length_total++;
     }
 
@@ -2043,10 +2301,10 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* 
     // check for a versions variable length cell, if we have one, extend the
     // header length to include the length field
     if ( rx_length_total == circ_id_length + 1 ) {
-      if ( packed_cell[circ_id_length] == VERSIONS || packed_cell[circ_id_length] >= VPADDING ) {
+      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING ) {
         header_length = circ_id_length + 3;
         rx_limit = header_length;
-        packed_cell = realloc( packed_cell, header_length );
+        *packed_cell = realloc( *packed_cell, header_length );
       }
     }
 
@@ -2054,17 +2312,16 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* 
     // to the length of the cell
     if ( rx_length_total == header_length ) {
       // set the rx_limit to the length of the cell
-      if ( packed_cell[circ_id_length] == VERSIONS || packed_cell[circ_id_length] >= VPADDING ) {
-        length = ( (unsigned short)packed_cell[circ_id_length + 1] ) << 8;
-        length |= (unsigned short)packed_cell[circ_id_length + 2];
-        ESP_LOGE( MINITOR_TAG, "variable length: %d", length );
+      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING ) {
+        length = ( (unsigned short)(*packed_cell)[circ_id_length + 1] ) << 8;
+        length |= (unsigned short)(*packed_cell)[circ_id_length + 2];
         rx_limit = header_length + length;
       } else {
         rx_limit = CELL_LEN;
       }
 
       // realloc the cell to the correct size
-      packed_cell = realloc( packed_cell, rx_limit );
+      *packed_cell = realloc( *packed_cell, rx_limit );
     }
 
     // if we've hit the rx_limit then we're done recv-ing the packed cell,
@@ -2075,12 +2332,7 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* 
     }
   }
 
-  if ( sha != NULL ) {
-    wc_Sha256Update( sha, packed_cell, rx_limit );
-  }
-
-  // set the unpacked cell and return success
-  return unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
+  return rx_limit;
 }
 
 unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {

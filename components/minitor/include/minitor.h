@@ -3,13 +3,22 @@
 
 #include <time.h>
 #include "freertos/queue.h"
+
+#include "user_settings.h"
 #include "wolfssl/ssl.h"
+#include "wolfssl/internal.h"
+#include "wolfssl/wolfcrypt/curve25519.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
-#include "wolfssl/wolfcrypt/sha256.h"
+#include "wolfssl/wolfcrypt/asn.h"
+#include "wolfssl/wolfcrypt/asn_public.h"
 #include "wolfssl/wolfcrypt/rsa.h"
-#include "wolfssl/wolfcrypt/random.h"
-#include "./cell.h"
+#include "wolfssl/wolfcrypt/sha256.h"
+#include "wolfssl/wolfcrypt/hmac.h"
+#include "wolfssl/wolfcrypt/aes.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
+
 #include "./config.h"
+#include "./cell.h"
 
 typedef struct ed25519_key ed25519_key;
 
@@ -52,10 +61,10 @@ typedef struct OnionRelay {
   unsigned char identity[ID_LENGTH];
   unsigned char digest[ID_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
-  unsigned char forward_digest[HASH_LEN];
-  unsigned char backward_digest[HASH_LEN];
-  unsigned char forward_key[KEY_LEN];
-  unsigned char backward_key[KEY_LEN];
+  Sha running_sha_forward;
+  Sha running_sha_backward;
+  Aes aes_forward;
+  Aes aes_backward;
   ed25519_key* ed_identity_key;
   unsigned int address;
   short or_port;
@@ -75,8 +84,8 @@ typedef struct DoublyLinkedOnionRelayList {
 } DoublyLinkedOnionRelayList;
 
 typedef struct OnionCircuit {
+  WOLFSSL* ssl;
   int circ_id;
-  int sock_fd;
   DoublyLinkedOnionRelayList relay_list;
 } OnionCircuit;
 
@@ -116,13 +125,17 @@ void v_base_64_decode_buffer( unsigned char* destination, char* source, int sour
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 int d_setup_init_circuits();
 int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit );
-int d_router_create2( WOLFSSL* ssl, OnionCircuit* onion_circuit );
+int d_router_extend2( OnionCircuit* onion_circuit, int node_index );
+int d_router_create2( OnionCircuit* onion_circuit );
+int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
+int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
 int d_router_handshake( WOLFSSL* ssl );
 int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der );
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
 void v_destroy_onion_circuit( int circ_id );
 int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit );
 int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* sha );
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length );
 unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size );
 
 #endif
