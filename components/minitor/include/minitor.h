@@ -3,6 +3,7 @@
 
 #include <time.h>
 #include "freertos/queue.h"
+#include "freertos/event_groups.h"
 
 #include "user_settings.h"
 #include "wolfssl/ssl.h"
@@ -46,6 +47,8 @@ typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
 typedef enum CircuitStatus {
   CIRCUIT_BUILDING,
   CIRCUIT_STANDBY,
+  CIRCUIT_INTRO_POINT,
+  CIRCUIT_RENDEZVOUS,
 } CircuitStatus;
 
 typedef struct NetworkConsensus {
@@ -79,27 +82,26 @@ struct DoublyLinkedOnionRelay {
 
 typedef struct DoublyLinkedOnionRelayList {
   int length;
+  int built_length;
   DoublyLinkedOnionRelay* head;
   DoublyLinkedOnionRelay* tail;
 } DoublyLinkedOnionRelayList;
 
 typedef struct OnionCircuit {
-  WOLFSSL* ssl;
   int circ_id;
+  CircuitStatus status;
+  WOLFSSL* ssl;
+  EventGroupHandle_t event_group;
+  QueueHandle_t rx_queue;
+  TaskHandle_t task_handle;
   DoublyLinkedOnionRelayList relay_list;
 } OnionCircuit;
 
 struct DoublyLinkedOnionCircuit {
-  CircuitStatus status;
-  QueueHandle_t rx_queue;
-  TaskHandle_t task_handle;
   DoublyLinkedOnionCircuit* previous;
   DoublyLinkedOnionCircuit* next;
   OnionCircuit circuit;
 };
-
-typedef struct CircuitCommand {
-} CircuitCommand;
 
 typedef struct DoublyLinkedOnionCircuitList {
   int length;
@@ -107,10 +109,13 @@ typedef struct DoublyLinkedOnionCircuitList {
   DoublyLinkedOnionCircuit* tail;
 } DoublyLinkedOnionCircuitList;
 
-typedef struct HiddenService {
-  int hidden_service_id;
-  int sock_fd;
-} HiddenService;
+typedef struct OnionService {
+  unsigned short local_port;
+  char* onion_service_directory;
+  EventGroupHandle_t event_group;
+  DoublyLinkedOnionCircuitList intro_circuits;
+  DoublyLinkedOnionCircuitList rend_circuits;
+} OnionService;
 
 typedef struct HiddenServiceMessage {
   int circ_id;
@@ -119,12 +124,15 @@ typedef struct HiddenServiceMessage {
 } HiddenServiceMessage;
 
 int v_minitor_INIT();
+void v_circuit_keepalive( void* pv_parameters );
+void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list );
 int d_fetch_consensus_info();
 int d_parse_date_byte( char byte, int* year, int* year_found, int* month, int* month_found, int* day, int* day_found, int* hour, int* hour_found, int* minute, int* minute_found, int* second, int* second_found, struct tm* temp_time );
 void v_base_64_decode_buffer( unsigned char* destination, char* source, int source_length );
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 int d_setup_init_circuits();
 int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit );
+void v_handle_circuit( void* pv_parameters );
 int d_router_extend2( OnionCircuit* onion_circuit, int node_index );
 int d_router_create2( OnionCircuit* onion_circuit );
 int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
@@ -134,8 +142,8 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
 void v_destroy_onion_circuit( int circ_id );
 int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit );
-int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* sha );
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length );
+int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha );
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list );
 unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size );
 
 #endif

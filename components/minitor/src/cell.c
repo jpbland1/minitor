@@ -1482,7 +1482,9 @@ void free_cell( Cell* unpacked_cell ) {
   }
 
   // free the payload buffer
-  free( unpacked_cell->payload );
+  if ( unpacked_cell->payload != NULL ) {
+    free( unpacked_cell->payload );
+  }
   // free the cell, may not need to do this if we don't create malloc cells
   // free( unpacked_cell );
 }

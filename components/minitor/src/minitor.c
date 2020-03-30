@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -21,10 +22,11 @@
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
+static const char* MINITOR_TAG = "MINITOR: ";
+
 // TODO shared state must be protected by mutex
 static unsigned int circ_id_counter = 0x80000000;
-
-static const char* MINITOR_TAG = "MINITOR: ";
+static SemaphoreHandle_t circ_id_mutex;
 
 static NetworkConsensus network_consensus = {
   .method = 0,
@@ -32,18 +34,35 @@ static NetworkConsensus network_consensus = {
   .fresh_until = 0,
   .valid_until = 0,
 };
+static SemaphoreHandle_t network_consensus_mutex;
 
 static DoublyLinkedOnionRelayList suitable_relays = {
   .length = 0,
   .head = NULL,
   .tail = NULL,
 };
+static SemaphoreHandle_t suitable_relays_mutex;
 
-static DoublyLinkedOnionCircuitList circuits = {
+static DoublyLinkedOnionCircuitList standby_circuits = {
   .length = 0,
   .head = NULL,
   .tail = NULL,
 };
+static SemaphoreHandle_t standby_circuits_mutex;
+
+static DoublyLinkedOnionCircuitList intro_circuits = {
+  .length = 0,
+  .head = NULL,
+  .tail = NULL,
+};
+static SemaphoreHandle_t intro_circuits_mutex;
+
+static DoublyLinkedOnionCircuitList rend_circuits = {
+  .length = 0,
+  .head = NULL,
+  .tail = NULL,
+};
+static SemaphoreHandle_t rend_circuits_mutex;
 
 static const char* base64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -62,6 +81,13 @@ static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX
 
 // intialize tor
 int v_minitor_INIT() {
+  circ_id_mutex = xSemaphoreCreateMutex();
+  network_consensus_mutex = xSemaphoreCreateMutex();
+  suitable_relays_mutex = xSemaphoreCreateMutex();
+  standby_circuits_mutex = xSemaphoreCreateMutex();
+  intro_circuits_mutex = xSemaphoreCreateMutex();
+  rend_circuits_mutex = xSemaphoreCreateMutex();
+
   wolfSSL_Init();
   wolfSSL_Debugging_ON();
 
@@ -73,43 +99,72 @@ int v_minitor_INIT() {
     return -1;
   }
 
-
   // fetch network consensus
   if ( d_fetch_consensus_info() < 0 ) {
     return -1;
   }
 
-  // TODO setup starting circuits
+  // setup starting circuits
   if ( d_setup_init_circuits() < 0 ) {
     return -1;
   }
 
+  xTaskCreatePinnedToCore(
+      v_circuit_keepalive,
+      "CIRCUIT_KEEPALIVE",
+      4096,
+      NULL,
+      6,
+      NULL,
+      tskNO_AFFINITY
+    );
+
   return 1;
 }
 
-// register a hidden service
-/* HiddenService x_setup_hidden_service( char* onion_address, unsigned char* private_key, QueueHandle_t rx_queue ) { */
-  // TODO create two circuits that are available as introduction points
-  // TODO setup introduction points with these relays
-  // TODO create a two hop circuit that will be available to extend to any rendezvous requests we get
-  // TODO spawn a task to block on each introduction point and when an introduction arrives, extend the two hop circuit to rendezvous with the client,
-  // spawn another task to block on that tcp buffer, forward relay data's to the rx_queue
-  // TODO spawn a task to block on the tx_queue and send any outgoing data to the correct circuit
-  // TODO return the hidden service id and tx queue to the caller
-/* } */
+void v_circuit_keepalive( void* pv_parameters ) {
+  while ( 1 ) {
+    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+    v_keep_circuitlist_alive( &standby_circuits );
+    xSemaphoreGive( standby_circuits_mutex );
+    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
 
-// shut down a hidden service
-/* void v_stop_hidden_service( int hidden_service_id ) { */
-  // TODO send destroy's to all hidden service associated circuits; introduction points and client rendezvous
-  // TODO clean up the tls socket
-  // TODO clean up the rx,tx queues
-  // TODO clean up any hidden service specific data
-/* } */
+    xSemaphoreTake( intro_circuits_mutex, portMAX_DELAY );
+    v_keep_circuitlist_alive( &intro_circuits );
+    xSemaphoreGive( intro_circuits_mutex );
+    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
 
-// perform a first time handshake with a guard cell
-/* int v_relay_handshake(  ) { */
+    xSemaphoreTake( rend_circuits_mutex, portMAX_DELAY );
+    v_keep_circuitlist_alive( &rend_circuits );
+    xSemaphoreGive( rend_circuits_mutex );
+    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
+  }
+}
 
-/* } */
+void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
+  int i;
+  Cell padding_cell;
+  DoublyLinkedOnionCircuit* node;
+  unsigned char* packed_cell;
+
+  padding_cell.command = PADDING;
+  padding_cell.payload = NULL;
+  node = list->head;
+
+  for ( i = 0; i < list->length; i++ ) {
+    padding_cell.circ_id = node->circuit.circ_id;
+    packed_cell = pack_and_free( &padding_cell );
+
+    if ( wolfSSL_send( node->circuit.ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit.circ_id );
+#endif
+    }
+
+    free( packed_cell );
+    node = node->next;
+  }
+}
 
 // send a cell to a circuit
 /* void v_send_cell( int circ_id, unsigned char* packed_cell ) { */
@@ -606,7 +661,9 @@ int d_fetch_consensus_info() {
     }
   }
 
-  // TODO some kind of mutex for when this is run as a task
+  // BEGIN mutex for the network consensus
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
   network_consensus.method = result_network_consensus.method;
   network_consensus.valid_after = result_network_consensus.valid_after;
   network_consensus.fresh_until = result_network_consensus.fresh_until;
@@ -616,6 +673,12 @@ int d_fetch_consensus_info() {
     network_consensus.previous_shared_rand[i] = result_network_consensus.previous_shared_rand[i];
     network_consensus.shared_rand[i] = result_network_consensus.shared_rand[i];
   }
+
+  xSemaphoreGive( network_consensus_mutex );
+  // END mutex for the network consensus
+
+  // BEGIN mutex for suitable relays
+  xSemaphoreTake( suitable_relays_mutex, portMAX_DELAY );
 
   suitable_relays.length = result_suitable_relays.length;
   suitable_relays.head = result_suitable_relays.head;
@@ -665,6 +728,9 @@ int d_fetch_consensus_info() {
     node = node->next;
   }
 #endif
+
+  xSemaphoreGive( suitable_relays_mutex );
+  // END mutex for suitable relays
 
   // we're done reading data from the directory server, shutdown and close the socket
   shutdown( sock_fd, 0 );
@@ -826,6 +892,19 @@ void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayLi
   list->length++;
 }
 
+void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list ) {
+  if ( list->length == 0 ) {
+    list->head = node;
+    list->tail = node;
+  } else {
+    node->previous = list->tail;
+    list->tail->next = node;
+    list->tail = node;
+  }
+
+  list->length++;
+}
+
 // create two, three hop circuits that can quickly be turned into introduction points
 int d_setup_init_circuits() {
   DoublyLinkedOnionCircuit* standby_one = malloc( sizeof( DoublyLinkedOnionCircuit ) );
@@ -837,6 +916,15 @@ int d_setup_init_circuits() {
     return -1;
   }
 
+  // BEGIN mutex for standby circuits
+  xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+
+  v_add_circuit_to_list( standby_one, &standby_circuits );
+  v_add_circuit_to_list( standby_two, &standby_circuits );
+
+  xSemaphoreGive( standby_circuits_mutex );
+  // END mutex for standby circuits
+
   return 0;
 }
 
@@ -846,13 +934,21 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
   int sock_fd;
   WOLFSSL* ssl;
 
-  // TODO find 3 suitable relays from our directory information
-  linked_circuit->status = CIRCUIT_BUILDING;
-  linked_circuit->rx_queue = xQueueCreate( 3, sizeof( CircuitCommand ) );
-  // TODO shared state like this must be protected by a mutex
+  // find 3 suitable relays from our directory information
+  linked_circuit->circuit.status = CIRCUIT_BUILDING;
+  linked_circuit->circuit.rx_queue = xQueueCreate( 3, sizeof( Cell* ) );
+
+  // BEGIN mutex for circ_id
+  xSemaphoreTake( circ_id_mutex, portMAX_DELAY );
+
   linked_circuit->circuit.circ_id = ++circ_id_counter;
 
-  // TODO shared state like this must be protected by a mutex
+  xSemaphoreGive( circ_id_mutex );
+  // END mutex for circ_id
+
+  // BEGIN mutex for suitable relays
+  xSemaphoreTake( suitable_relays_mutex, portMAX_DELAY );
+
   if ( suitable_relays.length < 3 ) {
     return -1;
   }
@@ -871,13 +967,14 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
   suitable_relays.head = suitable_relays.head->next->next->next;
   // set the tail of our lists next node to NULL
   linked_circuit->circuit.relay_list.tail->next = NULL;
-  // set the head of our lists previous node to NULL
-  linked_circuit->circuit.relay_list.head->previous = NULL;
   // set our length to 3
   linked_circuit->circuit.relay_list.length = 3;
+  linked_circuit->circuit.relay_list.built_length = 0;
   // set the suitable relays length to -= 3
   suitable_relays.length -= 3;
-  // TODO end of mutex
+
+  xSemaphoreGive( suitable_relays_mutex );
+  // END mutex for suitable relays
 
   // get the relay's ntor onion keys
   if ( d_fetch_descriptor_info( linked_circuit ) < 0 ) {
@@ -958,6 +1055,7 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
+  linked_circuit->circuit.relay_list.built_length++;
 
   // make an extend cell and send it to the second hop
   if ( d_router_extend2( &linked_circuit->circuit, 1 ) < 0 ) {
@@ -968,6 +1066,8 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
+  linked_circuit->circuit.relay_list.built_length++;
+
   // make an extend cell and send it to the thrid hop
   if ( d_router_extend2( &linked_circuit->circuit, 2 ) < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -977,10 +1077,129 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
-  // TODO spawn a task to block on the tls buffer and put the data into the rx_queue
-  // TODO return the circ_id and tx_queue back to the caller
+  linked_circuit->circuit.relay_list.built_length++;
 
-  return -1;
+  linked_circuit->circuit.status = CIRCUIT_STANDBY;
+
+  // spawn a task to block on the tls buffer and put the data into the rx_queue
+  xTaskCreatePinnedToCore(
+      v_handle_circuit,
+      "HANDLE_CIRCUIT",
+      4096,
+      (void*)(&linked_circuit->circuit),
+      6,
+      &linked_circuit->circuit.task_handle,
+      tskNO_AFFINITY
+    );
+
+  return 0;
+}
+
+void v_handle_circuit( void* pv_parameters ) {
+  unsigned char delay_count = 0;
+  unsigned char* packed_cell;
+  int succ;
+  OnionCircuit* onion_circuit = (OnionCircuit*)pv_parameters;
+  Cell* unpacked_cell = malloc( sizeof( Cell ) );
+
+  while ( 1 ) {
+    succ = d_recv_cell( onion_circuit->ssl, unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL );
+
+    if ( succ < 0 ) {
+      ESP_LOGE( MINITOR_TAG, "Circuit %.8x received error code: %d waiting for a cell", onion_circuit->circ_id, succ );
+      continue;
+    }
+
+    switch ( unpacked_cell->command ) {
+      case PADDING:
+        free_cell( unpacked_cell );
+        break;
+      case CREATE:
+        break;
+      case CREATED:
+        break;
+      case RELAY:
+        switch ( ( (PayloadRelay*)unpacked_cell->payload )->command ) {
+          case RELAY_BEGIN:
+            break;
+          case RELAY_DATA:
+            break;
+          case RELAY_END:
+            break;
+          case RELAY_CONNECTED:
+            break;
+          case RELAY_SENDME:
+            break;
+          case RELAY_EXTEND:
+            break;
+          case RELAY_EXTENDED:
+            break;
+          case RELAY_TRUNCATE:
+            break;
+          case RELAY_TRUNCATED:
+            break;
+          case RELAY_DROP:
+            break;
+          case RELAY_RESOLVE:
+            break;
+          case RELAY_RESOLVED:
+            break;
+          case RELAY_BEGIN_DIR:
+            break;
+          case RELAY_EXTEND2:
+            break;
+          case RELAY_EXTENDED2:
+            break;
+          case RELAY_COMMAND_ESTABLISH_INTRO:
+            break;
+          case RELAY_COMMAND_ESTABLISH_RENDEZVOUS:
+            break;
+          case RELAY_COMMAND_INTRODUCE1:
+            break;
+          case RELAY_COMMAND_INTRODUCE2:
+            break;
+          case RELAY_COMMAND_RENDEZVOUS1:
+            break;
+          case RELAY_COMMAND_RENDEZVOUS2:
+            break;
+          case RELAY_COMMAND_INTRO_ESTABLISHED:
+            break;
+          case RELAY_COMMAND_RENDEZVOUS_ESTABLISHED:
+            break;
+          case RELAY_COMMAND_INTRODUCE_ACK:
+            break;
+        }
+        break;
+      case DESTROY:
+        break;
+      case CREATE_FAST:
+        break;
+      case CREATED_FAST:
+        break;
+      case VERSIONS:
+        break;
+      case NETINFO:
+        break;
+      case RELAY_EARLY:
+        break;
+      case CREATE2:
+        break;
+      case CREATED2:
+        break;
+      case PADDING_NEGOTIATE:
+        break;
+      case VPADDING:
+        break;
+      case CERTS:
+        break;
+      case AUTH_CHALLENGE:
+        break;
+      case AUTHENTICATE:
+        break;
+      case AUTHORIZE:
+        break;
+    }
+  }
 }
 
 int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
@@ -993,7 +1212,6 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   unsigned char* packed_cell;
   curve25519_key extend2_handshake_key;
   unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
-  unsigned char zeros[4] = { 0 };
   curve25519_key extended2_handshake_public_key;
   curve25519_key ntor_onion_key;
 
@@ -1104,54 +1322,13 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   free( packed_cell );
 
   // TODO recv EXTENDED2 cell and perform the second half of the handshake
-  if ( d_recv_packed_cell( onion_circuit->ssl, &packed_cell, CIRCID_LEN ) < 0 ) {
+  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_EXTENDED2 cell" );
 #endif
 
     return -1;
   }
-
-  relay = onion_circuit->relay_list.head;
-
-  for ( i = 0; i < node_index; i++ ) {
-    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_backward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
-
-    if ( wolf_succ < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ );
-#endif
-
-      return -1;
-    }
-
-    relay = relay->next;
-  }
-
-  if ( packed_cell[6] != 0 || packed_cell[7] != 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Relay recognized cell was not set to 0" );
-#endif
-
-    return -1;
-  }
-
-  relay = target_relay->previous;
-
-  wc_ShaUpdate( &relay->relay->running_sha_backward, packed_cell + 5, 5 );
-  wc_ShaUpdate( &relay->relay->running_sha_backward, zeros, 4 );
-  wc_ShaUpdate( &relay->relay->running_sha_backward, packed_cell + 14, PAYLOAD_LEN - 9 );
-  wc_ShaGetHash( &relay->relay->running_sha_backward, temp_digest );
-
-  if ( memcmp( packed_cell + 10, temp_digest, 4 ) != 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to verify the digest" );
-#endif
-
-    return -1;
-  }
-
-  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
 
   if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -1215,7 +1392,7 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
 
   free( packed_cell );
 
-  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, NULL ) < 0 ) {
+  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, NULL, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv CREATED2 cell" );
 #endif
@@ -1260,7 +1437,6 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
 }
 
 int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key ) {
-  int i;
   int wolf_succ;
   unsigned int idx;
   curve25519_key responder_handshake_public_key;
@@ -1549,7 +1725,7 @@ int d_router_handshake( WOLFSSL* ssl ) {
   ESP_LOGE( MINITOR_TAG, "recving versions cell" );
 
   // recv and unpack the versions cell
-  if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, &responder_sha ) < 0 ) {
+  if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, NULL, &responder_sha ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv versions cell" );
 #endif
@@ -1567,8 +1743,7 @@ int d_router_handshake( WOLFSSL* ssl ) {
   ESP_LOGE( MINITOR_TAG, "recving certs cell" );
 
   // recv and unpack the certs cell
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, &responder_sha ) < 0 ) {
-  /* if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, &responder_sha ) < 0 ) { */
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, &responder_sha ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv certs cell" );
 #endif
@@ -1586,7 +1761,7 @@ int d_router_handshake( WOLFSSL* ssl ) {
   }
 
   // recv and unpack the auth challenge cell
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, &responder_sha ) < 0 ) {
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, &responder_sha ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv auth challenge cell" );
 #endif
@@ -1716,7 +1891,7 @@ int d_router_handshake( WOLFSSL* ssl ) {
 
   free( packed_cell );
 
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL ) < 0 ) {
+  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
 #endif
@@ -2232,11 +2407,11 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
 }
 
 // recv a cell from our ssl connection
-int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* sha ) {
+int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha ) {
   int rx_limit;
   unsigned char* packed_cell;
 
-  rx_limit = d_recv_packed_cell( ssl, &packed_cell, circ_id_length );
+  rx_limit = d_recv_packed_cell( ssl, &packed_cell, circ_id_length, relay_list );
 
   if ( rx_limit < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -2254,8 +2429,9 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, Sha256* 
   return unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
 }
 
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length ) {
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list ) {
   int i;
+  int wolf_succ;
   int rx_length;
   int rx_length_total = 0;
   // length of the header may change if we run into a variable length cell
@@ -2266,6 +2442,11 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
   unsigned char rx_buffer[CELL_LEN];
   // variable length of the cell if there is one
   unsigned short length = 0;
+  Sha tmp_sha;
+  DoublyLinkedOnionRelay* relay;
+  unsigned char zeros[4] = { 0 };
+  unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
+  int fully_recognized = 0;
 
   // initially just make the packed cell big enough for a standard header,
   // we'll realloc it later
@@ -2332,6 +2513,56 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     }
   }
 
+  if ( (*packed_cell)[circ_id_length] == RELAY ) {
+    if ( relay_list == NULL ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
+#endif
+
+      return -1;
+    }
+
+    relay = relay_list->head;
+    wc_InitSha( &tmp_sha );
+
+    for ( i = 0; i < relay_list->built_length; i++ ) {
+      wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_backward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
+
+      if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
+#endif
+
+        return -1;
+      }
+
+      if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 ) {
+        wc_ShaCopy( &relay->relay->running_sha_backward, &tmp_sha );
+
+        wc_ShaUpdate( &tmp_sha, *packed_cell + 5, 5 );
+        wc_ShaUpdate( &tmp_sha, zeros, 4 );
+        wc_ShaUpdate( &tmp_sha, *packed_cell + 14, PAYLOAD_LEN - 9 );
+        wc_ShaGetHash( &tmp_sha, temp_digest );
+
+        if ( memcmp( temp_digest, *packed_cell + 10, 4 ) == 0 ) {
+          wc_ShaCopy( &tmp_sha, &relay->relay->running_sha_backward );
+          fully_recognized = 1;
+          break;
+        }
+      }
+
+      relay = relay->next;
+    }
+
+    if ( !fully_recognized ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Relay recognized cell was not set to 0" );
+#endif
+
+      return -1;
+    }
+  }
+
   return rx_limit;
 }
 
@@ -2378,3 +2609,62 @@ unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {
 
   return 0;
 }
+
+// ONION SERVICES
+OnionService* px_setup_hidden_service( unsigned short local_port, char* onion_service_directory ) {
+  OnionService* onion_service = malloc( sizeof( OnionService ) );
+
+  // take two circuits from the standby circuits list
+  // BEGIN mutex
+  xSemaphoreTake( standby_circuits_mutex );
+
+  if ( standby_circuits.length < 2 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Not enough standby circuits to register intro points" );
+#endif
+
+    xSemaphoreGive( standby_circuits_mutex );
+    // END mutex
+
+    return NULL;
+  }
+
+  // set the onion services head to the standby circuit head
+  onion_service->intro_circuits.head = standby_circuits.head;
+  // set the onion services tail to the second standby circuit
+  onion_service->intro_circuits.tail = standby_circuits.head->next;
+
+  // if there is a third standby circuit, set its previous to NULL
+  if ( standby_circuits.length > 2 ) {
+    standby_circuits.head->next->next->previous = NULL;
+  }
+
+  // set the standby circuit head to the thrid, possibly NULL
+  standby_circuits.head = standby_circuits.head->next->next;
+  // disconnect our tail from the other standby circuits
+  onion_service->intro_circuits.tail->next = NULL;
+  // set our intro length to 2
+  onion_service->intro_circuits.length = 2;
+  // subtract two from the standby_circuits length
+  standby_circuits.length -= 2;
+
+  xSemaphoreGive( standby_circuits_mutex );
+  // END mutex
+
+  // TODO prompt daemon to add two more standby circuits
+  // TODO send establish intro commands to our two circuits
+  // TODO create descriptors for introduction points and send them to correct hs_dir
+  // TODO spawn a task to block on each introduction point and when an introduction arrives, extend the two hop circuit to rendezvous with the client,
+  // spawn another task to block on that tcp buffer, forward relay data's to the rx_queue
+  // TODO spawn a task to block on the tx_queue and send any outgoing data to the correct circuit
+  // return the onion service
+  return onion_service;
+}
+
+// shut down a hidden service
+/* void v_stop_hidden_service( int hidden_service_id ) { */
+  // TODO send destroy's to all hidden service associated circuits; introduction points and client rendezvous
+  // TODO clean up the tls socket
+  // TODO clean up the rx,tx queues
+  // TODO clean up any hidden service specific data
+/* } */
