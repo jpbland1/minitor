@@ -1,5 +1,5 @@
 # Minitor
-## Instalation
+## Installation
 ### Linux Only Fools
 ## esp-idf
 The esp-idf is like a library that helps compile and link esp32 projects and also holds the core components like the wifi drivers, tcp stack etc
