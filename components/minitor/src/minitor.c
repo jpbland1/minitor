@@ -1,6 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/unistd.h>
+#include <sys/stat.h>
+#include <sys/fcntl.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -33,6 +37,9 @@ static NetworkConsensus network_consensus = {
   .valid_after = 0,
   .fresh_until = 0,
   .valid_until = 0,
+  .hsdir_interval = HSDIR_INTERVAL_DEFAULT,
+  .hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT,
+  .hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT,
 };
 static SemaphoreHandle_t network_consensus_mutex;
 
@@ -65,6 +72,7 @@ static DoublyLinkedOnionCircuitList rend_circuits = {
 static SemaphoreHandle_t rend_circuits_mutex;
 
 static const char* base64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char* base32_table = "abcdefghijklmnopqrstuvwxyz234567";
 
 static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
   if ( store->error == ASN_NO_SIGNER_E ) {
@@ -101,11 +109,6 @@ int v_minitor_INIT() {
 
   // fetch network consensus
   if ( d_fetch_consensus_info() < 0 ) {
-    return -1;
-  }
-
-  // setup starting circuits
-  if ( d_setup_init_circuits() < 0 ) {
     return -1;
   }
 
@@ -874,6 +877,50 @@ void v_base_64_decode_buffer( unsigned char* destination, char* source, int sour
   }
 }
 
+void v_base_32_encode( char* destination, unsigned char* source, int source_length ) {
+  int i;
+  unsigned char tmp_byte = 0;
+  int tmp_byte_length = 0;
+
+  for ( i = 0; i < source_length; i++ ) {
+    if ( tmp_byte_length == 0 ) {
+      *destination = base32_table[(int)( source[i] >> 3 )];
+      destination++;
+      tmp_byte = ( source[i] & 0x07 ) << 2;
+      tmp_byte_length = 3;
+    } else if ( tmp_byte_length == 3 ) {
+      tmp_byte |= source[i] >> 6;
+      *destination = base32_table[(int)tmp_byte];
+      destination++;
+      *destination = base32_table[(int)( ( source[i] & 0x3f ) >> 1 )];
+      destination++;
+      tmp_byte = ( source[i] & 0x01 ) << 4;
+      tmp_byte_length = 1;
+    } else if ( tmp_byte_length == 1 ) {
+      tmp_byte |= source[i] >> 4;
+      *destination = base32_table[(int)tmp_byte];
+      destination++;
+      tmp_byte = ( source[i] & 0x0f ) << 1;
+      tmp_byte_length = 4;
+    } else if ( tmp_byte_length == 4 ) {
+      tmp_byte |= source[i] >> 7;
+      *destination = base32_table[(int)tmp_byte];
+      destination++;
+      *destination = base32_table[(int)( ( source[i] & 0x7f ) >> 2 )];
+      destination++;
+      tmp_byte = ( source[i] & 0x03 ) << 3;
+      tmp_byte_length = 2;
+    } else if ( tmp_byte_length == 2 ) {
+      tmp_byte |= source[i] >> 5;
+      *destination = base32_table[(int)tmp_byte];
+      destination++;
+      *destination = base32_table[(int)( source[i] & 0x1f )];
+      destination++;
+      tmp_byte_length = 0;
+    }
+  }
+}
+
 // add a linked onion relay to a doubly linked list of onion relays
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list ) {
   // if our length is 0, just set this node as the head and tail
@@ -905,27 +952,53 @@ void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCir
   list->length++;
 }
 
-// create two, three hop circuits that can quickly be turned into introduction points
-int d_setup_init_circuits() {
-  DoublyLinkedOnionCircuit* standby_one = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-  DoublyLinkedOnionCircuit* standby_two = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+// create three hop circuits that can quickly be turned into introduction points
+int d_setup_init_circuits( int circuit_count ) {
+  int i;
+  DoublyLinkedOnionCircuitList result_standby_circuits = {
+    .length = 0,
+    .head = NULL,
+    .tail = NULL,
+  };
+  DoublyLinkedOnionCircuit* node;
 
-  if ( d_build_onion_circuit( standby_one ) < 0 || d_build_onion_circuit( standby_two ) < 0 ) {
-    free( standby_one );
-    free( standby_two );
-    return -1;
+  for ( i = 0; i < circuit_count; i++ ) {
+    node = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+
+    switch ( d_build_onion_circuit( node ) ) {
+      case -1:
+        i--;
+        free( node );
+        ESP_LOGE( MINITOR_TAG, "single fail" );
+        break;
+      case -2:
+        i = circuit_count;
+        free( node );
+        ESP_LOGE( MINITOR_TAG, "total fail" );
+        break;
+      case 0:
+        v_add_circuit_to_list( node, &result_standby_circuits );
+        ESP_LOGE( MINITOR_TAG, "no fail" );
+        break;
+      default:
+        break;
+    }
   }
 
   // BEGIN mutex for standby circuits
   xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
 
-  v_add_circuit_to_list( standby_one, &standby_circuits );
-  v_add_circuit_to_list( standby_two, &standby_circuits );
+  node = result_standby_circuits.head;
+
+  for ( i = 0; i < result_standby_circuits.length; i++ ) {
+    v_add_circuit_to_list( node, &standby_circuits );
+    node = node->next;
+  }
 
   xSemaphoreGive( standby_circuits_mutex );
   // END mutex for standby circuits
 
-  return 0;
+  return result_standby_circuits.length;
 }
 
 // create a tor circuit
@@ -936,7 +1009,7 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
 
   // find 3 suitable relays from our directory information
   linked_circuit->circuit.status = CIRCUIT_BUILDING;
-  linked_circuit->circuit.rx_queue = xQueueCreate( 3, sizeof( Cell* ) );
+  linked_circuit->circuit.rx_queue = NULL;
 
   // BEGIN mutex for circ_id
   xSemaphoreTake( circ_id_mutex, portMAX_DELAY );
@@ -950,7 +1023,7 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
   xSemaphoreTake( suitable_relays_mutex, portMAX_DELAY );
 
   if ( suitable_relays.length < 3 ) {
-    return -1;
+    return -2;
   }
 
   // set the head node of the suitable relays as our head node
@@ -1096,8 +1169,6 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
 }
 
 void v_handle_circuit( void* pv_parameters ) {
-  unsigned char delay_count = 0;
-  unsigned char* packed_cell;
   int succ;
   OnionCircuit* onion_circuit = (OnionCircuit*)pv_parameters;
   Cell* unpacked_cell = malloc( sizeof( Cell ) );
@@ -1110,94 +1181,11 @@ void v_handle_circuit( void* pv_parameters ) {
       continue;
     }
 
-    switch ( unpacked_cell->command ) {
-      case PADDING:
-        free_cell( unpacked_cell );
-        break;
-      case CREATE:
-        break;
-      case CREATED:
-        break;
-      case RELAY:
-        switch ( ( (PayloadRelay*)unpacked_cell->payload )->command ) {
-          case RELAY_BEGIN:
-            break;
-          case RELAY_DATA:
-            break;
-          case RELAY_END:
-            break;
-          case RELAY_CONNECTED:
-            break;
-          case RELAY_SENDME:
-            break;
-          case RELAY_EXTEND:
-            break;
-          case RELAY_EXTENDED:
-            break;
-          case RELAY_TRUNCATE:
-            break;
-          case RELAY_TRUNCATED:
-            break;
-          case RELAY_DROP:
-            break;
-          case RELAY_RESOLVE:
-            break;
-          case RELAY_RESOLVED:
-            break;
-          case RELAY_BEGIN_DIR:
-            break;
-          case RELAY_EXTEND2:
-            break;
-          case RELAY_EXTENDED2:
-            break;
-          case RELAY_COMMAND_ESTABLISH_INTRO:
-            break;
-          case RELAY_COMMAND_ESTABLISH_RENDEZVOUS:
-            break;
-          case RELAY_COMMAND_INTRODUCE1:
-            break;
-          case RELAY_COMMAND_INTRODUCE2:
-            break;
-          case RELAY_COMMAND_RENDEZVOUS1:
-            break;
-          case RELAY_COMMAND_RENDEZVOUS2:
-            break;
-          case RELAY_COMMAND_INTRO_ESTABLISHED:
-            break;
-          case RELAY_COMMAND_RENDEZVOUS_ESTABLISHED:
-            break;
-          case RELAY_COMMAND_INTRODUCE_ACK:
-            break;
-        }
-        break;
-      case DESTROY:
-        break;
-      case CREATE_FAST:
-        break;
-      case CREATED_FAST:
-        break;
-      case VERSIONS:
-        break;
-      case NETINFO:
-        break;
-      case RELAY_EARLY:
-        break;
-      case CREATE2:
-        break;
-      case CREATED2:
-        break;
-      case PADDING_NEGOTIATE:
-        break;
-      case VPADDING:
-        break;
-      case CERTS:
-        break;
-      case AUTH_CHALLENGE:
-        break;
-      case AUTHENTICATE:
-        break;
-      case AUTHORIZE:
-        break;
+    // TODO should determine if we need to destroy the circuit on a NULL queue
+    if ( unpacked_cell->command == PADDING || onion_circuit->rx_queue == NULL ) {
+      free_cell( unpacked_cell );
+    } else {
+      xQueueSendToBack( onion_circuit->rx_queue, (void*)(&unpacked_cell), portMAX_DELAY );
     }
   }
 }
@@ -1211,7 +1199,7 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   Cell unpacked_cell;
   unsigned char* packed_cell;
   curve25519_key extend2_handshake_key;
-  unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
+  /* unsigned char temp_digest[WC_SHA_DIGEST_SIZE]; */
   curve25519_key extended2_handshake_public_key;
   curve25519_key ntor_onion_key;
 
@@ -1221,6 +1209,8 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   wc_InitRng( &rng );
 
   wolf_succ = wc_curve25519_make_key( &rng, 32, &extend2_handshake_key );
+
+  wc_FreeRng( &rng );
 
   if ( wolf_succ != 0 ) {
 #ifdef DEBUG_MINITOR
@@ -1264,7 +1254,6 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[4] = (unsigned char)target_relay->relay->or_port >> 8;
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[5] = (unsigned char)target_relay->relay->or_port;
 
-
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1] = malloc( sizeof( LinkSpecifier ) );
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->type = LEGACYLink;
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->length = ID_LENGTH;
@@ -1287,41 +1276,48 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  // TODO update the running digest
-  relay = target_relay->previous;
+  /* // update the running digest */
+  /* relay = target_relay->previous; */
 
-  wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
-  wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest );
+  /* wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN ); */
+  /* wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest ); */
 
-  memcpy( packed_cell + 10, temp_digest, 4 );
+  /* memcpy( packed_cell + 10, temp_digest, 4 ); */
 
-  // TODO encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
-  for ( i = node_index - 1; i >= 0; i-- ) {
-    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+  /* // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0 */
+  /* for ( i = node_index - 1; i >= 0; i-- ) { */
+    /* wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN ); */
 
-    if ( wolf_succ < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ );
-#endif
+    /* if ( wolf_succ < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+      /* ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ ); */
+/* #endif */
 
-      return -1;
-    }
+      /* return -1; */
+    /* } */
 
-    relay = relay->previous;
-  }
+    /* relay = relay->previous; */
+  /* } */
 
-  // TODO send the RELAY_EARLY to the first node in the circuit
-  if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+  /* // send the RELAY_EARLY to the first node in the circuit */
+  /* if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* free( packed_cell ); */
+
+  // send the EXTEND2 cell
+  if ( d_send_packed_relay_cell_and_free( packed_cell, onion_circuit ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
 #endif
-
-    return -1;
   }
 
-  free( packed_cell );
-
-  // TODO recv EXTENDED2 cell and perform the second half of the handshake
+  // recv EXTENDED2 cell and perform the second half of the handshake
   if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_EXTENDED2 cell" );
@@ -1625,6 +1621,9 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
   // copy the last part of the key into the buffer and initialize the key
   memcpy( reusable_aes_key + bytes_written, reusable_hmac_digest, bytes_remaining );
   wc_AesSetKeyDirect( &relay->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+
+  // copy the nonce
+  memcpy( relay->nonce, reusable_hmac_digest + bytes_remaining, DIGEST_LEN );
 
   // free all the heap resources
   wc_curve25519_free( key );
@@ -2116,28 +2115,108 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
 }
 
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng ) {
+  struct stat st;
+  int fd;
   int wolf_succ;
+  unsigned int idx;
   RsaKey initiator_rsa_identity_key;
+  unsigned char* tmp_initiator_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 1024 );
   Cert initiator_rsa_identity_cert;
   Cert initiator_rsa_auth_cert;
   WOLFSSL_X509* certificate = NULL;
 
-  // init the rsa key
+  // init the rsa keys
   wc_InitRsaKey( &initiator_rsa_identity_key, NULL );
   wc_InitRsaKey( initiator_rsa_auth_key, NULL );
 
-  // make and export the identity cert
-  wolf_succ = wc_MakeRsaKey( &initiator_rsa_identity_key, 1024, 65537, rng );
+  // rsa identity key doesn't exist, create it and save it
+  if ( stat( "/sdcard/identity_rsa_key", &st ) == -1 ) {
+    // make and save the identity key to the file system
+    wolf_succ = wc_MakeRsaKey( &initiator_rsa_identity_key, 1024, 65537, rng );
 
-  if ( wolf_succ < 0 ) {
+    if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity key, error code: %d", wolf_succ );
+      ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity key, error code: %d", wolf_succ );
 #endif
 
-    return -1;
+      return -1;
+    }
+
+    wolf_succ = wc_RsaKeyToDer( &initiator_rsa_identity_key, tmp_initiator_rsa_identity_key_der, 1024 );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity key der, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    if ( ( fd = open( "/sdcard/identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( write( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+  // rsa identity key exists, load it from the file system
+  } else {
+    if ( ( fd = open( "/sdcard/identity_rsa_key", O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( read( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    idx = 0;
+    wolf_succ = wc_RsaPrivateKeyDecode( tmp_initiator_rsa_identity_key_der, &idx, &initiator_rsa_identity_key, 1024 );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to load rsa identity private key der, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
   }
 
-  // make and export the auth cert
+  free( tmp_initiator_rsa_identity_key_der );
+
+  // TODO figure out if we can just use one of these and save it to the file system
+  // make and export the auth key
   wolf_succ = wc_MakeRsaKey( initiator_rsa_auth_key, 1024, 65537, rng );
 
   if ( wolf_succ < 0 ) {
@@ -2150,43 +2229,144 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 
   wc_InitCert( &initiator_rsa_identity_cert );
 
-  // TODO randomize these
-  strncpy( initiator_rsa_identity_cert.subject.country, "US", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.state, "OR", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.locality, "Portland", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.org, "yaSSL", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.unit, "Development", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.commonName, "www.wolfssl.com", CTC_NAME_SIZE );
-  strncpy( initiator_rsa_identity_cert.subject.email, "info@wolfssl.com", CTC_NAME_SIZE );
+  // rsa identity cert doesn't exist, create it and save it
+  if ( stat( "/sdcard/identity_rsa_cert_der", &st ) == -1 ) {
+    // TODO randomize these
+    strncpy( initiator_rsa_identity_cert.subject.country, "US", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.state, "OR", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.locality, "Portland", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.org, "yaSSL", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.unit, "Development", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.commonName, "www.wolfssl.com", CTC_NAME_SIZE );
+    strncpy( initiator_rsa_identity_cert.subject.email, "info@wolfssl.com", CTC_NAME_SIZE );
 
-  *initiator_rsa_identity_cert_der_size = wc_MakeSelfCert( &initiator_rsa_identity_cert, initiator_rsa_identity_cert_der, 2048, &initiator_rsa_identity_key, rng );
+    *initiator_rsa_identity_cert_der_size = wc_MakeSelfCert( &initiator_rsa_identity_cert, initiator_rsa_identity_cert_der, 2048, &initiator_rsa_identity_key, rng );
 
-  if ( *initiator_rsa_identity_cert_der_size <= 0 ) {
+    if ( *initiator_rsa_identity_cert_der_size <= 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity cert der, error code: %d", *initiator_rsa_identity_cert_der_size );
+      ESP_LOGE( MINITOR_TAG, "Failed to make rsa identity cert der, error code: %d", *initiator_rsa_identity_cert_der_size );
 #endif
 
-    return -1;
-  }
+      return -1;
+    }
 
-  certificate = wolfSSL_X509_load_certificate_buffer(
-    initiator_rsa_identity_cert_der,
-    *initiator_rsa_identity_cert_der_size,
-    WOLFSSL_FILETYPE_ASN1 );
-
-  if ( certificate == NULL ) {
+    if ( ( fd = open( "/sdcard/identity_rsa_cert_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Invalid identity certificate" );
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_cert_der, errno: %d", errno );
 #endif
 
-    return -1;
+      return -1;
+    }
+
+    if ( write( fd, initiator_rsa_identity_cert_der, sizeof( unsigned char ) * ( *initiator_rsa_identity_cert_der_size ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_cert_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_cert_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    certificate = wolfSSL_X509_load_certificate_buffer(
+      initiator_rsa_identity_cert_der,
+      *initiator_rsa_identity_cert_der_size,
+      WOLFSSL_FILETYPE_ASN1 );
+
+    if ( certificate == NULL ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Invalid identity certificate" );
+#endif
+
+      return -1;
+    }
+
+    memcpy( initiator_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
+    *initiator_rsa_identity_key_der_size = certificate->pubKey.length;
+
+    wolfSSL_X509_free( certificate );
+
+    if ( ( fd = open( "/sdcard/identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( write( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * ( *initiator_rsa_identity_key_der_size ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+  // rsa identity cert exists, load it from the file system
+  } else {
+    if ( ( fd = open( "/sdcard/identity_rsa_cert_der", O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_cert_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( ( *initiator_rsa_identity_cert_der_size = read( fd, initiator_rsa_identity_cert_der, sizeof( unsigned char ) * 2048 ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_cert_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_cert_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( ( fd = open( "/sdcard/identity_rsa_key_der", O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( ( *initiator_rsa_identity_key_der_size = read( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * 2048 ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key_der, errno: %d", errno );
+#endif
+
+      return -1;
+    }
   }
 
-  memcpy( initiator_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
-  *initiator_rsa_identity_key_der_size = certificate->pubKey.length;
-
-  wolfSSL_X509_free( certificate );
-
+  // TODO figure out if we can just use one of these and save it to the file system
   wc_InitCert( &initiator_rsa_auth_cert );
 
   // TODO randomize these
@@ -2406,6 +2586,50 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
   return 0;
 }
 
+int d_send_packed_relay_cell_and_free( unsigned char* packed_cell, OnionCircuit* circuit ) {
+  int i;
+  int wolf_succ;
+  unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
+  DoublyLinkedOnionRelay* relay = circuit->relay_list.head;
+
+  for ( i = 0; i < circuit->relay_list.built_length - 1; i++ ) {
+    relay = relay->next;
+  }
+
+  wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
+  wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest );
+
+  memcpy( packed_cell + 10, temp_digest, 4 );
+
+  // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
+  for ( i = circuit->relay_list.built_length - 1; i >= 0; i-- ) {
+    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY payload, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    relay = relay->previous;
+  }
+
+  // send the RELAY_EARLY to the first node in the circuit
+  if ( wolfSSL_send( circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY cell" );
+#endif
+
+    return -1;
+  }
+
+  free( packed_cell );
+
+  return 0;
+}
+
 // recv a cell from our ssl connection
 int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha ) {
   int rx_limit;
@@ -2611,14 +2835,43 @@ unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {
 }
 
 // ONION SERVICES
-OnionService* px_setup_hidden_service( unsigned short local_port, char* onion_service_directory ) {
+OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory ) {
+  int i;
+  long int valid_after;
+  unsigned int hsdir_interval;
+  int time_period = 0;
+  DoublyLinkedOnionCircuit* node;
+  unsigned char* second_layer;
+  unsigned char* first_layer;
+  unsigned char* descriptor_outer;
   OnionService* onion_service = malloc( sizeof( OnionService ) );
+
+  onion_service->local_port = local_port;
+  onion_service->exit_port = exit_port;
+  onion_service->rx_queue = xQueueCreate( 5, sizeof( Cell* ) );
+
+  if ( d_generate_hs_keys( onion_service, onion_service_directory ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to generate hs keys" );
+#endif
+
+    return NULL;
+  }
+
+  // setup starting circuits
+  if ( d_setup_init_circuits( 3 ) < 3 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to setup init circuits" );
+#endif
+
+    return NULL;
+  }
 
   // take two circuits from the standby circuits list
   // BEGIN mutex
-  xSemaphoreTake( standby_circuits_mutex );
+  xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
 
-  if ( standby_circuits.length < 2 ) {
+  if ( standby_circuits.length < 3 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Not enough standby circuits to register intro points" );
 #endif
@@ -2632,33 +2885,656 @@ OnionService* px_setup_hidden_service( unsigned short local_port, char* onion_se
   // set the onion services head to the standby circuit head
   onion_service->intro_circuits.head = standby_circuits.head;
   // set the onion services tail to the second standby circuit
-  onion_service->intro_circuits.tail = standby_circuits.head->next;
+  onion_service->intro_circuits.tail = standby_circuits.head->next->next;
 
   // if there is a third standby circuit, set its previous to NULL
-  if ( standby_circuits.length > 2 ) {
-    standby_circuits.head->next->next->previous = NULL;
+  if ( standby_circuits.length > 3 ) {
+    standby_circuits.head->next->next->next->previous = NULL;
   }
 
   // set the standby circuit head to the thrid, possibly NULL
-  standby_circuits.head = standby_circuits.head->next->next;
+  standby_circuits.head = standby_circuits.head->next->next->next;
   // disconnect our tail from the other standby circuits
   onion_service->intro_circuits.tail->next = NULL;
   // set our intro length to 2
-  onion_service->intro_circuits.length = 2;
+  onion_service->intro_circuits.length = 3;
   // subtract two from the standby_circuits length
-  standby_circuits.length -= 2;
+  standby_circuits.length -= 3;
 
   xSemaphoreGive( standby_circuits_mutex );
   // END mutex
 
-  // TODO prompt daemon to add two more standby circuits
-  // TODO send establish intro commands to our two circuits
-  // TODO create descriptors for introduction points and send them to correct hs_dir
-  // TODO spawn a task to block on each introduction point and when an introduction arrives, extend the two hop circuit to rendezvous with the client,
-  // spawn another task to block on that tcp buffer, forward relay data's to the rx_queue
-  // TODO spawn a task to block on the tx_queue and send any outgoing data to the correct circuit
+  // TODO send establish intro commands to our three circuits
+  node = onion_service->intro_circuits.head;
+
+  for ( i = 0; i < onion_service->intro_circuits.length; i++ ) {
+    node->circuit.rx_queue = onion_service->rx_queue;
+
+    if ( d_router_establish_intro( &node->circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to establish intro with a circuit" );
+#endif
+
+      return NULL;
+    }
+
+    node = node->next;
+  }
+
+  // BEGIN mutex
+  /* xSemaphoreTake( network_consensus_mutex, portMAX_DELAY ); */
+
+  valid_after = network_consensus.valid_after;
+  hsdir_interval = network_consensus.hsdir_interval;
+
+  xSemaphoreGive( network_consensus_mutex );
+  // END mutex
+
+  time_period = ( valid_after / 60 - 12 * 60 ) / hsdir_interval;
+
+  // TODO generate second layer plaintext
+  /* if ( d_generate_second_plaintext( &second_layer, &onion_service->intro_circuits, valid_after ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+      /* ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" ); */
+/* #endif */
+
+      /* return NULL; */
+  /* } */
+  // TODO encrypt second layer plaintext
+  // TODO create first layer plaintext
+  // TODO encrypt first layer plaintext
+  // TODO create outer descriptor wrapper
+  // TODO send outer descriptor wrapper to the correct HSDIR nodes
+  // TODO create a task to block on the rx_queue
+
   // return the onion service
   return onion_service;
+}
+
+void v_handle_onion_service( void* pv_parameters ) {
+  // TODO block on rx_queue
+  // TODO when an intro request comes in, respond to it
+  // TODO when a relay_begin comes in, create a task to block on the local tcp stream
+  // TODO when a relay_data comes in, send the data to the local tcp stream
+  // TODO when a destroy comes in close and clean the circuit and local tcp stream
+}
+
+/* int d_generate_second_plaintext( unsigned char** second_layer, DoublyLinkedOnionCircuitList* intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key ) { */
+  /* int i; */
+  /* int idx; */
+  /* unsigned char* working_second_layer; */
+  /* unsigned char packed_link_specifiers[1 + 4 + 6 + ID_LENGTH]; */
+  /* unsigned char tmp_pub_key[CURVE25519_KEYSIZE]; */
+  /* DoublyLinkedOnionCircuit* node; */
+
+  /* const char* second_layer_template = */
+    /* "create2-formats 2\n" */
+    /* ; */
+  /* const char* introduction_point_template = */
+    /* "introduction-point ******************************************\n" */
+    /* "onion-key ntor ******************************************\n" */
+    /* "auth-key\n" */
+    /* // TODO this is a crosscert with the descriptor signing key as the main key and the intoduction point authentication key as the mandatory extension */
+    /* "-----BEGIN ED25519 CERT-----********************************************************************************************************************************************-----END ED25519 CERT-----\n" */
+    /* // TODO this is the public cruve25519 key used to encrypt the introduction request */
+    /* "enc-key ntor ******************************************\n" */
+    /* "enc-key-cert\n" */
+    /* // TODO this is a crosscert with the descriptor signing key as the main key and the the ed25519 equivilent of the above key used as the mandatory extension */
+    /* "-----BEGIN ED25519 CERT-----********************************************************************************************************************************************-----END ED25519 CERT-----\n" */
+    /* ; */
+
+  /* *second_layer = malloc( sizeof( unsigned char ) * ( strlen( second_layer_template ) + strlen( introduction_point_template ) * intro_circuits.length ) ); */
+
+  /* working_second_layer = *second_layer; */
+
+  /* memcpy( working_second_layer, second_layer_template, strlen( second_layer_template ) ); */
+  /* working_second_layer += strlen( second_layer_template ); */
+
+  /* node = intro_circuits.head; */
+
+  /* for ( i = 0; i < intro_circuits.length; i++ ) { */
+    /* memcpy( working_second_layer, introduction_point_template, strlen( introduction_point_template ) ); */
+    /* // skip past the intordouction-point header */
+    /* working_second_layer += 19; */
+    /* v_generate_packed_link_specifiers( node->circuit.relay_list->tail->relay, packed_link_specifiers ); */
+    /* v_base_64_encode( working_second_layer, packed_link_specifiers, sizeof( packed_link_specifiers ) ); */
+    /* // skip past the link specifiers and \nonion-key ntor */
+    /* working_second_layer += 42 + 16; */
+    /* v_base_64_encode( working_second_layer, node->circuit.relay_list->tail->relay->ntor_onion_key, H_LENGTH ); */
+    /* // skip past the onion key and next header */
+    /* working_second_layer += 42 + 38; */
+
+    /* if ( d_generate_packed_ed_crosscert( working_second_layer, descriptor_signing_key, &node->circuit.auth_key, 0x09, valid_after ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+      /* ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" ); */
+/* #endif */
+    /* } */
+
+    /* // skip past the cert and next header */
+    /* working_second_layer += 140 + 40; */
+
+    /* idx = CURVE25519_KEYSIZE; */
+    /* wolf_succ = wc_curve25519_export_public_ex( &node->circuit.intro_encrypt_key, tmp_pub_key, &idx, EC25519_LITTLE_ENDIAN ); */
+
+    /* if ( wolf_succ != 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+      /* ESP_LOGE( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ ); */
+/* #endif */
+
+      /* return -1; */
+    /* } */
+
+    /* v_base_64_encode( working_second_layer, tmp_pub_key, CURVE25519_KEYSIZE ); */
+    /* // skip past the enc key and next header */
+    /* working_second_layer += 42 + 42; */
+
+    /* // TODO create the derived key by converting our intro_encrypt_key into an ed25519 key */
+    /* if ( d_generate_packed_ed_crosscert( working_second_layer, descriptor_signing_key, &derived_key, 0x0B, valid_after ) < 0 ) { */
+/* #ifdef DEBUG_MINITOR */
+      /* ESP_LOGE( MINITOR_TAG, "Failed to generate the enc-key cross cert" ); */
+/* #endif */
+    /* } */
+
+    /* node = node->next; */
+  /* } */
+/* } */
+
+/* void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers ) { */
+  /* // set the specifier count */
+  /* packed_link_specifiers[0] = 2; */
+
+  /* // IPv4 specifier */
+  /* // set the type */
+  /* packed_link_specifiers[1] = IPv4Link; */
+  /* // set the length */
+  /* packed_link_specifiers[2] = 6; */
+  /* // set the address and port */
+  /* packed_link_specifiers[6] = (unsigned char)( relay->address >> 24 ); */
+  /* packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 ); */
+  /* packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 ); */
+  /* packed_link_specifiers[3] = (unsigned char)relay->address; */
+  /* packed_link_specifiers[7] = (unsigned char)relay->or_port >> 8; */
+  /* packed_link_specifiers[8] = (unsigned char)relay->or_port; */
+
+  /* // LEGACYLink specifier */
+  /* // set the type */
+  /* packed_link_specifiers[9] = LEGACYLink; */
+  /* // set the length */
+  /* packed_link_specifiers[10] = ID_LENGTH; */
+  /* // copy the identity in */
+  /* memcpy( *packed_link_specifiers + 10, relay->identity, ID_LENGTH ); */
+/* } */
+
+/* int d_generate_packed_ed_crosscert( unsigned char* destination, ed25519_key* main_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) { */
+  /* unsigned int idx; */
+  /* int wolf_succ; */
+  /* // set epoch hours to current epoch hours plus three hours later */
+  /* int epoch_hours = valid_after / 60 / 60 + 3; */
+
+  /* // set the version */
+  /* destination[0] = 0x01; */
+  /* // set the cert type */
+  /* destination[1] = cert_type; */
+  /* // set the expiration date, four bytes */
+  /* destination[2] = (unsigned char)( epoch_hours >> 24 ); */
+  /* destination[3] = (unsigned char)( epoch_hours >> 16 ); */
+  /* destination[4] = (unsigned char)( epoch_hours >> 8 ); */
+  /* destination[5] = (unsigned char)epoch_hours; */
+  /* // set the cert key type, same a cert type */
+  /* destination[6] = cert_type; */
+  /* // copy the main key */
+  /* idx = ED25519_PUB_KEY_SIZE; */
+  /* wolf_succ = wc_ed25519_export_public( &main_key, destination + 7, &idx ); */
+
+  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* // set n extensions to 1 */
+  /* destination[39] = 1; */
+  /* // set the ext length to key size */
+  /* destination[40] = 0; */
+  /* destination[41] = ED25519_PUB_KEY_SIZE; */
+  /* // set the ext type to 0x04 */
+  /* destination[42] = 0x04; */
+  /* // set ext flag to 1 */
+  /* destination[43] = 0x01; */
+  /* // copy the signing key */
+  /* idx = ED25519_PUB_KEY_SIZE; */
+  /* wolf_succ = wc_ed25519_export_public( &signing_key, destination + 44, &idx ); */
+
+  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* idx = 64; */
+  /* wolf_succ = wc_ed25519_sign_msg( destination, 74, destination + 76, &idx, signing_key ); */
+
+  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
+/* #ifdef DEBUG_MINITOR */
+    /* ESP_LOGE( MINITOR_TAG, "Failed to sign the ed crosscert, error code: %d", wolf_succ ); */
+/* #endif */
+
+    /* return -1; */
+  /* } */
+
+  /* return 0; */
+/* } */
+
+int d_router_establish_intro( OnionCircuit* circuit ) {
+  int wolf_succ;
+  unsigned int idx;
+  int64_t ordered_digest_length = (int64_t)DIGEST_LEN;
+  unsigned char ordered_digest_length_buffer[8];
+  WC_RNG rng;
+  Sha3 reusable_sha3;
+  unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
+  Cell unpacked_cell;
+  Cell* recv_unpacked_cell = NULL;
+  unsigned char* packed_cell;
+  unsigned char* prefixed_cell;
+  const char* prefix_str = "Tor establish-intro cell v1";
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  wc_InitRng( &rng );
+  wc_ed25519_init( &circuit->auth_key );
+
+  wc_ed25519_make_key( &rng, 32, &circuit->auth_key );
+
+  wc_FreeRng( &rng );
+
+  idx = ED25519_PUB_KEY_SIZE;
+  wolf_succ = wc_ed25519_export_public( &circuit->auth_key, tmp_pub_key, &idx );
+
+  if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  unpacked_cell.circ_id = circuit->circ_id;
+  unpacked_cell.command = RELAY;
+  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+
+  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_COMMAND_ESTABLISH_INTRO;
+  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->length = 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN + 2 + ED25519_SIG_SIZE;
+  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEstablishIntro ) );
+
+  ( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->type = ESTABLISH_INTRO_CURRENT;
+  ( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro = malloc( sizeof( EstablishIntroCurrent ) );
+
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key_type = EDSHA3;
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key_length = ED25519_PUB_KEY_SIZE;
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key = malloc( sizeof( unsigned char ) * ED25519_PUB_KEY_SIZE );
+  memcpy( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key, tmp_pub_key, ED25519_PUB_KEY_SIZE );
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->extension_count = 0;
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->signature_length = ED25519_SIG_SIZE;
+  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->signature = NULL;
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  ESP_LOGE( MINITOR_TAG, "%lld", ordered_digest_length );
+  ESP_LOGE( MINITOR_TAG, "%lld", (int64_t)DIGEST_LEN );
+
+  ordered_digest_length_buffer[0] = (unsigned char)( ordered_digest_length >> 56 );
+  ordered_digest_length_buffer[1] = (unsigned char)( ordered_digest_length >> 48 );
+  ordered_digest_length_buffer[2] = (unsigned char)( ordered_digest_length >> 40 );
+  ordered_digest_length_buffer[3] = (unsigned char)( ordered_digest_length >> 32 );
+  ordered_digest_length_buffer[4] = (unsigned char)( ordered_digest_length >> 24 );
+  ordered_digest_length_buffer[5] = (unsigned char)( ordered_digest_length >> 16 );
+  ordered_digest_length_buffer[6] = (unsigned char)( ordered_digest_length >> 8 );
+  ordered_digest_length_buffer[7] = (unsigned char)ordered_digest_length;
+
+  /* wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&ordered_digest_length, 8 ); */
+  wc_Sha3_256_Update( &reusable_sha3, ordered_digest_length_buffer, sizeof( ordered_digest_length_buffer ) );
+  wc_Sha3_256_Update( &reusable_sha3, circuit->relay_list.tail->relay->nonce, DIGEST_LEN );
+  wc_Sha3_256_Update( &reusable_sha3, packed_cell + 5 + 11, 3 + ED25519_PUB_KEY_SIZE + 1 );
+  wc_Sha3_256_Final( &reusable_sha3, packed_cell + 5 + 11 + 3 + ED25519_PUB_KEY_SIZE + 1 );
+
+  prefixed_cell = malloc( sizeof( unsigned char ) * ( strlen( prefix_str ) + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN ) );
+  memcpy( prefixed_cell, prefix_str, strlen( prefix_str ) );
+  memcpy( prefixed_cell + strlen( prefix_str ), packed_cell + 5 + 11, 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN );
+
+  idx = ED25519_SIG_SIZE;
+  wolf_succ = wc_ed25519_sign_msg(
+    prefixed_cell,
+    strlen( prefix_str ) + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN,
+    packed_cell + 5 + 11 + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN + 2,
+    &idx,
+    &circuit->auth_key
+  );
+
+  free( prefixed_cell );
+
+  if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to generate establish intro signature, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "Sending establish intro to %d", circuit->relay_list.tail->relay->or_port );
+
+  if ( d_send_packed_relay_cell_and_free( packed_cell, circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
+#endif
+  }
+
+  while ( 1 ) {
+    ESP_LOGE( MINITOR_TAG, "Waiting for intro response" );
+    xQueueReceive( circuit->rx_queue, &recv_unpacked_cell, portMAX_DELAY );
+
+    if ( recv_unpacked_cell->circ_id != circuit->circ_id ) {
+      xQueueSendToBack( circuit->rx_queue, (void*)(&recv_unpacked_cell), portMAX_DELAY );
+    } else {
+      break;
+    }
+  }
+
+  ESP_LOGE( MINITOR_TAG, "got cell command %d", recv_unpacked_cell->command );
+
+  if ( recv_unpacked_cell->command != RELAY ) {
+    return -1;
+  }
+
+  if ( recv_unpacked_cell->command == RELAY ) {
+    ESP_LOGE( MINITOR_TAG, "got relay command %d", ( (PayloadRelay*)recv_unpacked_cell->payload )->command );
+  }
+
+  free_cell( recv_unpacked_cell );
+  free( recv_unpacked_cell );
+
+  return 0;
+}
+
+int d_derive_blinded_keys( unsigned char output_priv_key[ED25519_PRV_KEY_SIZE], ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char nonce[32], unsigned char* secret, int secret_length ) {
+  int wolf_succ;
+  unsigned int idx;
+  unsigned int idy;
+  Sha3 reusable_sha3;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  Sha512 reusable_sha512;
+  unsigned char reusable_sha512_sum[WC_SHA512_DIGEST_SIZE];
+  ge_p3 expanded_secret_key;
+  /* ge_p3 expanded_secret_key, expanded_hash; */
+  unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
+  unsigned char tmp_priv_key[ED25519_PRV_KEY_SIZE];
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+  wc_InitSha512( &reusable_sha512 );
+
+  idx = ED25519_PRV_KEY_SIZE;
+  idy = ED25519_PUB_KEY_SIZE;
+  wolf_succ = wc_ed25519_export_key( master_key, tmp_priv_key, &idx, tmp_pub_key, &idy );
+
+  if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to export master key, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"Derive temporary signing key", strlen( "Derive temporary signing key" ) + 1 );
+  wc_Sha3_256_Update( &reusable_sha3, tmp_pub_key, ED25519_PUB_KEY_SIZE );
+
+  if ( secret != NULL ) {
+    wc_Sha3_256_Update( &reusable_sha3, secret, secret_length );
+  }
+
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_ED_BASEPOINT, HS_ED_BASEPOINT_LENGTH );
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"key-blind", strlen( "key-blind" ) );
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&period_number, 8 );
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&period_length, 8 );
+  wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+  reusable_sha3_sum[0] &= 248;
+  reusable_sha3_sum[31] &= 63;
+  reusable_sha3_sum[31] |= 64;
+
+  /* ge_frombytes_vartime( &expanded_hash, reusable_sha3_sum ); */
+  ge_frombytes_vartime( &expanded_secret_key, tmp_priv_key );
+  // TODO this may not be the correct a' = h a mod 1 operation, the actual tor implementation does something different
+  // will need to verify this produces the correct key
+  ed25519_smult( &expanded_secret_key, &expanded_secret_key, reusable_sha3_sum );
+
+  ge_p3_tobytes( output_priv_key, &expanded_secret_key );
+
+  wc_Sha512Update( &reusable_sha512, (unsigned char*)"Derive temporary signing key hash input", strlen( "Derive temporary signing key hash input" ) );
+  wc_Sha512Update( &reusable_sha512, tmp_priv_key + 32, 32 );
+  wc_Sha512Final( &reusable_sha512, reusable_sha512_sum );
+
+  memcpy( output_priv_key + 32, reusable_sha512_sum, 32 );
+
+  return 0;
+}
+
+int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_directory ) {
+  int fd;
+  int wolf_succ;
+  unsigned int idx;
+  unsigned int idy;
+  unsigned char version = 0x03;
+  struct stat st;
+  WC_RNG rng;
+  Sha3 reusable_sha3;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
+  unsigned char tmp_priv_key[ED25519_PRV_KEY_SIZE];
+  unsigned char raw_onion_address[ED25519_PUB_KEY_SIZE + 2 + 1];
+  char onion_address[63] = { 0 };
+  char working_file[256];
+
+  strcpy( onion_address + 56, ".onion" );
+
+  wc_InitRng( &rng );
+  wc_ed25519_init( &onion_service->master_key );
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  /* rmdir( onion_service_directory ); */
+
+  // directory doesn't exist, create the keys
+  if ( stat( onion_service_directory, &st ) == -1 ) {
+    if ( mkdir( onion_service_directory, 0755 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to create %s for onion service, errno: %d", onion_service_directory, errno );
+#endif
+
+      return -1;
+    }
+
+    wc_ed25519_make_key( &rng, 32, &onion_service->master_key );
+
+    wc_FreeRng( &rng );
+
+    idx = ED25519_PRV_KEY_SIZE;
+    idy = ED25519_PUB_KEY_SIZE;
+    wolf_succ = wc_ed25519_export_key( &onion_service->master_key, tmp_priv_key, &idx, tmp_pub_key, &idy );
+
+    if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export ed25519 key, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)".onion checksum", strlen( ".onion checksum" ) );
+    wc_Sha3_256_Update( &reusable_sha3, tmp_pub_key, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, &version, 1 );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+    memcpy( raw_onion_address, tmp_pub_key, ED25519_PUB_KEY_SIZE );
+    memcpy( raw_onion_address + ED25519_PUB_KEY_SIZE, reusable_sha3_sum, 2 );
+    raw_onion_address[ED25519_PUB_KEY_SIZE + 2] = version;
+
+    v_base_32_encode( onion_address, raw_onion_address, sizeof( raw_onion_address ) );
+
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/hostname" );
+
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( write( fd, onion_address, sizeof( char ) * strlen( onion_address ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/public_key_ed25519" );
+
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( write( fd, tmp_pub_key, ED25519_PUB_KEY_SIZE ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/private_key_ed25519" );
+
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( write( fd, tmp_priv_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+  // directory exists, load the keys
+  } else {
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/private_key_ed25519" );
+
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( read( fd, tmp_priv_key, sizeof( char ) * ED25519_PUB_KEY_SIZE ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/public_key_ed25519" );
+
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+
+    if ( read( fd, tmp_pub_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    wolf_succ = wc_ed25519_import_private_key( tmp_priv_key, ED25519_PRV_KEY_SIZE, tmp_pub_key, ED25519_PUB_KEY_SIZE, &onion_service->master_key );
+
+    if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to import ed25519 key, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+  }
+
+  return 0;
 }
 
 // shut down a hidden service

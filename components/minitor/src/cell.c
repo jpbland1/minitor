@@ -634,11 +634,16 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
         // pack the signature length
         pack_two_bytes( packed_cell, ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature_length );
         // pack the signature
-        pack_buffer(
-          packed_cell,
-          ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature,
-          ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature_length
-          );
+        // TODO this should probably be removed, I can't think of a time where this shouldn't be NULL
+        if ( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature != NULL ) {
+          pack_buffer(
+            packed_cell,
+            ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature,
+            ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature_length
+            );
+        } else {
+          packed_cell += ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature_length;
+        }
       }
 
       break;
@@ -1584,7 +1589,10 @@ void free_relay_payload( void * payload, unsigned char command ) {
         }
 
         // free the signature of the current establish intro
-        free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature );
+        // TODO this should probably be removed, I can't think of a time where this shouldn't be NULL
+        if ( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature != NULL ) {
+          free( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->signature );
+        }
       }
 
       // free the intro struct

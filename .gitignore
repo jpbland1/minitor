@@ -1,1 +1,3 @@
 *.swp
+*build
+components/wifi_connect/include/wifi_connect.h

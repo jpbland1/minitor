@@ -302,7 +302,7 @@ typedef enum RelayResolvedType {
 } RelayResolvedType;
 
 typedef enum AuthKeyType {
-  EDSHA3 = 2,
+  EDSHA3 = 0x02,
 } AuthKeyType;
 
 typedef enum IntroExtensionType {
