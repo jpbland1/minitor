@@ -35,7 +35,6 @@ void app_main()
 {
   time_t now = 0;
   struct tm time_info = { 0 };
-  int err;
   esp_err_t ret;
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {

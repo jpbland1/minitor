@@ -21,11 +21,11 @@
 [X] Setup fat filesystem on esp32, required to reasonably host onion services
 [] Register a tor onion service
   [X] Generate onion service master identity keypair
-  [] Generate dirivative blinded keys from the identity keypair
-  [] Generate descriptor signing key
-  [] Generate descriptor encryption key
-  [] Generate and encrypt the descriptors
-  [] Calculate the position in the hash ring to upload the descriptors to
+  [?] Generate dirivative blinded keys from the identity keypair
+  [X] Generate descriptor signing key
+  [X] Generate descriptor encryption key
+  [?] Generate and encrypt the descriptors
+  [?] Calculate the position in the hash ring to upload the descriptors to
   [X] Generate introduction point authentication key
   [] Generate introduction point encryption key
   [X] Send a RELAY_COMMAND_ESTABLISH_INTRO cell to existing tor circuit to turn it into an introduction point

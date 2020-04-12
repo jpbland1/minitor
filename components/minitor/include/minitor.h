@@ -49,14 +49,18 @@
 #define HSDIR_INTERVAL_DEFAULT 1440
 #define HSDIR_N_REPLICAS_DEFAULT 2
 #define HSDIR_SPREAD_STORE_DEFAULT 4
+#define HS_DESC_SIG_PREFIX "Tor onion service descriptor sig v3"
+#define HS_DESC_SIG_PREFIX_LENGTH 35
 
 typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
+typedef struct DoublyLinkedHsDirRelay DoublyLinkedHsDirRelay;
 
 typedef enum CircuitStatus {
   CIRCUIT_BUILDING,
   CIRCUIT_STANDBY,
   CIRCUIT_INTRO_POINT,
+  CIRCUIT_PUBLISH,
   CIRCUIT_RENDEZVOUS,
 } CircuitStatus;
 
@@ -76,19 +80,20 @@ typedef struct OnionRelay {
   unsigned char identity[ID_LENGTH];
   unsigned char digest[ID_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
-  Sha running_sha_forward;
-  Sha running_sha_backward;
-  Aes aes_forward;
-  Aes aes_backward;
-  unsigned char nonce[DIGEST_LEN];
   unsigned int address;
   short or_port;
   short dir_port;
+  unsigned char hsdir;
 } OnionRelay;
 
 struct DoublyLinkedOnionRelay {
   DoublyLinkedOnionRelay* previous;
   DoublyLinkedOnionRelay* next;
+  Sha running_sha_forward;
+  Sha running_sha_backward;
+  Aes aes_forward;
+  Aes aes_backward;
+  unsigned char nonce[DIGEST_LEN];
   OnionRelay* relay;
 };
 
@@ -122,6 +127,12 @@ typedef struct DoublyLinkedOnionCircuitList {
   DoublyLinkedOnionCircuit* tail;
 } DoublyLinkedOnionCircuitList;
 
+typedef struct HsDirIndexNode {
+  unsigned char hash[WC_SHA3_256_DIGEST_SIZE];
+  OnionRelay* relay;
+  unsigned char chosen;
+} HsDirIndexNode;
+
 typedef struct OnionService {
   unsigned short exit_port;
   unsigned short local_port;
@@ -143,27 +154,48 @@ void v_circuit_keepalive( void* pv_parameters );
 void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list );
 int d_fetch_consensus_info();
 int d_parse_date_byte( char byte, int* year, int* year_found, int* month, int* month_found, int* day, int* day_found, int* hour, int* hour_found, int* minute, int* minute_found, int* second, int* second_found, struct tm* temp_time );
-void v_base_64_decode_buffer( unsigned char* destination, char* source, int source_length );
+void v_base_64_decode( unsigned char* destination, char* source, int source_length );
+void v_base_64_encode( char* destination, unsigned char* source, int source_length );
+void v_base_32_encode( char* destination, unsigned char* source, int source_length );
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
+void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
 int d_setup_init_circuits( int circuit_count );
-int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit );
+int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length );
+int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
+int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
+int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude );
+int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, unsigned char* exclude );
+int d_build_onion_circuit( OnionCircuit* circuit );
+int d_destroy_onion_circuit( OnionCircuit* circuit );
+int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length );
 void v_handle_circuit( void* pv_parameters );
 int d_router_extend2( OnionCircuit* onion_circuit, int node_index );
 int d_router_create2( OnionCircuit* onion_circuit );
 int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
-int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
+int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key );
 int d_router_handshake( WOLFSSL* ssl );
 int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der );
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
 void v_destroy_onion_circuit( int circ_id );
-int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit );
-int d_send_packed_relay_cell_and_free( unsigned char* packed_cell, OnionCircuit* circuit );
+int d_fetch_descriptor_info( OnionCircuit* circuit );
+int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list );
 int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha );
 int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list );
 unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size );
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );
+int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store );
+int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit );
+void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_array, int index_length );
+int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_array, int index_length );
+int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* ciphertext, int ciphertext_length, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter );
+int d_generate_first_plaintext( unsigned char** first_layer, unsigned char* ciphertext, int ciphertext_length );
+int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* plaintext, int plaintext_length, unsigned char* secret_data, int secret_data_length, const char* string_constant, int string_constant_length, unsigned char* sub_credential, int64_t revision_counter );
+int d_generate_second_plaintext( unsigned char** second_layer, DoublyLinkedOnionCircuitList* intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key );
+void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers );
+int d_generate_packed_crosscert( unsigned char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after );
+void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* input, int sign_bit );
 int d_router_establish_intro( OnionCircuit* circuit );
-int d_derive_blinded_keys( unsigned char output_priv_key[ED25519_PRV_KEY_SIZE], ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char nonce[32], unsigned char* secret, int secret_length );
+int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char* secret, int secret_length );
 int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_directory );
 
 #endif

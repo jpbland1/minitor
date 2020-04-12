@@ -10,7 +10,8 @@
 #define PK_ENC_LEN 128
 #define PK_PAD_LEN 42
 #define HASH_LEN 20
-#define PAYLOAD_LEN 509
+#define PAYLOAD_LEN CELL_LEN - 5
+#define RELAY_PAYLOAD_LEN PAYLOAD_LEN - 11
 #define MAC_LEN 32
 #define PK_PUBKEY_LEN 32
 #define TAP_C_HANDSHAKE_LEN DH_LEN+KEY_LEN+PK_PAD_LEN
@@ -77,7 +78,7 @@ typedef enum PaddingCommand {
 } PaddingCommand;
 
 typedef enum DestroyCode {
-  NONE = 0,
+  NO_DESTROY_CODE = 0,
   PROTOCOL = 1,
   INTERNAL = 2,
   REQUESTED = 3,

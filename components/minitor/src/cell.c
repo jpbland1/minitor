@@ -1,3 +1,4 @@
+#include <string.h>
 #include <stdlib.h>
 #include "esp_system.h"
 /* #include "./config.h" */
@@ -380,16 +381,18 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
   // TODO  make sure pointer math works this way
   if ( unpacked_cell->command != VERSIONS && unpacked_cell->command < VPADDING ) {
     // relay and relay early cells need random padding
-    if ( unpacked_cell->command == RELAY || unpacked_cell->command == RELAY_EARLY ) {
-      while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) {
-        *packed_cell = (unsigned char)esp_random();
-        packed_cell += 1;
-      }
+    if ( ( unpacked_cell->command == RELAY || unpacked_cell->command == RELAY_EARLY ) && ( (PayloadRelay*)unpacked_cell->payload )->command != RELAY_BEGIN_DIR ) {
+      esp_fill_random( packed_cell, CELL_LEN - ( packed_cell - packed_cell_start ) );
+      /* while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) { */
+        /* *packed_cell = (unsigned char)esp_random(); */
+        /* packed_cell += 1; */
+      /* } */
     } else {
-      while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) {
-        *packed_cell = (unsigned char)0;
-        packed_cell += 1;
-      }
+      memset( packed_cell, 0, CELL_LEN - ( packed_cell - packed_cell_start ) );
+      /* while ( ( packed_cell - packed_cell_start ) < CELL_LEN ) { */
+        /* *packed_cell = (unsigned char)0; */
+        /* packed_cell += 1; */
+      /* } */
     }
   }
 

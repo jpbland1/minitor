@@ -1,3 +1,1 @@
-implement a method of converting our intro_encrypt key into an ed25519 key, look in src/ext/ed25519/donna/ed25519_tor.c for the tor implementation and read https://moderncrypto.org/mail-archive/curves/2014/000205.html
-for a plaintext explaination. Additionally determine if the descriptor signing key is the main key or the extension key for the intro descriptor certs, look at
-src/feature/hs/hs_service.c and find out which key is the signing key and which is the main key
+test actually connecting to the hidden service, debug the descriptor upload positions and contents to make sure they are correct and the client can actually send the introduction

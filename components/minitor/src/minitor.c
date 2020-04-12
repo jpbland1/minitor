@@ -26,7 +26,7 @@
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
-static const char* MINITOR_TAG = "MINITOR: ";
+static const char* MINITOR_TAG = "MINITOR";
 
 // TODO shared state must be protected by mutex
 static unsigned int circ_id_counter = 0x80000000;
@@ -49,6 +49,20 @@ static DoublyLinkedOnionRelayList suitable_relays = {
   .tail = NULL,
 };
 static SemaphoreHandle_t suitable_relays_mutex;
+
+static DoublyLinkedOnionRelayList used_guards = {
+  .length = 0,
+  .head = NULL,
+  .tail = NULL,
+};
+static SemaphoreHandle_t used_guards_mutex;
+
+static DoublyLinkedOnionRelayList hsdir_relays = {
+  .length = 0,
+  .head = NULL,
+  .tail = NULL,
+};
+static SemaphoreHandle_t hsdir_relays_mutex;
 
 static DoublyLinkedOnionCircuitList standby_circuits = {
   .length = 0,
@@ -92,6 +106,8 @@ int v_minitor_INIT() {
   circ_id_mutex = xSemaphoreCreateMutex();
   network_consensus_mutex = xSemaphoreCreateMutex();
   suitable_relays_mutex = xSemaphoreCreateMutex();
+  used_guards_mutex = xSemaphoreCreateMutex();
+  hsdir_relays_mutex = xSemaphoreCreateMutex();
   standby_circuits_mutex = xSemaphoreCreateMutex();
   intro_circuits_mutex = xSemaphoreCreateMutex();
   rend_circuits_mutex = xSemaphoreCreateMutex();
@@ -250,11 +266,18 @@ int d_fetch_consensus_info() {
     .tail = NULL,
     .length = 0,
   };
+  DoublyLinkedOnionRelayList result_hsdir_relays = {
+    .head = NULL,
+    .tail = NULL,
+    .length = 0,
+  };
   // string matching variables for relays and tags
   const char* relay = "\nr ";
   int relay_found = 0;
-  const char* tag = "\ns ";
-  int tag_found = 0;
+  const char* s_tag = "\ns ";
+  int s_tag_found = 0;
+  const char* pr_tag = "\npr ";
+  int pr_tag_found = 0;
   // counts the current element of the relay we're on since they are in
   // a set order
   int relay_element_num = -1;
@@ -277,6 +300,8 @@ int d_fetch_consensus_info() {
   int stable_found = 0;
   const char* valid = "Valid";
   int valid_found = 0;
+  const char* hsdir = "HSDir=1-2";
+  int hsdir_found = 0;
 
   // information for connecting to the directory server
   int i;
@@ -444,7 +469,7 @@ int d_fetch_consensus_info() {
             // if we've got 43 characters of the base64 value, decode it and
             // copy it into the unsigned char array
             if ( previous_shared_rand_length == 43 ) {
-              v_base_64_decode_buffer( result_network_consensus.previous_shared_rand, previous_shared_rand_64, previous_shared_rand_length );
+              v_base_64_decode( result_network_consensus.previous_shared_rand, previous_shared_rand_64, previous_shared_rand_length );
               previous_shared_rand_found = -1;
             // otherwise keep copying the base64 characters into the array
             } else {
@@ -465,7 +490,7 @@ int d_fetch_consensus_info() {
         if ( shared_rand_found != -1 ) {
           if ( shared_rand_found == strlen( shared_rand ) ) {
             if ( shared_rand_length == 43 ) {
-              v_base_64_decode_buffer( result_network_consensus.shared_rand, shared_rand_64, shared_rand_length );
+              v_base_64_decode( result_network_consensus.shared_rand, shared_rand_64, shared_rand_length );
               shared_rand_found = -1;
             } else {
               shared_rand_64[shared_rand_length] = rx_buffer[i];
@@ -514,8 +539,8 @@ int d_fetch_consensus_info() {
               relay_element_num = -1;
 
               // if we've matched the tag then increment found, since \n is part of the tag
-              if ( rx_buffer[i] == tag[tag_found] ) {
-                tag_found++;
+              if ( rx_buffer[i] == s_tag[s_tag_found] ) {
+                s_tag_found++;
               }
             // otherwise if we haven't hit a newline or a space we need to parse an element
             } else {
@@ -529,7 +554,7 @@ int d_fetch_consensus_info() {
 
                   // if we hit 27 decode the base64 string into the char array for the relay
                   if ( identity_length == 27 ) {
-                    v_base_64_decode_buffer( canidate_relay->relay->identity, identity, identity_length );;
+                    v_base_64_decode( canidate_relay->relay->identity, identity, identity_length );;
                   }
 
                   break;
@@ -540,7 +565,7 @@ int d_fetch_consensus_info() {
                   digest_length++;
 
                   if ( digest_length == 27 ) {
-                    v_base_64_decode_buffer( canidate_relay->relay->digest, digest, digest_length );;
+                    v_base_64_decode( canidate_relay->relay->digest, digest, digest_length );;
                   }
 
                   break;
@@ -580,32 +605,19 @@ int d_fetch_consensus_info() {
               }
             }
           // otherwise we're done parsing the relay line and we need to parse the tags
-          } else {
+          } else if ( s_tag_found != -1 ) {
             // if we've already matched the tag string
-            if ( tag_found == strlen( tag ) ) {
+            if ( s_tag_found == strlen( s_tag ) ) {
               // if we hit a newline we're done parsing the tags and need to add it to
               // the array lists
               if ( rx_buffer[i] == '\n' ) {
-                // if the relay is fast, running, stable and valid then we want to use it
-                if ( fast_found == strlen( fast ) && running_found == strlen( running ) && stable_found == strlen( stable ) && valid_found == strlen( valid ) ) {
-                  v_add_relay_to_list( canidate_relay, &result_suitable_relays );
-                // otherwise its not suiteable and wee need to free the canidate
-                } else {
-                  free( canidate_relay->relay );
-                  free( canidate_relay );
-                }
+                // mark the s_tag found as ended
+                s_tag_found = -1;
 
-                // clean up the associated string matching variables and
-                // reset the canidate relay to null
-                canidate_relay = NULL;
-                relay_found = 0;
-                identity_length = 0;
-                digest_length = 0;
-                tag_found = 0;
-                fast_found = 0;
-                running_found = 0;
-                stable_found = 0;
-                valid_found = 0;
+                // if we've matched the pr_tag then increment found, since \n is part of the tag
+                if ( rx_buffer[i] == pr_tag[pr_tag_found] ) {
+                  pr_tag_found++;
+                }
               // otherwise we need to match the tags
               } else {
                 // if the found is less than the length of the string
@@ -646,11 +658,55 @@ int d_fetch_consensus_info() {
                 }
               }
             // if we match the tag string increment the found
-            } else if ( rx_buffer[i] == tag[tag_found] ) {
-              tag_found++;
+            } else if ( rx_buffer[i] == s_tag[s_tag_found] ) {
+              s_tag_found++;
             // otherwise reset the found
             } else {
-              tag_found = 0;
+              s_tag_found = 0;
+            }
+          } else {
+            if ( pr_tag_found == strlen( pr_tag ) ) {
+              if ( rx_buffer[i] == '\n' ) {
+                if ( hsdir_found == strlen( hsdir ) ) {
+                  canidate_relay->relay->hsdir = 1;
+                  v_add_relay_to_list( canidate_relay, &result_hsdir_relays );
+                }
+
+                // if the relay is fast, running, stable and valid then we want to use it
+                if ( fast_found == strlen( fast ) && running_found == strlen( running ) && stable_found == strlen( stable ) && valid_found == strlen( valid ) ) {
+                  v_add_relay_to_list( canidate_relay, &result_suitable_relays );
+                // otherwise its not suiteable and wee need to free the canidate
+                } else {
+                  free( canidate_relay->relay );
+                  free( canidate_relay );
+                }
+
+                // clean up the associated string matching variables and
+                // reset the canidate relay to null
+                canidate_relay = NULL;
+                relay_found = 0;
+                identity_length = 0;
+                digest_length = 0;
+                s_tag_found = 0;
+                fast_found = 0;
+                running_found = 0;
+                stable_found = 0;
+                valid_found = 0;
+                pr_tag_found = 0;
+                hsdir_found = 0;
+              } else {
+                if ( hsdir_found < strlen( hsdir ) ) {
+                  if ( hsdir[hsdir_found] == rx_buffer[i] ) {
+                    hsdir_found++;
+                  } else {
+                    hsdir_found = 0;
+                  }
+                }
+              }
+            } else if ( rx_buffer[i] == pr_tag[pr_tag_found] ) {
+              pr_tag_found++;
+            } else {
+              pr_tag_found = 0;
             }
           }
         // if we've matched part of the tag increment found
@@ -672,10 +728,8 @@ int d_fetch_consensus_info() {
   network_consensus.fresh_until = result_network_consensus.fresh_until;
   network_consensus.valid_until = result_network_consensus.valid_until;
 
-  for ( i = 0; i < 32; i++ ) {
-    network_consensus.previous_shared_rand[i] = result_network_consensus.previous_shared_rand[i];
-    network_consensus.shared_rand[i] = result_network_consensus.shared_rand[i];
-  }
+  memcpy( network_consensus.previous_shared_rand, result_network_consensus.previous_shared_rand, 32 );
+  memcpy( network_consensus.shared_rand, result_network_consensus.shared_rand, 32 );
 
   xSemaphoreGive( network_consensus_mutex );
   // END mutex for the network consensus
@@ -734,6 +788,16 @@ int d_fetch_consensus_info() {
 
   xSemaphoreGive( suitable_relays_mutex );
   // END mutex for suitable relays
+
+  // BEGIN mutex for the network consensus
+  xSemaphoreTake( hsdir_relays_mutex, portMAX_DELAY );
+
+  hsdir_relays.length = result_hsdir_relays.length;
+  hsdir_relays.head = result_hsdir_relays.head;
+  hsdir_relays.tail = result_hsdir_relays.tail;
+
+  xSemaphoreGive( hsdir_relays_mutex );
+  // END mutex for the network consensus
 
   // we're done reading data from the directory server, shutdown and close the socket
   shutdown( sock_fd, 0 );
@@ -814,7 +878,7 @@ int d_parse_date_byte( char byte, int* year, int* year_found, int* month, int* m
 // decode a base64 string and put it into the destination byte buffer
 // NOTE it is up to the coller to make sure the destination can fit the
 // bytes being put into it
-void v_base_64_decode_buffer( unsigned char* destination, char* source, int source_length ) {
+void v_base_64_decode( unsigned char* destination, char* source, int source_length ) {
   // index variables
   int i;
   int j;
@@ -877,6 +941,38 @@ void v_base_64_decode_buffer( unsigned char* destination, char* source, int sour
   }
 }
 
+void v_base_64_encode( char* destination, unsigned char* source, int source_length ) {
+  int i;
+  unsigned char tmp_byte = 0;
+  int tmp_byte_length = 0;
+
+  for ( i = 0; i < source_length; i++ ) {
+    if ( tmp_byte_length == 0 ) {
+      *destination = base64_table[(int)( source[i] >> 2 )];
+      destination++;
+      tmp_byte = ( source[i] & 0x03 ) << 4;
+      tmp_byte_length = 2;
+    } else if ( tmp_byte_length == 2 ) {
+      tmp_byte |= source[i] >> 4;
+      *destination = base64_table[(int)tmp_byte];
+      destination++;
+      tmp_byte = ( source[i] & 0x0f ) << 2;
+      tmp_byte_length = 4;
+    } else if ( tmp_byte_length == 4 ) {
+      tmp_byte |= source[i] >> 6;
+      *destination = base64_table[(int)tmp_byte];
+      destination++;
+      *destination = base64_table[(int)( source[i] & ( 0x3f ) )];
+      destination++;
+      tmp_byte_length = 0;
+    }
+  }
+
+  if ( tmp_byte_length != 0 ) {
+    *destination = base64_table[(int)tmp_byte];
+  }
+}
+
 void v_base_32_encode( char* destination, unsigned char* source, int source_length ) {
   int i;
   unsigned char tmp_byte = 0;
@@ -919,6 +1015,10 @@ void v_base_32_encode( char* destination, unsigned char* source, int source_leng
       tmp_byte_length = 0;
     }
   }
+
+  if ( tmp_byte_length != 0 ) {
+    *destination = base32_table[(int)tmp_byte];
+  }
 }
 
 // add a linked onion relay to a doubly linked list of onion relays
@@ -954,18 +1054,16 @@ void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCir
 
 // create three hop circuits that can quickly be turned into introduction points
 int d_setup_init_circuits( int circuit_count ) {
+  int res = 0;
+
   int i;
-  DoublyLinkedOnionCircuitList result_standby_circuits = {
-    .length = 0,
-    .head = NULL,
-    .tail = NULL,
-  };
   DoublyLinkedOnionCircuit* node;
+  DoublyLinkedOnionRelay* tmp_db_relay;
 
   for ( i = 0; i < circuit_count; i++ ) {
     node = malloc( sizeof( DoublyLinkedOnionCircuit ) );
 
-    switch ( d_build_onion_circuit( node ) ) {
+    switch ( d_build_random_onion_circuit( &node->circuit, 3 ) ) {
       case -1:
         i--;
         free( node );
@@ -977,80 +1075,256 @@ int d_setup_init_circuits( int circuit_count ) {
         ESP_LOGE( MINITOR_TAG, "total fail" );
         break;
       case 0:
-        v_add_circuit_to_list( node, &result_standby_circuits );
-        ESP_LOGE( MINITOR_TAG, "no fail" );
+        node->circuit.status = CIRCUIT_STANDBY;
+
+        // spawn a task to block on the tls buffer and put the data into the rx_queue
+        xTaskCreatePinnedToCore(
+            v_handle_circuit,
+            "HANDLE_CIRCUIT",
+            4096,
+            (void*)(&node->circuit),
+            6,
+            &node->circuit.task_handle,
+            tskNO_AFFINITY
+          );
+
+        tmp_db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+        tmp_db_relay->next = NULL;
+        tmp_db_relay->previous = NULL;
+        tmp_db_relay->relay = node->circuit.relay_list.head->relay;
+
+        // BEGIN mutex for standby circuits
+        xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+
+        v_add_circuit_to_list( node, &standby_circuits );
+
+        xSemaphoreGive( standby_circuits_mutex );
+        // END mutex for standby circuits
+
+        res++;
         break;
       default:
         break;
     }
   }
 
-  // BEGIN mutex for standby circuits
-  xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-
-  node = result_standby_circuits.head;
-
-  for ( i = 0; i < result_standby_circuits.length; i++ ) {
-    v_add_circuit_to_list( node, &standby_circuits );
-    node = node->next;
-  }
-
-  xSemaphoreGive( standby_circuits_mutex );
-  // END mutex for standby circuits
-
-  return result_standby_circuits.length;
+  return res;
 }
 
 // create a tor circuit
-int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
-  struct sockaddr_in dest_addr;
-  int sock_fd;
-  WOLFSSL* ssl;
+int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length ) {
+  int succ;
 
+  succ = d_prepare_random_onion_circuit( circuit, circuit_length, NULL );
+
+  if ( succ < 0 ) {
+    return succ;
+  }
+
+  return d_build_onion_circuit( circuit );
+}
+
+int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay ) {
+  int succ;
+  DoublyLinkedOnionRelay* node;
+
+  succ = d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity );
+
+  if ( succ < 0 ) {
+    return succ;
+  }
+
+  node = malloc( sizeof( DoublyLinkedOnionRelay ) );
+  node->previous = NULL;
+  node->next = NULL;
+  node->relay = destination_relay;
+
+  v_add_relay_to_list( node, &circuit->relay_list );
+
+  return d_build_onion_circuit( circuit );
+}
+
+int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay ) {
+  int i;
+  DoublyLinkedOnionRelay* node;
+
+  if ( d_get_suitable_onion_relays( &circuit->relay_list, circuit_length - 1, destination_relay->identity ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to get suitable relays to extend to" );
+#endif
+  }
+
+  node = malloc( sizeof( DoublyLinkedOnionRelay ) );
+  node->previous = NULL;
+  node->next = NULL;
+  node->relay = destination_relay;
+
+  v_add_relay_to_list( node, &circuit->relay_list );
+
+  if ( d_fetch_descriptor_info( circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
+#endif
+
+    return -1;
+  }
+
+  node = circuit->relay_list.head;
+
+  ESP_LOGE( MINITOR_TAG, "Current relay list" );
+
+  for ( i = 0; i < circuit->relay_list.length; i++ ) {
+    ESP_LOGE( MINITOR_TAG, "or_port: %d", node->relay->or_port );
+
+    node = node->next;
+  }
+
+  // TODO possibly better to make d_build_onion_circuit capable of doing this instead of doing it here
+  for ( i = circuit->relay_list.built_length; i < circuit->relay_list.length; i++ ) {
+    // make an extend cell and send it to the hop
+    if ( d_router_extend2( circuit, i ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with relay %d", i + 1 );
+#endif
+
+      return -1;
+    }
+
+    circuit->relay_list.built_length++;
+  }
+
+  return 0;
+}
+
+int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude ) {
   // find 3 suitable relays from our directory information
-  linked_circuit->circuit.status = CIRCUIT_BUILDING;
-  linked_circuit->circuit.rx_queue = NULL;
+  circuit->status = CIRCUIT_BUILDING;
+  circuit->rx_queue = NULL;
 
   // BEGIN mutex for circ_id
   xSemaphoreTake( circ_id_mutex, portMAX_DELAY );
 
-  linked_circuit->circuit.circ_id = ++circ_id_counter;
+  circuit->circ_id = ++circ_id_counter;
 
   xSemaphoreGive( circ_id_mutex );
   // END mutex for circ_id
 
+  circuit->relay_list.length = 0;
+  circuit->relay_list.built_length = 0;
+
+  return d_get_suitable_onion_relays( &circuit->relay_list, circuit_length, exclude );
+}
+
+int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, unsigned char* exclude ) {
+  int i;
+  int j;
+  int duplicate;
+  int rand_index;
+  DoublyLinkedOnionRelay* node;
+  DoublyLinkedOnionRelay* tmp_node;
+
   // BEGIN mutex for suitable relays
   xSemaphoreTake( suitable_relays_mutex, portMAX_DELAY );
 
-  if ( suitable_relays.length < 3 ) {
+  if ( suitable_relays.length < desired_length ) {
+    xSemaphoreGive( suitable_relays_mutex );
     return -2;
   }
 
-  // set the head node of the suitable relays as our head node
-  linked_circuit->circuit.relay_list.head = suitable_relays.head;
-  // set the 3rd node of the suitable relays as our tail node
-  linked_circuit->circuit.relay_list.tail = suitable_relays.head->next->next;
+  for ( i = relay_list->length; i < desired_length; i++ ) {
+    duplicate = 0;
 
-  // set the fourth node of the suiteable relays previous node to NULL
-  if ( suitable_relays.length > 3 ) {
-    suitable_relays.head->next->next->next->previous = NULL;
+    rand_index = esp_random() % suitable_relays.length;
+
+    node = suitable_relays.head;
+
+    for ( j = 0; j < rand_index; j++ ) {
+      node = node->next;
+    }
+
+    if ( exclude != NULL && memcmp( node->relay->identity, exclude, ID_LENGTH ) == 0 ) {
+      i--;
+      continue;
+    }
+
+    tmp_node = relay_list->head;
+
+    for ( j = 0; j < relay_list->length; j++ ) {
+      if ( memcmp( node->relay->identity, tmp_node->relay->identity, ID_LENGTH ) == 0 ) {
+        duplicate = 1;
+        break;
+      }
+
+      tmp_node = tmp_node->next;
+    }
+
+    if ( duplicate ) {
+      i--;
+      continue;
+    }
+
+    if ( i == 0 ) {
+      // TODO possibly a bad idea to  have nested semaphore takes, makes it so that
+      // uninvolved contestents influence the used_guards_mutex and could cause a
+      // deadlock
+      // BEGIN mutex for suitable relays
+      xSemaphoreTake( used_guards_mutex, portMAX_DELAY );
+
+      tmp_node = used_guards.head;
+
+      for ( j = 0; j < used_guards.length; j++ ) {
+        if ( memcmp( node->relay->identity, tmp_node->relay->identity, ID_LENGTH ) == 0 ) {
+          duplicate = 1;
+          break;
+        }
+
+        tmp_node = tmp_node->next;
+      }
+
+      if ( duplicate ) {
+        i--;
+
+        xSemaphoreGive( used_guards_mutex );
+        // END mutex for suitable relays
+
+        continue;
+      }
+    }
+
+    tmp_node = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    tmp_node->previous = NULL;
+    tmp_node->next = NULL;
+    tmp_node->relay = node->relay;
+
+    v_add_relay_to_list( tmp_node, relay_list );
+
+    if ( i == 0 ) {
+      tmp_node = malloc( sizeof( DoublyLinkedOnionRelay ) );
+      tmp_node->previous = NULL;
+      tmp_node->next = NULL;
+      tmp_node->relay = node->relay;
+
+      v_add_relay_to_list( tmp_node, &used_guards );
+
+      xSemaphoreGive( used_guards_mutex );
+      // END mutex for suitable relays
+    }
   }
-
-  // set the head of the suitable relays to the fourth node
-  suitable_relays.head = suitable_relays.head->next->next->next;
-  // set the tail of our lists next node to NULL
-  linked_circuit->circuit.relay_list.tail->next = NULL;
-  // set our length to 3
-  linked_circuit->circuit.relay_list.length = 3;
-  linked_circuit->circuit.relay_list.built_length = 0;
-  // set the suitable relays length to -= 3
-  suitable_relays.length -= 3;
 
   xSemaphoreGive( suitable_relays_mutex );
   // END mutex for suitable relays
 
+  return 0;
+}
+
+int d_build_onion_circuit( OnionCircuit* circuit ) {
+  int i;
+  int sock_fd;
+  struct sockaddr_in dest_addr;
+  WOLFSSL* ssl;
+
   // get the relay's ntor onion keys
-  if ( d_fetch_descriptor_info( linked_circuit ) < 0 ) {
+  if ( d_fetch_descriptor_info( circuit ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
 #endif
@@ -1059,9 +1333,9 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
   }
 
   // connect to the relay over ssl
-  dest_addr.sin_addr.s_addr = linked_circuit->circuit.relay_list.head->relay->address;
+  dest_addr.sin_addr.s_addr = circuit->relay_list.head->relay->address;
   dest_addr.sin_family = AF_INET;
-  dest_addr.sin_port = htons( linked_circuit->circuit.relay_list.head->relay->or_port );
+  dest_addr.sin_port = htons( circuit->relay_list.head->relay->or_port );
 
   sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
 
@@ -1110,9 +1384,9 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
   }
 
   // attach the ssl object to the circuit
-  linked_circuit->circuit.ssl = ssl;
+  circuit->ssl = ssl;
 
-  if ( d_router_handshake( linked_circuit->circuit.ssl ) < 0 ) {
+  if ( d_router_handshake( circuit->ssl ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to handshake with first relay" );
 #endif
@@ -1120,7 +1394,7 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
-  if ( d_router_create2( &linked_circuit->circuit ) < 0 ) {
+  if ( d_router_create2( circuit ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to CREATE2 with first relay" );
 #endif
@@ -1128,42 +1402,151 @@ int d_build_onion_circuit( DoublyLinkedOnionCircuit* linked_circuit ) {
     return -1;
   }
 
-  linked_circuit->circuit.relay_list.built_length++;
+  circuit->relay_list.built_length++;
 
-  // make an extend cell and send it to the second hop
-  if ( d_router_extend2( &linked_circuit->circuit, 1 ) < 0 ) {
+  for ( i = 1; i < circuit->relay_list.length; i++ ) {
+    // make an extend cell and send it to the hop
+    if ( d_router_extend2( circuit, i ) < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with second relay" );
+      ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with relay %d", i + 1 );
+#endif
+
+      return -1;
+    }
+
+    circuit->relay_list.built_length++;
+  }
+
+  return 0;
+}
+
+// destroy a tor circuit
+int d_destroy_onion_circuit( OnionCircuit* circuit ) {
+  int i;
+  Cell unpacked_cell = {
+    .circ_id = circuit->circ_id,
+    .command = DESTROY,
+    .payload = malloc( sizeof( PayloadDestroy ) ),
+  };
+  unsigned char* packed_cell;
+  DoublyLinkedOnionRelay* tmp_relay_node;
+
+  ( (PayloadDestroy*)unpacked_cell.payload )->destroy_code = NO_DESTROY_CODE;
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  // send a destroy cell to the first hop
+  if ( wolfSSL_send( circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send DESTROY cell" );
 #endif
 
     return -1;
   }
 
-  linked_circuit->circuit.relay_list.built_length++;
+  tmp_relay_node = circuit->relay_list.head;
 
-  // make an extend cell and send it to the thrid hop
-  if ( d_router_extend2( &linked_circuit->circuit, 2 ) < 0 ) {
+  for ( i = 0; i < circuit->relay_list.length; i++ ) {
+    wc_ShaFree( &tmp_relay_node->running_sha_forward );
+    wc_ShaFree( &tmp_relay_node->running_sha_backward );
+    wc_AesFree( &tmp_relay_node->aes_forward );
+    wc_AesFree( &tmp_relay_node->aes_backward );
+
+    if ( tmp_relay_node->next == NULL ) {
+      free( tmp_relay_node );
+    } else {
+      tmp_relay_node = tmp_relay_node->next;
+      free( tmp_relay_node->previous );
+    }
+  }
+
+  circuit->relay_list.length = 0;
+  circuit->relay_list.built_length = 0;
+  circuit->relay_list.head = NULL;
+  circuit->relay_list.tail = NULL;
+
+  // free the ssl object
+  wolfSSL_free( circuit->ssl );
+
+  // TODO may need to make a mutex for the handle, not sure if it could be set
+  // to NULL by another thread after this NULL check, causing the current task to
+  // rip in sauce
+  if ( circuit->task_handle != NULL ) {
+    vTaskDelete( circuit->task_handle );
+  }
+
+  return 0;
+}
+
+int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
+  int i;
+  Cell unpacked_cell = {
+    .circ_id = circuit->circ_id,
+    .command = RELAY,
+    .payload = malloc( sizeof( PayloadRelay ) ),
+  };
+  unsigned char* packed_cell;
+  DoublyLinkedOnionRelay* tmp_relay_node;
+
+  if ( circuit->relay_list.length == new_length ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with third relay" );
+    ESP_LOGE( MINITOR_TAG, "Circuit is already at length" );
 #endif
 
     return -1;
   }
 
-  linked_circuit->circuit.relay_list.built_length++;
+  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_TRUNCATE;
+  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->length = 0;
 
-  linked_circuit->circuit.status = CIRCUIT_STANDBY;
+  packed_cell = pack_and_free( &unpacked_cell );
 
-  // spawn a task to block on the tls buffer and put the data into the rx_queue
-  xTaskCreatePinnedToCore(
-      v_handle_circuit,
-      "HANDLE_CIRCUIT",
-      4096,
-      (void*)(&linked_circuit->circuit),
-      6,
-      &linked_circuit->circuit.task_handle,
-      tskNO_AFFINITY
-    );
+  tmp_relay_node = circuit->relay_list.tail;
+
+  for ( i = circuit->relay_list.length - 1; i >= new_length; i-- ) {
+    ESP_LOGE( MINITOR_TAG, "freeing node: %d", i );
+
+    wc_ShaFree( &tmp_relay_node->running_sha_forward );
+    wc_ShaFree( &tmp_relay_node->running_sha_backward );
+    wc_AesFree( &tmp_relay_node->aes_forward );
+    wc_AesFree( &tmp_relay_node->aes_backward );
+
+    tmp_relay_node = tmp_relay_node->previous;
+    free( tmp_relay_node->next );
+    tmp_relay_node->next = NULL;
+  }
+
+  circuit->relay_list.tail = tmp_relay_node;
+  circuit->relay_list.length = new_length;
+  circuit->relay_list.built_length = new_length;
+
+  // send a destroy cell to the first hop
+  if ( d_send_packed_relay_cell_and_free( circuit->ssl, packed_cell, &circuit->relay_list ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_TRUNCATE cell" );
+#endif
+
+    return -1;
+  }
+
+  if ( d_recv_cell( circuit->ssl, &unpacked_cell, CIRCID_LEN, &circuit->relay_list, NULL ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_TRUNCATED cell" );
+#endif
+
+    return -1;
+  }
+
+  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_TRUNCATED ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Didn't get a relay RELAY_TRUNCATED cell back" );
+#endif
+
+    return -1;
+  }
 
   return 0;
 }
@@ -1191,6 +1574,8 @@ void v_handle_circuit( void* pv_parameters ) {
 }
 
 int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
+  int res = 0;
+
   int i;
   int wolf_succ;
   WC_RNG rng;
@@ -1199,7 +1584,6 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   Cell unpacked_cell;
   unsigned char* packed_cell;
   curve25519_key extend2_handshake_key;
-  /* unsigned char temp_digest[WC_SHA_DIGEST_SIZE]; */
   curve25519_key extended2_handshake_public_key;
   curve25519_key ntor_onion_key;
 
@@ -1217,6 +1601,10 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
     ESP_LOGE( MINITOR_TAG, "Failed to make extend2_handshake_key, error code %d", wolf_succ );
 #endif
 
+    wc_curve25519_free( &extend2_handshake_key );
+    wc_curve25519_free( &extended2_handshake_public_key );
+    wc_curve25519_free( &ntor_onion_key );
+
     return -1;
   }
 
@@ -1227,6 +1615,8 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   }
 
   target_relay = relay;
+
+  ESP_LOGE( MINITOR_TAG, "Extending to %d", target_relay->relay->or_port );
 
   // TODO construct link specifiers
   unpacked_cell.circ_id = onion_circuit->circ_id;
@@ -1271,47 +1661,14 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
 
-    return -1;
+    res = -1;
+    goto cleanup;
   }
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  /* // update the running digest */
-  /* relay = target_relay->previous; */
-
-  /* wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN ); */
-  /* wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest ); */
-
-  /* memcpy( packed_cell + 10, temp_digest, 4 ); */
-
-  /* // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0 */
-  /* for ( i = node_index - 1; i >= 0; i-- ) { */
-    /* wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN ); */
-
-    /* if ( wolf_succ < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-      /* ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY_EARLY payload, error code: %d", wolf_succ ); */
-/* #endif */
-
-      /* return -1; */
-    /* } */
-
-    /* relay = relay->previous; */
-  /* } */
-
-  /* // send the RELAY_EARLY to the first node in the circuit */
-  /* if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
-
-  /* free( packed_cell ); */
-
   // send the EXTEND2 cell
-  if ( d_send_packed_relay_cell_and_free( packed_cell, onion_circuit ) < 0 ) {
+  if ( d_send_packed_relay_cell_and_free( onion_circuit->ssl, packed_cell, &onion_circuit->relay_list ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
 #endif
@@ -1323,20 +1680,47 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
     ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_EXTENDED2 cell" );
 #endif
 
-    return -1;
+    res = -1;
+    goto cleanup;
   }
 
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 ) {
+  ESP_LOGE( MINITOR_TAG, "RELAY_EXTENDED2 command: %d", unpacked_cell.command );
+  ESP_LOGE( MINITOR_TAG, "RELAY_EXTENDED2 relay command: %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
+
+  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_EXTENDED2 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Got something other than RELAY_EXTENDED2: %d", unpacked_cell.command );
+#endif
+
+    if ( unpacked_cell.command == DESTROY ) {
+      ESP_LOGE( MINITOR_TAG, "DESTROY: %d", ( (PayloadDestroy*)unpacked_cell.payload )->destroy_code );
+    } else if ( ( (PayloadRelay*)unpacked_cell.payload )->command == RELAY_TRUNCATED ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "RELAY_TRUNCATED: %d", ( (PayloadDestroy*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->destroy_code );
+#endif
+    }
+
+    res = -1;
+    goto cleanup;
+  }
+
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay, &extend2_handshake_key ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
 
-    return -1;
+    res = -1;
+    goto cleanup;
   }
+
+cleanup:
+  wc_curve25519_free( &extend2_handshake_key );
+  wc_curve25519_free( &extended2_handshake_public_key );
+  wc_curve25519_free( &ntor_onion_key );
 
   free_cell( &unpacked_cell );
 
-  return 0;
+  return res;
 }
 
 int d_router_create2( OnionCircuit* onion_circuit ) {
@@ -1396,7 +1780,7 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
     return -1;
   }
 
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head->relay, &create2_handshake_key ) < 0 ) {
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head, &create2_handshake_key ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to finish CREATED2 handshake" );
 #endif
@@ -1432,7 +1816,7 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
   return 0;
 }
 
-int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key ) {
+int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key ) {
   int wolf_succ;
   unsigned int idx;
   curve25519_key responder_handshake_public_key;
@@ -1452,10 +1836,10 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
 
   wc_curve25519_init( &responder_handshake_public_key );
   wc_curve25519_init( &ntor_onion_key );
-  wc_InitSha( &relay->running_sha_forward );
-  wc_InitSha( &relay->running_sha_backward );
-  wc_AesInit( &relay->aes_forward, NULL, INVALID_DEVID );
-  wc_AesInit( &relay->aes_backward, NULL, INVALID_DEVID );
+  wc_InitSha( &db_relay->running_sha_forward );
+  wc_InitSha( &db_relay->running_sha_backward );
+  wc_AesInit( &db_relay->aes_forward, NULL, INVALID_DEVID );
+  wc_AesInit( &db_relay->aes_backward, NULL, INVALID_DEVID );
 
   wolf_succ = wc_curve25519_import_public_ex( handshake_data, G_LENGTH, &responder_handshake_public_key, EC25519_LITTLE_ENDIAN );
 
@@ -1467,7 +1851,7 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
     return -1;
   }
 
-  wolf_succ = wc_curve25519_import_public_ex( relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_import_public_ex( db_relay->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -1504,10 +1888,10 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
 
   working_secret_input += 32;
 
-  memcpy( working_secret_input, relay->identity, ID_LENGTH );
+  memcpy( working_secret_input, db_relay->relay->identity, ID_LENGTH );
   working_secret_input += ID_LENGTH;
 
-  memcpy( working_secret_input, relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_secret_input, db_relay->relay->ntor_onion_key, H_LENGTH );
   working_secret_input += H_LENGTH;
 
   idx = 32;
@@ -1534,10 +1918,10 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
   wc_HmacFinal( &reusable_hmac, working_auth_input );
   working_auth_input += WC_SHA256_DIGEST_SIZE;
 
-  memcpy( working_auth_input, relay->identity, ID_LENGTH );
+  memcpy( working_auth_input, db_relay->relay->identity, ID_LENGTH );
   working_auth_input += ID_LENGTH;
 
-  memcpy( working_auth_input, relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_auth_input, db_relay->relay->ntor_onion_key, H_LENGTH );
   working_auth_input += H_LENGTH;
 
   memcpy( working_auth_input, handshake_data, G_LENGTH );
@@ -1566,8 +1950,23 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
   if ( memcmp( reusable_hmac_digest, handshake_data + G_LENGTH, WC_SHA256_DIGEST_SIZE ) != 0 ) {
+
 #ifdef DEBUG_MINITOR
+    int i;
+
     ESP_LOGE( MINITOR_TAG, "Failed to match AUTH with our own digest" );
+
+    ESP_LOGE( MINITOR_TAG, "Our digest" );
+
+    for ( i = 0; i < WC_SHA256_DIGEST_SIZE; i++ ) {
+      ESP_LOGE( MINITOR_TAG, "%.2x", reusable_hmac_digest[i] );
+    }
+
+    ESP_LOGE( MINITOR_TAG, "AUTH" );
+
+    for ( i = 0; i < WC_SHA256_DIGEST_SIZE; i++ ) {
+      ESP_LOGE( MINITOR_TAG, "%.2x", (handshake_data + G_LENGTH)[i] );
+    }
 #endif
 
     return -1;
@@ -1586,9 +1985,9 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
   // seed the forward sha
-  wc_ShaUpdate( &relay->running_sha_forward, reusable_hmac_digest, HASH_LEN );
+  wc_ShaUpdate( &db_relay->running_sha_forward, reusable_hmac_digest, HASH_LEN );
   // seed the first 16 bytes of backwards sha
-  wc_ShaUpdate( &relay->running_sha_backward, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
+  wc_ShaUpdate( &db_relay->running_sha_backward, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
   // mark how many bytes we've written to the backwards sha and how many remain
   bytes_written = WC_SHA256_DIGEST_SIZE - HASH_LEN;
   bytes_remaining = HASH_LEN - bytes_written;
@@ -1601,10 +2000,10 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
 
   // seed the last 8 bytes of backward sha
-  wc_ShaUpdate( &relay->running_sha_backward, reusable_hmac_digest, bytes_remaining );
+  wc_ShaUpdate( &db_relay->running_sha_backward, reusable_hmac_digest, bytes_remaining );
   // set the forward aes key
   memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining, KEY_LEN );
-  wc_AesSetKeyDirect( &relay->aes_forward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+  wc_AesSetKeyDirect( &db_relay->aes_forward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
   // copy the first part of the backward key into the buffer
   memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining + KEY_LEN, WC_SHA256_DIGEST_SIZE - bytes_remaining - KEY_LEN );
   // mark how many bytes we've written to the backwards key and how many remain
@@ -1620,10 +2019,10 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, OnionRelay* relay, c
 
   // copy the last part of the key into the buffer and initialize the key
   memcpy( reusable_aes_key + bytes_written, reusable_hmac_digest, bytes_remaining );
-  wc_AesSetKeyDirect( &relay->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+  wc_AesSetKeyDirect( &db_relay->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
 
   // copy the nonce
-  memcpy( relay->nonce, reusable_hmac_digest + bytes_remaining, DIGEST_LEN );
+  memcpy( db_relay->nonce, reusable_hmac_digest + bytes_remaining, DIGEST_LEN );
 
   // free all the heap resources
   wc_curve25519_free( key );
@@ -2405,16 +2804,8 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   return 0;
 }
 
-// destroy a tor circuit
-void v_destroy_onion_circuit( int circ_id ) {
-  // TODO send a destroy cell to the first hop
-  // TODO clean up the rx,tx queues
-  // TODO clean up the tls socket
-  // TODO clean up any circuit specific data
-}
-
 // fetch the descriptor info for the list of relays
-int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
+int d_fetch_descriptor_info( OnionCircuit* circuit ) {
   const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
       /* "Host: 192.168.1.138\r\n" */
       "Host: 192.168.1.16\r\n"
@@ -2446,7 +2837,7 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons( 7000 );
 
-  DoublyLinkedOnionRelay* node = linked_circuit->circuit.relay_list.head;
+  DoublyLinkedOnionRelay* node = circuit->relay_list.head;
 
   while ( node != NULL ) {
     retries = 0;
@@ -2564,7 +2955,7 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
               ntor_onion_key_64_length++;
 
               if ( ntor_onion_key_64_length == 43 ) {
-                v_base_64_decode_buffer( node->relay->ntor_onion_key, ntor_onion_key_64, 43 );
+                v_base_64_decode( node->relay->ntor_onion_key, ntor_onion_key_64, 43 );
                 ntor_onion_key_found = -1;
               }
             } else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] ) {
@@ -2586,24 +2977,24 @@ int d_fetch_descriptor_info( DoublyLinkedOnionCircuit* linked_circuit ) {
   return 0;
 }
 
-int d_send_packed_relay_cell_and_free( unsigned char* packed_cell, OnionCircuit* circuit ) {
+int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list ) {
   int i;
   int wolf_succ;
   unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
-  DoublyLinkedOnionRelay* relay = circuit->relay_list.head;
+  DoublyLinkedOnionRelay* db_relay = relay_list->head;
 
-  for ( i = 0; i < circuit->relay_list.built_length - 1; i++ ) {
-    relay = relay->next;
+  for ( i = 0; i < relay_list->built_length - 1; i++ ) {
+    db_relay = db_relay->next;
   }
 
-  wc_ShaUpdate( &relay->relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
-  wc_ShaGetHash( &relay->relay->running_sha_forward, temp_digest );
+  wc_ShaUpdate( &db_relay->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
+  wc_ShaGetHash( &db_relay->running_sha_forward, temp_digest );
 
   memcpy( packed_cell + 10, temp_digest, 4 );
 
   // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
-  for ( i = circuit->relay_list.built_length - 1; i >= 0; i-- ) {
-    wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+  for ( i = relay_list->built_length - 1; i >= 0; i-- ) {
+    wolf_succ = wc_AesCtrEncrypt( &db_relay->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
 
     if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -2613,11 +3004,11 @@ int d_send_packed_relay_cell_and_free( unsigned char* packed_cell, OnionCircuit*
       return -1;
     }
 
-    relay = relay->previous;
+    db_relay = db_relay->previous;
   }
 
   // send the RELAY_EARLY to the first node in the circuit
-  if ( wolfSSL_send( circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+  if ( wolfSSL_send( ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY cell" );
 #endif
@@ -2667,7 +3058,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
   // variable length of the cell if there is one
   unsigned short length = 0;
   Sha tmp_sha;
-  DoublyLinkedOnionRelay* relay;
+  DoublyLinkedOnionRelay* db_relay;
   unsigned char zeros[4] = { 0 };
   unsigned char temp_digest[WC_SHA_DIGEST_SIZE];
   int fully_recognized = 0;
@@ -2679,6 +3070,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
   while ( 1 ) {
     // read in at most rx_length, rx_length will be either the length of
     // the cell or the length of the header
+
     if ( rx_limit - rx_length_total > CELL_LEN ) {
       rx_length = wolfSSL_recv( ssl, rx_buffer, CELL_LEN, 0 );
     } else {
@@ -2688,7 +3080,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // if rx_length is 0 then we've hit an error and should return -1
     if ( rx_length <= 0 ) {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "error code: %d", wolfSSL_get_error( ssl, rx_length ) );
+      ESP_LOGE( MINITOR_TAG, "Failed to wolfSSL_recv rx_length: %d, error code: %d", rx_length, wolfSSL_get_error( ssl, rx_length ) );
 #endif
 
       free( *packed_cell );
@@ -2746,11 +3138,11 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
       return -1;
     }
 
-    relay = relay_list->head;
+    db_relay = relay_list->head;
     wc_InitSha( &tmp_sha );
 
     for ( i = 0; i < relay_list->built_length; i++ ) {
-      wolf_succ = wc_AesCtrEncrypt( &relay->relay->aes_backward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
+      wolf_succ = wc_AesCtrEncrypt( &db_relay->aes_backward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
 
       if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -2761,7 +3153,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
       }
 
       if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 ) {
-        wc_ShaCopy( &relay->relay->running_sha_backward, &tmp_sha );
+        wc_ShaCopy( &db_relay->running_sha_backward, &tmp_sha );
 
         wc_ShaUpdate( &tmp_sha, *packed_cell + 5, 5 );
         wc_ShaUpdate( &tmp_sha, zeros, 4 );
@@ -2769,18 +3161,18 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         wc_ShaGetHash( &tmp_sha, temp_digest );
 
         if ( memcmp( temp_digest, *packed_cell + 10, 4 ) == 0 ) {
-          wc_ShaCopy( &tmp_sha, &relay->relay->running_sha_backward );
+          wc_ShaCopy( &tmp_sha, &db_relay->running_sha_backward );
           fully_recognized = 1;
           break;
         }
       }
 
-      relay = relay->next;
+      db_relay = db_relay->next;
     }
 
     if ( !fully_recognized ) {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Relay recognized cell was not set to 0" );
+      ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized" );
 #endif
 
       return -1;
@@ -2837,14 +3229,35 @@ unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {
 // ONION SERVICES
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory ) {
   int i;
+  unsigned int idx;
+  int wolf_succ;
   long int valid_after;
   unsigned int hsdir_interval;
+  unsigned int hsdir_n_replicas;
+  unsigned int hsdir_spread_store;
   int time_period = 0;
+  unsigned char previous_shared_rand[32];
+  unsigned char shared_rand[32];
   DoublyLinkedOnionCircuit* node;
-  unsigned char* second_layer;
-  unsigned char* first_layer;
-  unsigned char* descriptor_outer;
+  int reusable_text_length;
+  unsigned char* reusable_plaintext;
+  unsigned char* reusable_ciphertext;
+  WC_RNG rng;
+  ed25519_key blinded_key;
+  ed25519_key descriptor_signing_key;
+  Sha3 reusable_sha3;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char blinded_pub_key[ED25519_PUB_KEY_SIZE];
   OnionService* onion_service = malloc( sizeof( OnionService ) );
+
+  wc_InitRng( &rng );
+  wc_ed25519_init( &blinded_key );
+  wc_ed25519_init( &descriptor_signing_key );
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  wc_ed25519_make_key( &rng, 32, &descriptor_signing_key );
+
+  wc_FreeRng( &rng );
 
   onion_service->local_port = local_port;
   onion_service->exit_port = exit_port;
@@ -2887,7 +3300,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   // set the onion services tail to the second standby circuit
   onion_service->intro_circuits.tail = standby_circuits.head->next->next;
 
-  // if there is a third standby circuit, set its previous to NULL
+  // if there is a fourth standby circuit, set its previous to NULL
   if ( standby_circuits.length > 3 ) {
     standby_circuits.head->next->next->next->previous = NULL;
   }
@@ -2896,15 +3309,15 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   standby_circuits.head = standby_circuits.head->next->next->next;
   // disconnect our tail from the other standby circuits
   onion_service->intro_circuits.tail->next = NULL;
-  // set our intro length to 2
+  // set our intro length to three
   onion_service->intro_circuits.length = 3;
-  // subtract two from the standby_circuits length
+  // subtract three from the standby_circuits length
   standby_circuits.length -= 3;
 
   xSemaphoreGive( standby_circuits_mutex );
   // END mutex
 
-  // TODO send establish intro commands to our three circuits
+  // send establish intro commands to our three circuits
   node = onion_service->intro_circuits.head;
 
   for ( i = 0; i < onion_service->intro_circuits.length; i++ ) {
@@ -2922,29 +3335,136 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   }
 
   // BEGIN mutex
-  /* xSemaphoreTake( network_consensus_mutex, portMAX_DELAY ); */
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
   valid_after = network_consensus.valid_after;
   hsdir_interval = network_consensus.hsdir_interval;
+  hsdir_n_replicas = network_consensus.hsdir_n_replicas;
+  hsdir_spread_store = network_consensus.hsdir_spread_store;
+  memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
+  memcpy( shared_rand, network_consensus.shared_rand, 32 );
 
   xSemaphoreGive( network_consensus_mutex );
   // END mutex
 
   time_period = ( valid_after / 60 - 12 * 60 ) / hsdir_interval;
 
-  // TODO generate second layer plaintext
-  /* if ( d_generate_second_plaintext( &second_layer, &onion_service->intro_circuits, valid_after ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-      /* ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" ); */
-/* #endif */
+  for ( i = 0; i < 2; i++ ) {
+    if ( d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period, hsdir_interval, NULL, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
+#endif
 
-      /* return NULL; */
-  /* } */
-  // TODO encrypt second layer plaintext
-  // TODO create first layer plaintext
-  // TODO encrypt first layer plaintext
-  // TODO create outer descriptor wrapper
-  // TODO send outer descriptor wrapper to the correct HSDIR nodes
+      return NULL;
+    }
+
+    idx = ED25519_PUB_KEY_SIZE;
+    wolf_succ = wc_ed25519_export_public( &blinded_key, blinded_pub_key, &idx );
+
+    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
+#endif
+
+      return NULL;
+    }
+
+    // generate second layer plaintext
+    if ( ( reusable_text_length = d_generate_second_plaintext( &reusable_plaintext, &onion_service->intro_circuits, valid_after, &descriptor_signing_key ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
+#endif
+
+      return NULL;
+    }
+
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"credential", strlen( "credential" ) );
+    wc_Sha3_256_Update( &reusable_sha3, onion_service->master_key.p, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"subcredential", strlen( "subcredential" ) );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_key, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+    // TODO encrypt second layer plaintext
+    if ( (
+      reusable_text_length = d_encrypt_descriptor_plaintext(
+        &reusable_ciphertext,
+        reusable_plaintext,
+        reusable_text_length,
+        blinded_pub_key,
+        ED25519_PUB_KEY_SIZE,
+        "hsdir-encrypted-data",
+        strlen( "hsdir-encrypted-data" ),
+        reusable_sha3_sum, 0 )
+      ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
+#endif
+
+      return NULL;
+    }
+
+    free( reusable_plaintext );
+
+    // create first layer plaintext
+    if ( ( reusable_text_length = d_generate_first_plaintext( &reusable_plaintext, reusable_ciphertext, reusable_text_length ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
+#endif
+
+      return NULL;
+    }
+
+    free( reusable_ciphertext );
+
+    // encrypt first layer plaintext
+    if ( (
+      reusable_text_length = d_encrypt_descriptor_plaintext(
+        &reusable_ciphertext,
+        reusable_plaintext,
+        reusable_text_length,
+        blinded_pub_key,
+        ED25519_PUB_KEY_SIZE,
+        "hsdir-superencrypted-data",
+        strlen( "hsdir-superencrypted-data" ),
+        reusable_sha3_sum, 0 )
+      ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
+#endif
+
+      return NULL;
+    }
+
+    free( reusable_plaintext );
+
+    // create outer descriptor wrapper
+    if ( ( reusable_text_length = d_generate_outer_descriptor( &reusable_plaintext, reusable_ciphertext, reusable_text_length, &descriptor_signing_key, valid_after, &blinded_key, 0 ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
+#endif
+
+      return NULL;
+    }
+
+    free( reusable_ciphertext );
+
+    // send outer descriptor wrapper to the correct HSDIR nodes
+    if ( d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, previous_shared_rand, hsdir_spread_store ) ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send descriptor to hsdir hosts" );
+#endif
+
+      return NULL;
+    }
+
+    free( reusable_plaintext );
+
+    time_period--;
+    memcpy( shared_rand, previous_shared_rand, 32 );
+  }
   // TODO create a task to block on the rx_queue
 
   // return the onion service
@@ -2959,175 +3479,836 @@ void v_handle_onion_service( void* pv_parameters ) {
   // TODO when a destroy comes in close and clean the circuit and local tcp stream
 }
 
-/* int d_generate_second_plaintext( unsigned char** second_layer, DoublyLinkedOnionCircuitList* intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key ) { */
-  /* int i; */
-  /* int idx; */
-  /* unsigned char* working_second_layer; */
-  /* unsigned char packed_link_specifiers[1 + 4 + 6 + ID_LENGTH]; */
-  /* unsigned char tmp_pub_key[CURVE25519_KEYSIZE]; */
-  /* DoublyLinkedOnionCircuit* node; */
+int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store ) {
+  int i;
+  int j;
+  int k;
+  int to_store;
+  int64_t reusable_64;
+  Sha3 reusable_sha3;
+  unsigned char** hs_index = malloc( sizeof( unsigned char* ) * hsdir_n_replicas );
+  HsDirIndexNode** hsdir_index;
+  int hsdir_index_length = 0;
+  DoublyLinkedOnionRelay* hsdir_relay_node;
+  HsDirIndexNode* hsdir_index_node;
+  OnionCircuit publish_circuit = {
+    .ssl = NULL
+  };
+  DoublyLinkedOnionRelay* tmp_relay_node;
 
-  /* const char* second_layer_template = */
-    /* "create2-formats 2\n" */
-    /* ; */
-  /* const char* introduction_point_template = */
-    /* "introduction-point ******************************************\n" */
-    /* "onion-key ntor ******************************************\n" */
-    /* "auth-key\n" */
-    /* // TODO this is a crosscert with the descriptor signing key as the main key and the intoduction point authentication key as the mandatory extension */
-    /* "-----BEGIN ED25519 CERT-----********************************************************************************************************************************************-----END ED25519 CERT-----\n" */
-    /* // TODO this is the public cruve25519 key used to encrypt the introduction request */
-    /* "enc-key ntor ******************************************\n" */
-    /* "enc-key-cert\n" */
-    /* // TODO this is a crosscert with the descriptor signing key as the main key and the the ed25519 equivilent of the above key used as the mandatory extension */
-    /* "-----BEGIN ED25519 CERT-----********************************************************************************************************************************************-----END ED25519 CERT-----\n" */
-    /* ; */
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
-  /* *second_layer = malloc( sizeof( unsigned char ) * ( strlen( second_layer_template ) + strlen( introduction_point_template ) * intro_circuits.length ) ); */
+  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+    hs_index[i] = malloc( sizeof( unsigned char ) * WC_SHA3_256_DIGEST_SIZE );
 
-  /* working_second_layer = *second_layer; */
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"store-at-idx", strlen( "store-at-idx" ) );
+    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_key, ED25519_PUB_KEY_SIZE );
+    reusable_64 = i;
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_64, 8 );
+    reusable_64 = hsdir_interval;
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_64, 8 );
+    reusable_64 = time_period;
 
-  /* memcpy( working_second_layer, second_layer_template, strlen( second_layer_template ) ); */
-  /* working_second_layer += strlen( second_layer_template ); */
+    wc_Sha3_256_Final( &reusable_sha3, hs_index[i] );
+  }
 
-  /* node = intro_circuits.head; */
+  // TODO might want to figure out how to make this faster but I don't know how to do that without duplicating the data which may be a problem with very large consensuses
+  // solution may be to work off of disk, in fact large consensuses may need to be on disk anyways
+  // BEGIN mutex
+  xSemaphoreTake( hsdir_relays_mutex, portMAX_DELAY );
 
-  /* for ( i = 0; i < intro_circuits.length; i++ ) { */
-    /* memcpy( working_second_layer, introduction_point_template, strlen( introduction_point_template ) ); */
-    /* // skip past the intordouction-point header */
-    /* working_second_layer += 19; */
-    /* v_generate_packed_link_specifiers( node->circuit.relay_list->tail->relay, packed_link_specifiers ); */
-    /* v_base_64_encode( working_second_layer, packed_link_specifiers, sizeof( packed_link_specifiers ) ); */
-    /* // skip past the link specifiers and \nonion-key ntor */
-    /* working_second_layer += 42 + 16; */
-    /* v_base_64_encode( working_second_layer, node->circuit.relay_list->tail->relay->ntor_onion_key, H_LENGTH ); */
-    /* // skip past the onion key and next header */
-    /* working_second_layer += 42 + 38; */
+  hsdir_relay_node = hsdir_relays.head;
 
-    /* if ( d_generate_packed_ed_crosscert( working_second_layer, descriptor_signing_key, &node->circuit.auth_key, 0x09, valid_after ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-      /* ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" ); */
-/* #endif */
-    /* } */
+  if ( hsdir_relay_node == NULL ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to get hsdir nodes, consensus may be corrupt" );
+#endif
 
-    /* // skip past the cert and next header */
-    /* working_second_layer += 140 + 40; */
+    xSemaphoreGive( hsdir_relays_mutex );
+    // END mutex
 
-    /* idx = CURVE25519_KEYSIZE; */
-    /* wolf_succ = wc_curve25519_export_public_ex( &node->circuit.intro_encrypt_key, tmp_pub_key, &idx, EC25519_LITTLE_ENDIAN ); */
+    return -1;
+  }
 
-    /* if ( wolf_succ != 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-      /* ESP_LOGE( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ ); */
-/* #endif */
+  hsdir_index = malloc( sizeof( HsDirIndexNode* ) * hsdir_relays.length );
 
-      /* return -1; */
-    /* } */
+  for ( i = 0; i < hsdir_relays.length; i++ ) {
+    hsdir_index_node = malloc( sizeof( HsDirIndexNode ) );
+    hsdir_index_node->relay = hsdir_relay_node->relay;
+    hsdir_index_node->chosen = 0;
 
-    /* v_base_64_encode( working_second_layer, tmp_pub_key, CURVE25519_KEYSIZE ); */
-    /* // skip past the enc key and next header */
-    /* working_second_layer += 42 + 42; */
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
+    wc_Sha3_256_Update( &reusable_sha3, hsdir_relay_node->relay->identity, ID_LENGTH );
+    wc_Sha3_256_Update( &reusable_sha3, shared_rand, 32 );
+    reusable_64 = time_period;
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_64, 8 );
+    reusable_64 = hsdir_interval;
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_64, 8 );
 
-    /* // TODO create the derived key by converting our intro_encrypt_key into an ed25519 key */
-    /* if ( d_generate_packed_ed_crosscert( working_second_layer, descriptor_signing_key, &derived_key, 0x0B, valid_after ) < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-      /* ESP_LOGE( MINITOR_TAG, "Failed to generate the enc-key cross cert" ); */
-/* #endif */
-    /* } */
+    wc_Sha3_256_Final( &reusable_sha3, hsdir_index_node->hash );
 
-    /* node = node->next; */
-  /* } */
-/* } */
+    // TODO using a sorted array here, should discuss if a hashmap would be better
+    v_binary_insert_hsdir_index( hsdir_index_node, hsdir_index, hsdir_index_length );
+    hsdir_index_length++;
 
-/* void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers ) { */
-  /* // set the specifier count */
-  /* packed_link_specifiers[0] = 2; */
+    hsdir_relay_node = hsdir_relay_node->next;
+  }
 
-  /* // IPv4 specifier */
-  /* // set the type */
-  /* packed_link_specifiers[1] = IPv4Link; */
-  /* // set the length */
-  /* packed_link_specifiers[2] = 6; */
-  /* // set the address and port */
-  /* packed_link_specifiers[6] = (unsigned char)( relay->address >> 24 ); */
-  /* packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 ); */
-  /* packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 ); */
-  /* packed_link_specifiers[3] = (unsigned char)relay->address; */
-  /* packed_link_specifiers[7] = (unsigned char)relay->or_port >> 8; */
-  /* packed_link_specifiers[8] = (unsigned char)relay->or_port; */
+  xSemaphoreGive( hsdir_relays_mutex );
+  // END mutex
 
-  /* // LEGACYLink specifier */
-  /* // set the type */
-  /* packed_link_specifiers[9] = LEGACYLink; */
-  /* // set the length */
-  /* packed_link_specifiers[10] = ID_LENGTH; */
-  /* // copy the identity in */
-  /* memcpy( *packed_link_specifiers + 10, relay->identity, ID_LENGTH ); */
-/* } */
+  for ( i = 0; i < hsdir_index_length - 1; i++ ) {
+    if ( memcmp( hsdir_index[i]->hash, hsdir_index[i + 1]->hash, 32 ) > 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Nodes are not in order" );
+#endif
+      return -1;
+    }
+  }
 
-/* int d_generate_packed_ed_crosscert( unsigned char* destination, ed25519_key* main_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) { */
-  /* unsigned int idx; */
-  /* int wolf_succ; */
-  /* // set epoch hours to current epoch hours plus three hours later */
-  /* int epoch_hours = valid_after / 60 / 60 + 3; */
+  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+    to_store = hsdir_spread_store;
 
-  /* // set the version */
-  /* destination[0] = 0x01; */
-  /* // set the cert type */
-  /* destination[1] = cert_type; */
-  /* // set the expiration date, four bytes */
-  /* destination[2] = (unsigned char)( epoch_hours >> 24 ); */
-  /* destination[3] = (unsigned char)( epoch_hours >> 16 ); */
-  /* destination[4] = (unsigned char)( epoch_hours >> 8 ); */
-  /* destination[5] = (unsigned char)epoch_hours; */
-  /* // set the cert key type, same a cert type */
-  /* destination[6] = cert_type; */
-  /* // copy the main key */
-  /* idx = ED25519_PUB_KEY_SIZE; */
-  /* wolf_succ = wc_ed25519_export_public( &main_key, destination + 7, &idx ); */
+    j = d_binary_search_hsdir_index( hs_index[i], hsdir_index, hsdir_index_length ) % hsdir_index_length;
 
-  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ ); */
-/* #endif */
+    for ( ; to_store > 0; j = ( j + 1 ) % hsdir_index_length ) {
+      ESP_LOGE( MINITOR_TAG, "Trying relay %d", j );
 
-    /* return -1; */
-  /* } */
+      if ( hsdir_index[j]->chosen == 0 ) {
+        hsdir_index[j]->chosen = 1;
 
-  /* // set n extensions to 1 */
-  /* destination[39] = 1; */
-  /* // set the ext length to key size */
-  /* destination[40] = 0; */
-  /* destination[41] = ED25519_PUB_KEY_SIZE; */
-  /* // set the ext type to 0x04 */
-  /* destination[42] = 0x04; */
-  /* // set ext flag to 1 */
-  /* destination[43] = 0x01; */
-  /* // copy the signing key */
-  /* idx = ED25519_PUB_KEY_SIZE; */
-  /* wolf_succ = wc_ed25519_export_public( &signing_key, destination + 44, &idx ); */
+        ESP_LOGE( MINITOR_TAG, "Sending descriptor %d to relay %d", i, j );
 
-  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ ); */
-/* #endif */
+        if ( publish_circuit.ssl != NULL ) {
+          tmp_relay_node = publish_circuit.relay_list.head;
 
-    /* return -1; */
-  /* } */
+          for ( k = 0; k < publish_circuit.relay_list.length; k++ ) {
+            if ( memcmp( tmp_relay_node->relay->identity, hsdir_index[j]->relay->identity, ID_LENGTH ) == 0 || k == publish_circuit.relay_list.length - 1 ) {
+              if ( k == 0 ) {
+                ESP_LOGE( MINITOR_TAG, "First matches, destroying circuit" );
 
-  /* idx = 64; */
-  /* wolf_succ = wc_ed25519_sign_msg( destination, 74, destination + 76, &idx, signing_key ); */
+                if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+                  ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
+#endif
 
-  /* if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( MINITOR_TAG, "Failed to sign the ed crosscert, error code: %d", wolf_succ ); */
-/* #endif */
+                  return -1;
+                }
 
-    /* return -1; */
-  /* } */
+                publish_circuit.ssl = NULL;
+              } else {
+                ESP_LOGE( MINITOR_TAG, "Truncating to length %d", k );
 
-  /* return 0; */
-/* } */
+                if ( d_truncate_onion_circuit( &publish_circuit, k ) < 0 ) {
+#ifdef DEBUG_MINITOR
+                  ESP_LOGE( MINITOR_TAG, "Failed to truncate publish circuit" );
+#endif
+
+                  return -1;
+                }
+
+                ESP_LOGE( MINITOR_TAG, "Trying to extend to %d", hsdir_index[j]->relay->or_port );
+
+                if ( d_extend_onion_circuit_to( &publish_circuit, 3, hsdir_index[j]->relay ) < 0 ) {
+#ifdef DEBUG_MINITOR
+                  ESP_LOGE( MINITOR_TAG, "Failed to extend publish circuit" );
+#endif
+
+                  return -1;
+                }
+              }
+
+              break;
+            }
+
+            tmp_relay_node = tmp_relay_node->next;
+          }
+        }
+
+        if ( publish_circuit.ssl == NULL ) {
+          if ( d_build_onion_circuit_to( &publish_circuit, 3, hsdir_index[j]->relay ) < 0 ) {
+#ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to build publish circuit" );
+#endif
+
+            return -1;
+          }
+        }
+
+        if ( d_post_descriptor( descriptor_text, descriptor_length, &publish_circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+          ESP_LOGE( MINITOR_TAG, "Failed to post descriptor" );
+#endif
+
+          return -1;
+        }
+
+        to_store--;
+      }
+    }
+  }
+
+  if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
+#endif
+
+    return -1;
+  }
+
+  wc_Sha3_256_Free( &reusable_sha3 );
+
+  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+    free( hs_index[i] );
+  }
+
+  free( hs_index );
+
+  for ( i = 0; i < hsdir_index_length; i++ ) {
+    free( hsdir_index[i] );
+  }
+
+  free( hsdir_index );
+
+  ESP_LOGE( MINITOR_TAG, "Done sending descriptors" );
+
+  return 0;
+}
+
+int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit ) {
+  const char* REQUEST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
+    "Host: 192.168.1.16\r\n"
+    "User-Agent: esp-idf/1.0 esp3266\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: "
+    ;
+  const char* header_end = "\r\n\r\n";
+
+  int i;
+  int total_tx_length = 0;
+  int http_header_length;
+  int tx_limit;
+  // buffer thath holds data returned from the socket
+  char content_length[10] = { 0 };
+  Cell unpacked_cell;
+  unsigned char* packed_cell;
+
+  ESP_LOGE( MINITOR_TAG, "descriptor has length %d", descriptor_length );
+
+  unpacked_cell.circ_id = publish_circuit->circ_id;
+  unpacked_cell.command = RELAY;
+  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+
+  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_BEGIN_DIR;
+  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
+  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->length = 0;
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  if ( d_send_packed_relay_cell_and_free( publish_circuit->ssl, packed_cell, &publish_circuit->relay_list ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
+#endif
+
+    return -1;
+  }
+
+  if ( d_recv_cell( publish_circuit->ssl, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_CONNECTED cell" );
+#endif
+
+    return -1;
+  }
+
+  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_CONNECTED ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Didn't get RELAY_CONNECTED back" );
+#endif
+
+    return -1;
+  }
+
+  free_cell( &unpacked_cell );
+
+  sprintf( content_length, "%d", descriptor_length );
+
+  http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
+  tx_limit = http_header_length + descriptor_length;
+
+  unpacked_cell.command = RELAY;
+
+  while ( total_tx_length < tx_limit ) {
+    unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+    ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
+    ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+    // TODO possibly need to set the stream_id, wasn't clear in torspec
+    ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
+    ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+
+    if ( tx_limit - total_tx_length < RELAY_PAYLOAD_LEN ) {
+      ( (PayloadRelay*)unpacked_cell.payload )->length = tx_limit - total_tx_length;
+    } else {
+      ( (PayloadRelay*)unpacked_cell.payload )->length = RELAY_PAYLOAD_LEN;
+    }
+
+    ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
+
+    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * ( (PayloadRelay*)unpacked_cell.payload )->length );
+
+    if ( total_tx_length == 0 ) {
+      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
+      total_tx_length += strlen( REQUEST );
+
+      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, content_length, strlen( content_length ) );
+      total_tx_length += strlen( content_length );
+
+      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, header_end, strlen( header_end ) );
+      total_tx_length += strlen( header_end );
+
+      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, descriptor_text, ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length );
+      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length;
+    } else {
+      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, descriptor_text + total_tx_length - http_header_length, ( (PayloadRelay*)unpacked_cell.payload )->length );
+      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length;
+    }
+
+    for ( i = 0; i < ( (PayloadRelay*)unpacked_cell.payload )->length; i++ ) {
+      putchar( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload[i] );
+    }
+
+    putchar( '\n' );
+
+    packed_cell = pack_and_free( &unpacked_cell );
+
+    if ( d_send_packed_relay_cell_and_free( publish_circuit->ssl, packed_cell, &publish_circuit->relay_list ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
+#endif
+
+      return -1;
+    }
+  }
+
+  if ( d_recv_cell( publish_circuit->ssl, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_DATA cell" );
+#endif
+
+    return -1;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
+  ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
+
+  ESP_LOGE( MINITOR_TAG, "%.*s\n", ( (PayloadRelay*)unpacked_cell.payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload );
+
+  if ( d_recv_cell( publish_circuit->ssl, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_END cell" );
+#endif
+
+    return -1;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
+  ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
+
+  return 0;
+}
+
+void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_array, int index_length ) {
+  int i;
+  int mid = d_binary_search_hsdir_index( node->hash, index_array, index_length );
+
+  for ( i = index_length - 1; i >= mid; i-- ) {
+    index_array[i + 1] = index_array[i];
+
+    if ( i != 0 ) {
+      index_array[i] = index_array[i - 1];
+    }
+  }
+
+  index_array[mid] = node;
+}
+
+int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_array, int index_length ) {
+  int left = 0;
+  int mid = 0;
+  int right = index_length - 1;
+  int res;
+
+  while ( left <= right ) {
+    mid = left + ( right - left ) / 2;
+
+    res = memcmp( hash, index_array[mid]->hash, 32 );
+
+    mid++;
+
+    if ( res == 0 ) {
+      break;
+    } else if ( res > 0 ) {
+      left = mid;
+    } else {
+      mid--;
+      right = mid - 1;
+    }
+  }
+
+  return mid;
+}
+
+int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* ciphertext, int ciphertext_length, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter ) {
+  unsigned int idx;
+  int wolf_succ;
+  unsigned char* working_outer_layer;
+  unsigned char tmp_signature[64];
+
+  const char* outer_layer_template =
+    "hs-descriptor 3\n"
+    "descriptor-lifetime 180\n"
+    "descriptor-signing-key-cert\n"
+    "-----BEGIN ED25519 CERT-----\n"
+    "*******************************************************************************************************************************************************************************************"
+    "-----END ED25519 CERT-----\n"
+    "revision-counter *\n"
+    "superencrypted\n"
+    "-----BEGIN MESSAGE-----\n"
+    ;
+  const char* outer_layer_template_end =
+    "-----END MESSAGE-----\n"
+    "signature **************************************************************************************"
+    ;
+
+  int layer_length = HS_DESC_SIG_PREFIX_LENGTH + strlen( outer_layer_template ) + ciphertext_length * 4 / 3 + strlen( outer_layer_template_end );
+
+  if ( ciphertext_length % 6 != 0 ) {
+    layer_length ++;
+  }
+
+  *outer_layer = malloc( sizeof( unsigned char ) * layer_length );
+  working_outer_layer = *outer_layer;
+
+  memcpy( working_outer_layer, HS_DESC_SIG_PREFIX, HS_DESC_SIG_PREFIX_LENGTH );
+
+  // skip past the prefix
+  working_outer_layer += HS_DESC_SIG_PREFIX_LENGTH;
+
+  memcpy( working_outer_layer, outer_layer_template, strlen( outer_layer_template ) );
+
+  // skip past all the headers to the cert body
+  working_outer_layer += 97;
+
+  if ( d_generate_packed_crosscert( working_outer_layer, descriptor_signing_key->p, blinded_key, 0x08, valid_after ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
+#endif
+
+    return -1;
+  }
+
+  // skip past cert body and next header
+  working_outer_layer += 187 + 44;
+
+  // TODO need to come up with solution for when the revision counter is greater than 9
+  *working_outer_layer = revision_counter + '0';
+
+  // skip past revision counter next header
+  working_outer_layer += 41;
+
+  v_base_64_encode( (char*)working_outer_layer, ciphertext, ciphertext_length );
+
+  // skip past message body
+  working_outer_layer += ciphertext_length * 4 / 3;
+
+  if ( ciphertext_length % 6 != 0 ) {
+    working_outer_layer++;
+  }
+
+  memcpy( working_outer_layer, outer_layer_template_end, strlen( outer_layer_template_end ) );
+
+  // skip past the header
+  working_outer_layer += 32;
+
+  idx = ED25519_SIG_SIZE;
+  wolf_succ = wc_ed25519_sign_msg( *outer_layer, working_outer_layer - *outer_layer - 10, tmp_signature, &idx, descriptor_signing_key );
+
+  if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to sign the outer descriptor, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  v_base_64_encode( (char*)working_outer_layer, tmp_signature, 64 );
+
+  return layer_length - HS_DESC_SIG_PREFIX_LENGTH;
+}
+
+int d_generate_first_plaintext( unsigned char** first_layer, unsigned char* ciphertext, int ciphertext_length ) {
+  int i;
+  Sha3 reusable_sha3;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char* working_first_layer;
+
+  const char* first_layer_template =
+    "desc-auth-type x25519\n"
+    "desc-auth-ephemeral-key *******************************************\n"
+    ;
+  const char* auth_client_template =
+    "auth-client *********** ********************** **********************\n"
+    ;
+  const char* begin_encrypted =
+    "encrypted\n"
+    "-----BEGIN MESSAGE-----\n"
+    ;
+  const char* end_encrypted =
+    "-----END MESSAGE-----"
+    ;
+
+  int layer_length = strlen( first_layer_template ) + strlen( auth_client_template ) * 16 + strlen( begin_encrypted ) + ciphertext_length * 4 / 3 + strlen( end_encrypted );
+
+  if ( ciphertext_length % 6 != 0 ) {
+    layer_length++;
+  }
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  *first_layer = malloc( sizeof( unsigned char ) * layer_length );
+  working_first_layer = *first_layer;
+
+  // skip over the desc-auth-type and next header
+  working_first_layer += 46;
+
+  esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+  v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+
+  // skip over the ephemeral key and the newline
+  working_first_layer += 44;
+
+  for ( i = 0; i < 16; i++ ) {
+    memcpy( working_first_layer, auth_client_template, strlen( auth_client_template ) );
+
+    // skip over the header
+    working_first_layer += 12;
+
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 8 );
+
+    // skip over the client-id
+    working_first_layer += 12;
+
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 16 );
+
+    // skip over the iv
+    working_first_layer += 23;
+
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 16 );
+
+    // skip over the encrypted-cookie
+    working_first_layer += 23;
+  }
+
+  memcpy( working_first_layer, begin_encrypted, strlen( begin_encrypted ) );
+
+  // skip over the header
+  working_first_layer += strlen( begin_encrypted );
+
+  v_base_64_encode( (char*)working_first_layer, ciphertext, ciphertext_length );
+
+  // skip over the blob
+  working_first_layer += ciphertext_length * 4 / 3;
+
+  if ( ciphertext_length % 6 != 0 ) {
+    working_first_layer++;
+  }
+
+  memcpy( working_first_layer, end_encrypted, strlen( end_encrypted ) );
+
+  return layer_length;
+}
+
+int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* plaintext, int plaintext_length, unsigned char* secret_data, int secret_data_length, const char* string_constant, int string_constant_length, unsigned char* sub_credential, int64_t revision_counter ) {
+  int wolf_succ;
+  int64_t reusable_length;
+  unsigned char salt[16];
+  unsigned char* secret_input = malloc( sizeof( unsigned char ) * ( secret_data_length + WC_SHA3_256_DIGEST_SIZE + sizeof( int64_t ) ) );
+  Sha3 reusable_sha3;
+  wc_Shake reusable_shake;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char keys[AES_256_KEY_SIZE + AES_IV_SIZE + WC_SHA3_256_DIGEST_SIZE];
+  Aes reusable_aes_key;
+
+  *ciphertext = malloc( sizeof( unsigned char ) * ( plaintext_length + 16 + WC_SHA3_256_DIGEST_SIZE ) );
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+  wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
+  wc_AesInit( &reusable_aes_key, NULL, INVALID_DEVID );
+
+  esp_fill_random( salt, 16 );
+  wc_Sha3_256_Update( &reusable_sha3, salt, 16 );
+  wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+  memcpy( salt, reusable_sha3_sum, 16 );
+
+  memcpy( secret_input, secret_data, secret_data_length );
+  memcpy( secret_input + secret_data_length, sub_credential, WC_SHA3_256_DIGEST_SIZE );
+  memcpy( secret_input + secret_data_length + WC_SHA3_256_DIGEST_SIZE, (unsigned char*)&revision_counter, 8 );
+
+  wc_Shake256_Update( &reusable_shake, secret_input, secret_data_length + WC_SHA3_256_DIGEST_SIZE + sizeof( int64_t ) );
+  wc_Shake256_Update( &reusable_shake, salt, 16 );
+  wc_Shake256_Update( &reusable_shake, (unsigned char*)string_constant, string_constant_length );
+  wc_Shake256_Final( &reusable_shake, keys, sizeof( keys ) );
+
+  memcpy( *ciphertext, salt, 16 );
+
+  wc_AesSetKeyDirect( &reusable_aes_key, keys, AES_256_KEY_SIZE, keys + AES_256_KEY_SIZE, AES_ENCRYPTION );
+
+  wolf_succ = wc_AesCtrEncrypt( &reusable_aes_key, *ciphertext + 16, plaintext, plaintext_length );
+
+  if ( wolf_succ < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to encrypt descriptor plaintext, error code: %d", wolf_succ );
+#endif
+
+    return -1;
+  }
+
+  reusable_length = WC_SHA256_DIGEST_SIZE;
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_length, 8 );
+  wc_Sha3_256_Update( &reusable_sha3, keys + AES_256_KEY_SIZE + AES_IV_SIZE, WC_SHA256_DIGEST_SIZE );
+
+  reusable_length = 16;
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&reusable_length, 8 );
+  wc_Sha3_256_Update( &reusable_sha3, salt, 16 );
+
+  wc_Sha3_256_Update( &reusable_sha3, *ciphertext + 16, plaintext_length );
+
+  wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+  memcpy( *ciphertext + 16 + plaintext_length, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+
+  wc_Sha3_256_Free( &reusable_sha3 );
+  wc_Shake256_Free( &reusable_shake );
+
+  return plaintext_length + 16 + WC_SHA3_256_DIGEST_SIZE;
+}
+
+int d_generate_second_plaintext( unsigned char** second_layer, DoublyLinkedOnionCircuitList* intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key ) {
+  int i;
+  unsigned int idx;
+  int wolf_succ;
+  unsigned char packed_link_specifiers[1 + 4 + 6 + ID_LENGTH];
+  unsigned char tmp_pub_key[CURVE25519_KEYSIZE];
+  DoublyLinkedOnionCircuit* node;
+  unsigned char* working_second_layer;
+
+  const char* second_layer_template =
+    "create2-formats 2\n"
+    ;
+  const char* introduction_point_template =
+    "introduction-point ******************************************\n"
+    "onion-key ntor *******************************************\n"
+    "auth-key\n"
+    // TODO this is a crosscert with the descriptor signing key as the main key and the intoduction point authentication key as the mandatory extension
+    "-----BEGIN ED25519 CERT-----\n"
+    "*******************************************************************************************************************************************************************************************"
+    "-----END ED25519 CERT-----\n"
+    // TODO this is the public cruve25519 key used to encrypt the introduction request
+    "enc-key ntor *******************************************\n"
+    "enc-key-cert\n"
+    // TODO this is a crosscert with the descriptor signing key as the main key and the the ed25519 equivilent of the above key used as the mandatory extension
+    "-----BEGIN ED25519 CERT-----\n"
+    "*******************************************************************************************************************************************************************************************"
+    "-----END ED25519 CERT-----\n"
+    ;
+
+  *second_layer = malloc( sizeof( unsigned char ) * ( strlen( second_layer_template ) + strlen( introduction_point_template ) * intro_circuits->length ) );
+
+  working_second_layer = *second_layer;
+
+  memcpy( working_second_layer, second_layer_template, strlen( second_layer_template ) );
+  working_second_layer += strlen( second_layer_template );
+
+  node = intro_circuits->head;
+
+  for ( i = 0; i < intro_circuits->length; i++ ) {
+    memcpy( working_second_layer, introduction_point_template, strlen( introduction_point_template ) );
+    // skip past the intordouction-point header
+    working_second_layer += 19;
+    v_generate_packed_link_specifiers( node->circuit.relay_list.tail->relay, packed_link_specifiers );
+    v_base_64_encode( (char*)working_second_layer, packed_link_specifiers, sizeof( packed_link_specifiers ) );
+    // skip past the link specifiers and \nonion-key ntor
+    working_second_layer += 42 + 16;
+    v_base_64_encode( (char*)working_second_layer, node->circuit.relay_list.tail->relay->ntor_onion_key, H_LENGTH );
+    // skip past the onion key and next header
+    working_second_layer += 43 + 39;
+
+    idx = ED25519_PUB_KEY_SIZE;
+    wolf_succ = wc_ed25519_export_public( &node->circuit.auth_key, tmp_pub_key, &idx );
+
+    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export intro circuit auth key, error code: %d", wolf_succ );
+#endif
+    }
+
+    if ( d_generate_packed_crosscert( working_second_layer, tmp_pub_key, descriptor_signing_key, 0x09, valid_after ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
+#endif
+    }
+
+    // skip past the cert and next header
+    working_second_layer += 187 + 40;
+
+    idx = CURVE25519_KEYSIZE;
+    wolf_succ = wc_curve25519_export_public_ex( &node->circuit.intro_encrypt_key, tmp_pub_key, &idx, EC25519_LITTLE_ENDIAN );
+
+    if ( wolf_succ != 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    v_base_64_encode( (char*)working_second_layer, tmp_pub_key, CURVE25519_KEYSIZE );
+
+    // skip past the enc key and next header
+    working_second_layer += 43 + 43;
+
+    // TODO create the derived key by converting our intro_encrypt_key into an ed25519 key and verify that this method works
+    v_ed_pubkey_from_curve_pubkey( tmp_pub_key, node->circuit.intro_encrypt_key.p.point, 0 );
+
+    if ( d_generate_packed_crosscert( working_second_layer, tmp_pub_key, descriptor_signing_key, 0x0B, valid_after ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate the enc-key cross cert" );
+#endif
+    }
+
+    // skip past the cert and next header
+    working_second_layer += 187 + 27;
+
+    node = node->next;
+  }
+
+  return strlen( second_layer_template ) + strlen( introduction_point_template ) * intro_circuits->length;
+}
+
+void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers ) {
+  // set the specifier count
+  packed_link_specifiers[0] = 2;
+
+  // IPv4 specifier
+  // set the type
+  packed_link_specifiers[1] = IPv4Link;
+  // set the length
+  packed_link_specifiers[2] = 6;
+  // set the address and port
+  packed_link_specifiers[6] = (unsigned char)( relay->address >> 24 );
+  packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 );
+  packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 );
+  packed_link_specifiers[3] = (unsigned char)relay->address;
+  packed_link_specifiers[7] = (unsigned char)relay->or_port >> 8;
+  packed_link_specifiers[8] = (unsigned char)relay->or_port;
+
+  // LEGACYLink specifier
+  // set the type
+  packed_link_specifiers[9] = LEGACYLink;
+  // set the length
+  packed_link_specifiers[10] = ID_LENGTH;
+  // copy the identity in
+  memcpy( packed_link_specifiers + 10, relay->identity, ID_LENGTH );
+}
+
+int d_generate_packed_crosscert( unsigned char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) {
+  int res = 0;
+
+  unsigned int idx;
+  int wolf_succ;
+  // set epoch hours to current epoch hours plus three hours later
+  int epoch_hours = valid_after / 3600 + 3;
+  unsigned char* tmp_body = malloc( sizeof( unsigned char ) * 140 );
+
+  // set the version
+  tmp_body[0] = 0x01;
+  // set the cert type
+  tmp_body[1] = cert_type;
+  // set the expiration date, four bytes
+  tmp_body[2] = (unsigned char)( epoch_hours >> 24 );
+  tmp_body[3] = (unsigned char)( epoch_hours >> 16 );
+  tmp_body[4] = (unsigned char)( epoch_hours >> 8 );
+  tmp_body[5] = (unsigned char)epoch_hours;
+  // set the cert key type, same a cert type
+  tmp_body[6] = cert_type;
+  // copy the certified key
+  memcpy( tmp_body + 7, certified_key, 32 );
+  // set n extensions to 1
+  tmp_body[39] = 1;
+  // set the ext length to key size
+  tmp_body[40] = 0;
+  tmp_body[41] = ED25519_PUB_KEY_SIZE;
+  // set the ext type to 0x04
+  tmp_body[42] = 0x04;
+  // set ext flag to 1
+  tmp_body[43] = 0x01;
+  // copy the signing key
+  idx = ED25519_PUB_KEY_SIZE;
+  wolf_succ = wc_ed25519_export_public( signing_key, tmp_body + 44, &idx );
+
+  if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
+#endif
+
+    res = -1;
+    goto cleanup;
+  }
+
+  idx = ED25519_SIG_SIZE;
+  wolf_succ = wc_ed25519_sign_msg( tmp_body, 76, tmp_body + 76, &idx, signing_key );
+
+  if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to sign the ed crosscert, error code: %d", wolf_succ );
+#endif
+
+    res = -1;
+    goto cleanup;
+  }
+
+  v_base_64_encode( (char*)destination, tmp_body, 140 );
+
+cleanup:
+  free( tmp_body );
+  return res;
+}
+
+void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* input, int sign_bit ) {
+  unsigned char one[F25519_SIZE] = { 1 };
+  unsigned char input_minus_1[F25519_SIZE];
+  unsigned char input_plus_1[F25519_SIZE];
+  unsigned char inverse_input_plus_1[F25519_SIZE];
+
+  lm_sub( input_minus_1, input, one );
+  lm_add( input_plus_1, input, one );
+  lm_invert( inverse_input_plus_1, input_plus_1 );
+  lm_mul( output, input_minus_1, inverse_input_plus_1 );
+  output[31] = (!!sign_bit) << 7;
+}
 
 int d_router_establish_intro( OnionCircuit* circuit ) {
   int wolf_succ;
@@ -3201,7 +4382,7 @@ int d_router_establish_intro( OnionCircuit* circuit ) {
 
   /* wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&ordered_digest_length, 8 ); */
   wc_Sha3_256_Update( &reusable_sha3, ordered_digest_length_buffer, sizeof( ordered_digest_length_buffer ) );
-  wc_Sha3_256_Update( &reusable_sha3, circuit->relay_list.tail->relay->nonce, DIGEST_LEN );
+  wc_Sha3_256_Update( &reusable_sha3, circuit->relay_list.tail->nonce, DIGEST_LEN );
   wc_Sha3_256_Update( &reusable_sha3, packed_cell + 5 + 11, 3 + ED25519_PUB_KEY_SIZE + 1 );
   wc_Sha3_256_Final( &reusable_sha3, packed_cell + 5 + 11 + 3 + ED25519_PUB_KEY_SIZE + 1 );
 
@@ -3230,7 +4411,7 @@ int d_router_establish_intro( OnionCircuit* circuit ) {
 
   ESP_LOGE( MINITOR_TAG, "Sending establish intro to %d", circuit->relay_list.tail->relay->or_port );
 
-  if ( d_send_packed_relay_cell_and_free( packed_cell, circuit ) < 0 ) {
+  if ( d_send_packed_relay_cell_and_free( circuit->ssl, packed_cell, &circuit->relay_list ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
 #endif
@@ -3263,7 +4444,7 @@ int d_router_establish_intro( OnionCircuit* circuit ) {
   return 0;
 }
 
-int d_derive_blinded_keys( unsigned char output_priv_key[ED25519_PRV_KEY_SIZE], ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char nonce[32], unsigned char* secret, int secret_length ) {
+int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char* secret, int secret_length ) {
   int wolf_succ;
   unsigned int idx;
   unsigned int idy;
@@ -3314,13 +4495,20 @@ int d_derive_blinded_keys( unsigned char output_priv_key[ED25519_PRV_KEY_SIZE], 
   // will need to verify this produces the correct key
   ed25519_smult( &expanded_secret_key, &expanded_secret_key, reusable_sha3_sum );
 
-  ge_p3_tobytes( output_priv_key, &expanded_secret_key );
-
   wc_Sha512Update( &reusable_sha512, (unsigned char*)"Derive temporary signing key hash input", strlen( "Derive temporary signing key hash input" ) );
   wc_Sha512Update( &reusable_sha512, tmp_priv_key + 32, 32 );
   wc_Sha512Final( &reusable_sha512, reusable_sha512_sum );
 
-  memcpy( output_priv_key + 32, reusable_sha512_sum, 32 );
+  ge_p3_tobytes( tmp_priv_key, &expanded_secret_key );
+  memcpy( tmp_priv_key + 32, reusable_sha512_sum, WC_SHA3_256_DIGEST_SIZE );
+
+  memcpy( blinded_key->k, tmp_priv_key, ED25519_PRV_KEY_SIZE );
+
+  wc_ed25519_make_public( blinded_key, blinded_key->p, ED25519_PUB_KEY_SIZE );
+
+  memcpy( blinded_key->k + ED25519_PUB_KEY_SIZE, blinded_key->p, ED25519_PUB_KEY_SIZE );
+
+  blinded_key->pubKeySet = 1;
 
   return 0;
 }

@@ -7,7 +7,7 @@
 // }
 
 process.stdout.write( '"' );
-for ( let i = 0; i < 140; i++ ) {
+for ( let i = 0; i < 86; i++ ) {
   process.stdout.write( '*' );
 }
 process.stdout.write( '"' );
