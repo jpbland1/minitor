@@ -3,6 +3,7 @@
 
 #include <time.h>
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/ge_operations.h"
@@ -27,6 +28,7 @@
 
 #define SERVER_STR "Server"
 #define SERVER_STR_LENGTH 6
+
 #define PROTOID "ntor-curve25519-sha256-1"
 #define PROTOID_LENGTH 24
 #define PROTOID_MAC PROTOID ":mac"
@@ -37,6 +39,18 @@
 #define PROTOID_VERIFY_LENGTH PROTOID_LENGTH + 7
 #define PROTOID_EXPAND PROTOID ":key_expand"
 #define PROTOID_EXPAND_LENGTH PROTOID_LENGTH + 11
+
+#define HS_PROTOID "tor-hs-ntor-curve25519-sha3-256-1"
+#define HS_PROTOID_LENGTH 33
+#define HS_PROTOID_MAC HS_PROTOID ":hs_mac"
+#define HS_PROTOID_MAC_LENGTH HS_PROTOID_LENGTH + 7
+#define HS_PROTOID_KEY HS_PROTOID ":hs_key_extract"
+#define HS_PROTOID_KEY_LENGTH HS_PROTOID_LENGTH + 15
+#define HS_PROTOID_VERIFY HS_PROTOID ":hs_verify"
+#define HS_PROTOID_VERIFY_LENGTH HS_PROTOID_LENGTH + 10
+#define HS_PROTOID_EXPAND HS_PROTOID ":hs_key_expand"
+#define HS_PROTOID_EXPAND_LENGTH HS_PROTOID_LENGTH + 14
+
 #define H_LENGTH 32
 #define ID_LENGTH 20
 #define G_LENGTH 32
@@ -55,6 +69,8 @@
 typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
 typedef struct DoublyLinkedHsDirRelay DoublyLinkedHsDirRelay;
+typedef struct DoublyLinkedRendezvousCookie DoublyLinkedRendezvousCookie;
+typedef struct DoublyLinkedLocalStream DoublyLinkedLocalStream;
 
 typedef enum CircuitStatus {
   CIRCUIT_BUILDING,
@@ -86,15 +102,19 @@ typedef struct OnionRelay {
   unsigned char hsdir;
 } OnionRelay;
 
-struct DoublyLinkedOnionRelay {
-  DoublyLinkedOnionRelay* previous;
-  DoublyLinkedOnionRelay* next;
+typedef struct RelayCrypto {
   Sha running_sha_forward;
   Sha running_sha_backward;
   Aes aes_forward;
   Aes aes_backward;
   unsigned char nonce[DIGEST_LEN];
+} RelayCrypto;
+
+struct DoublyLinkedOnionRelay {
+  DoublyLinkedOnionRelay* previous;
+  DoublyLinkedOnionRelay* next;
   OnionRelay* relay;
+  RelayCrypto* relay_crypto;
 };
 
 typedef struct DoublyLinkedOnionRelayList {
@@ -104,15 +124,39 @@ typedef struct DoublyLinkedOnionRelayList {
   DoublyLinkedOnionRelay* tail;
 } DoublyLinkedOnionRelayList;
 
+struct DoublyLinkedRendezvousCookie {
+  unsigned char rendezvous_cookie[20];
+  DoublyLinkedRendezvousCookie* next;
+  DoublyLinkedRendezvousCookie* previous;
+};
+
+typedef struct DoublyLinkedRendezvousCookieList {
+  int length;
+  DoublyLinkedRendezvousCookie* head;
+  DoublyLinkedRendezvousCookie* tail;
+} DoublyLinkedRendezvousCookieList;
+
+typedef struct IntroCrypto {
+  ed25519_key auth_key;
+  curve25519_key encrypt_key;
+} IntroCrypto;
+
+typedef struct HsCrypto {
+  Sha3 hs_running_sha_forward;
+  Sha3 hs_running_sha_backward;
+  Aes hs_aes_forward;
+  Aes hs_aes_backward;
+} HsCrypto;
+
 typedef struct OnionCircuit {
   int circ_id;
   CircuitStatus status;
   WOLFSSL* ssl;
   QueueHandle_t rx_queue;
   TaskHandle_t task_handle;
-  ed25519_key auth_key;
-  curve25519_key intro_encrypt_key;
   DoublyLinkedOnionRelayList relay_list;
+  HsCrypto* hs_crypto;
+  IntroCrypto* intro_crypto;
 } OnionCircuit;
 
 struct DoublyLinkedOnionCircuit {
@@ -133,21 +177,56 @@ typedef struct HsDirIndexNode {
   unsigned char chosen;
 } HsDirIndexNode;
 
+struct DoublyLinkedLocalStream {
+  int circ_id;
+  int stream_id;
+  QueueHandle_t rx_queue;
+  int sock_fd;
+  DoublyLinkedLocalStream* next;
+  DoublyLinkedLocalStream* previous;
+};
+
+typedef struct DoublyLinkedLocalStreamList {
+  int length;
+  DoublyLinkedLocalStream* head;
+  DoublyLinkedLocalStream* tail;
+} DoublyLinkedLocalStreamList;
+
 typedef struct OnionService {
   unsigned short exit_port;
   unsigned short local_port;
   char* onion_service_directory;
   ed25519_key master_key;
   QueueHandle_t rx_queue;
+  unsigned char* current_sub_credential;
+  unsigned char* previous_sub_credential;
   DoublyLinkedOnionCircuitList intro_circuits;
   DoublyLinkedOnionCircuitList rend_circuits;
+  DoublyLinkedRendezvousCookieList rendezvous_cookies;
+  DoublyLinkedLocalStreamList local_streams;
 } OnionService;
 
-typedef struct HiddenServiceMessage {
+typedef enum OnionMessageType {
+  ONION_CELL,
+  SERVICE_TCP_DATA,
+  SERVICE_COMMAND,
+} OnionMessageType;
+
+typedef enum ServiceCommand {
+  SERVICE_COMMAND_STOP,
+} ServiceCommand;
+
+typedef struct OnionMessage {
+  OnionMessageType type;
+  void* data;
+} OnionMessage;
+
+typedef struct ServiceTcpTraffic {
   int circ_id;
+  int stream_id;
   int length;
   unsigned char* data;
-} HiddenServiceMessage;
+} ServiceTcpTraffic;
 
 int v_minitor_INIT();
 void v_circuit_keepalive( void* pv_parameters );
@@ -159,6 +238,8 @@ void v_base_64_encode( char* destination, unsigned char* source, int source_leng
 void v_base_32_encode( char* destination, unsigned char* source, int source_length );
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
+void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );
+void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list );
 int d_setup_init_circuits( int circuit_count );
 int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length );
 int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
@@ -178,11 +259,21 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
 void v_destroy_onion_circuit( int circ_id );
 int d_fetch_descriptor_info( OnionCircuit* circuit );
-int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list );
-int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha );
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list );
+int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto );
+int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha, OnionCircuit* rend_circuit );
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, OnionCircuit* rend_circuit );
 unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size );
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );
+void v_handle_onion_service( void* pv_parameters );
+int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceTcpTraffic* tcp_traffic );
+int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cell );
+int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpacked_cell );
+int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpacked_cell );
+void v_handle_local( void* pv_parameters );
+int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell );
+int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac );
+int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* client_handshake_key );
+int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, OnionCircuit* rend_circuit, unsigned char* auth_input_mac );
 int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store );
 int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit );
 void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_array, int index_length );

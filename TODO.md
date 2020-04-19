@@ -19,28 +19,28 @@
   [X] Receive EXTENDED2 cell from first relay, derive shared key for RELAY cells from handshake
   [X] Repeat previous two steps to extend to third router
 [X] Setup fat filesystem on esp32, required to reasonably host onion services
-[] Register a tor onion service
+[X] Register a tor onion service
   [X] Generate onion service master identity keypair
-  [?] Generate dirivative blinded keys from the identity keypair
+  [X] Generate dirivative blinded keys from the identity keypair
   [X] Generate descriptor signing key
   [X] Generate descriptor encryption key
-  [?] Generate and encrypt the descriptors
-  [?] Calculate the position in the hash ring to upload the descriptors to
+  [X] Generate and encrypt the descriptors
+  [X] Calculate the position in the hash ring to upload the descriptors to
   [X] Generate introduction point authentication key
-  [] Generate introduction point encryption key
+  [X] Generate introduction point encryption key
   [X] Send a RELAY_COMMAND_ESTABLISH_INTRO cell to existing tor circuit to turn it into an introduction point
   [X] Receive a RELAY_COMMAND_INTRO_ESTABLISHED cell to confirm that introduction has been established
-  [] Receive a RELAY_COMMAND_INTRODUCE2 cell from our introduction point
-  [] Connect to rendezvous point recieved from previous cell, send a RELAY_COMMAND_RENDEZVOUS1 cell to connect to our client
-[] Operate a tor onion service
-  [] Receive RELAY_BEGIN cells from rendezvous-ed circuit
-  [] Create a TCP socket to on-system web service
-  [] Receive RELAY_DATA cells from rendezvous-ed circuit
-  [] Forward RELAY_DATA contents to on-system web services
-  [] Receive TCP data from the socket, package it into RELAY_DATA cells and send them over tor to the client
+  [X] Receive a RELAY_COMMAND_INTRODUCE2 cell from our introduction point
+  [X] Connect to rendezvous point recieved from previous cell, send a RELAY_COMMAND_RENDEZVOUS1 cell to connect to our client
+[X] Operate a tor onion service
+  [X] Receive RELAY_BEGIN cells from rendezvous-ed circuit
+  [X] Create a TCP socket to on-system web service
+  [X] Receive RELAY_DATA cells from rendezvous-ed circuit
+  [X] Forward RELAY_DATA contents to on-system web services
+  [X] Receive TCP data from the socket, package it into RELAY_DATA cells and send them over tor to the client
 At this point in development, we have a working demo/prototype and I would be confident integrating this into a physical thermostat unit and advertising the product for investment or preferably, just pre orders. I don't think we need to take on investers when costs can be kept low and crowd funding/pre orders can be used instead
 [] Refactor consensus fetching to cache all information in the filesystem so we don't have to fetch the consensus every time we start the system
-[] Modularize each step (handshaking, cell creating, intro establishment, etc) into separate functions or even files, rename functions with prefixes to avoid name collisions with other libraries
+[] Modularize each step (handshaking, cell creating, intro establishment, etc) into separate functions and files, rename functions with prefixes to avoid name collisions with other libraries
 [] Setup test infrastructure for automated testing, probably using a raspberry pi to program the esp32 with test functions that will run over a long period of time
 [] Move demo to live tor network and deal with any integration hurdles that arise, this step may be very complicated since the real tor network is more diverse than the chutney tests
 At this point in development, I would consider Minitor stable and suitable for use in live products, from this point we could integrate it into a smart thermostat, self grow unit, smart plug, smart butt plug etc and we will have acheived an infustructure cost an order of magnitude lower than large competitors and a level of privacy that larger companies refuse to sell

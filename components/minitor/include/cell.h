@@ -307,7 +307,7 @@ typedef enum AuthKeyType {
 } AuthKeyType;
 
 typedef enum IntroExtensionType {
-  ED25519 = 0x02,
+  EXTENSION_ED25519 = 0x02,
 } IntroExtensionType;
 
 typedef struct IntroExtensionFieldEd25519 {
@@ -363,24 +363,6 @@ typedef enum IntroduceOnionKeyType {
     Ntor = 1,
 } IntroduceOnionKeyType;
 
-struct DecryptedIntroduce2 {
-  unsigned char rendezvous_cookie[20];
-  unsigned char extension_count;
-  IntroExtension** extensions;
-  IntroduceOnionKeyType onion_key_type;
-  unsigned short onion_key_length;
-  unsigned char* onion_key;
-  unsigned char specifier_count;
-  LinkSpecifier** link_specifiers;
-  unsigned char* padding;
-};
-
-struct EncryptedIntroduce1 {
-  unsigned char client_public_key[PK_PUBKEY_LEN];
-  unsigned char* encrypted_data;
-  unsigned char mac[MAC_LEN];
-};
-
 // RelayPayload
 typedef struct RelayPayloadExtend2 {
   unsigned char specifier_count;
@@ -398,7 +380,8 @@ typedef struct RelayPayloadExtend {
 } RelayPayloadExtend;
 
 typedef struct RelayPayloadBegin {
-  char* address_and_port;
+  char* address;
+  unsigned short port;
   unsigned int flags;
 } RelayPayloadBegin;
 
@@ -447,6 +430,17 @@ typedef struct RelayPayloadIntroEstablished {
   IntroExtension** extensions;
 } RelayPayloadIntroEstablished;
 
+typedef struct DecryptedIntroduce2 {
+  unsigned char rendezvous_cookie[20];
+  unsigned char extension_count;
+  IntroExtension** extensions;
+  IntroduceOnionKeyType onion_key_type;
+  unsigned short onion_key_length;
+  unsigned char* onion_key;
+  unsigned char specifier_count;
+  LinkSpecifier** link_specifiers;
+} DecryptedIntroduce2;
+
 typedef struct RelayPayloadIntroduce1 {
   unsigned char legacy_key_id[20];
   AuthKeyType auth_key_type;
@@ -454,7 +448,10 @@ typedef struct RelayPayloadIntroduce1 {
   unsigned char* auth_key;
   unsigned char extension_count;
   IntroExtension** extensions;
-  unsigned char* encrypted;
+  unsigned char client_pk[PK_PUBKEY_LEN];
+  unsigned char* encrypted_data;
+  unsigned short encrypted_length;
+  unsigned char mac[MAC_LEN];
 } RelayPayloadIntroduce1;
 
 struct RelayPayloadIntroduceAck {
@@ -469,7 +466,7 @@ struct RelayPayloadCommandEstablishRendezvous {
 
 typedef struct RelayPayloadCommandRendezvous1 {
   unsigned char rendezvous_cookie[20];
-  RendezvousHandshakeInfo* handshake_info;
+  RendezvousHandshakeInfo handshake_info;
 } RelayPayloadCommandRendezvous1;
 
 unsigned char* pack_and_free( Cell* unpacked_cell );
@@ -479,6 +476,8 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length );
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length );
+
+int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* unpacked_data );
 
 void free_cell( Cell* unpacked_cell );
 
@@ -499,5 +498,7 @@ void pack_two_bytes( unsigned char** packed_cell, unsigned short value );
 void pack_buffer( unsigned char** packed_cell, unsigned char* buffer, int length );
 
 void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int length );
+
+void v_free_introduce_2_data( DecryptedIntroduce2* unpacked_data );
 
 #endif

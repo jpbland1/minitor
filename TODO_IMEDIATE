@@ -1,1 +1,2 @@
-test actually connecting to the hidden service, debug the descriptor upload positions and contents to make sure they are correct and the client can actually send the introduction
+Debug the current memory issues and file not found error. This might be a good opportunity to clean up memory leaks and the stack, this problem could be a memory corruption problem ,
+curse yourself for not commitint earlier this week when the introductions were working

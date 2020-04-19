@@ -409,8 +409,8 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 
       // TODO possibly better to preprocess this so its easier to deal with
       // pack all of the characters from address and port into the cell
-      while ( i == 0 || ( (RelayPayloadBegin*)payload )->address_and_port[i - 1] != '\0' ) {
-        **packed_cell = (unsigned char)( (RelayPayloadBegin*)payload )->address_and_port[i];
+      while ( i == 0 || ( (RelayPayloadBegin*)payload )->address[i - 1] != '\0' ) {
+        **packed_cell = (unsigned char)( (RelayPayloadBegin*)payload )->address[i];
         *packed_cell += 1;
         i += 1;
       }
@@ -437,8 +437,15 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
       *packed_cell += 1;
 
       break;
-    // TODO we shouldn't need to pack a relay connected cell since we're not running a relay
     case RELAY_CONNECTED:
+      pack_buffer(
+        packed_cell,
+        ( (RelayPayloadConnected*)payload )->address,
+        4
+        );
+
+      pack_four_bytes( packed_cell, ( (RelayPayloadConnected*)payload )->time_to_live );
+
       break;
     case RELAY_SENDME:
       // pack the version into the cell
@@ -604,7 +611,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
           *packed_cell += 1;
 
           switch ( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)payload )->establish_intro )->extensions[i]->type ) {
-            case ED25519:
+            case EXTENSION_ED25519:
               // pack the nonce to length 16
               pack_buffer(
                 packed_cell,
@@ -669,13 +676,13 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
       // pack the handshake info
       pack_buffer(
         packed_cell,
-        ( (RelayPayloadCommandRendezvous1*)payload )->handshake_info->public_key,
+        ( (RelayPayloadCommandRendezvous1*)payload )->handshake_info.public_key,
         PK_PUBKEY_LEN
         );
       // pack the auth
       pack_buffer(
         packed_cell,
-        ( (RelayPayloadCommandRendezvous1*)payload )->handshake_info->auth,
+        ( (RelayPayloadCommandRendezvous1*)payload )->handshake_info.auth,
         MAC_LEN
         );
 
@@ -844,7 +851,7 @@ int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_i
     case VERSIONS:
       unpacked_cell->payload = malloc( sizeof( PayloadVersions ) );
       // create the buffer for the versions array
-      ( (PayloadVersions*)unpacked_cell->payload )-> versions = malloc( sizeof( unsigned char ) * unpacked_cell->length  );
+      ( (PayloadVersions*)unpacked_cell->payload )->versions = malloc( sizeof( unsigned char ) * unpacked_cell->length  );
       // unpack the versions array
       unpack_buffer_short(
         ( (PayloadVersions*)unpacked_cell->payload )-> versions,
@@ -1008,11 +1015,42 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
   // unpack the correct relay struct based on the command
   // relay payloads start at byte 17
   switch( command ) {
-    // TODO we shouldn't need to unpack a relay begin because this isn't a router
     case RELAY_BEGIN:
+      result = malloc( sizeof( RelayPayloadBegin ) );
+
+      i = 0;
+
+      while ( packed_cell[i] != ':' ) {
+        i++;
+      }
+
+      ( (RelayPayloadBegin*)result )->address = malloc( sizeof( char ) * ( i + 1 ) );
+
+      unpack_buffer(
+        (unsigned char*)( (RelayPayloadBegin*)result )->address,
+        i,
+        &packed_cell
+        );
+
+      ( (RelayPayloadBegin*)result )->address[i] = 0;
+      packed_cell++;
+
+      ( (RelayPayloadBegin*)result )->port = 0;
+
+      while ( *packed_cell != 0 ) {
+        ( (RelayPayloadBegin*)result )->port *= 10;
+        ( (RelayPayloadBegin*)result )->port += *packed_cell - '0';
+        packed_cell++;
+      }
+
+      packed_cell++;
+
+      ( (RelayPayloadBegin*)result )->flags = unpack_four_bytes( &packed_cell );
+
       break;
     case RELAY_DATA:
       result = malloc( sizeof( RelayPayloadData ) );
+
       ( (RelayPayloadData*)result )->payload = malloc( sizeof( unsigned char ) * ( payload_length ) );
       unpack_buffer(
         ( (RelayPayloadData*)result )->payload,
@@ -1024,6 +1062,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
     case RELAY_END:
       // get the reason the relay end cell was sent
       result = malloc( sizeof( RelayPayloadEnd ) );
+
       ( (RelayPayloadEnd*)result )->reason = *packed_cell;
       packed_cell += 1;
 
@@ -1076,6 +1115,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_SENDME:
       result = malloc( sizeof( RelayPayloadSendMe ) );
+
       // unpack the version
       ( (RelayPayloadSendMe*)result )->version = *packed_cell;
       packed_cell += 1;
@@ -1096,6 +1136,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_EXTENDED:
       result = malloc( sizeof( PayloadCreated ) );
+
       // unpack the handshake data into the buffer
       unpack_buffer(
         ( (PayloadCreated*)result )->handshake_data,
@@ -1109,6 +1150,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_TRUNCATED:
       result = malloc( sizeof( PayloadDestroy ) );
+
       // unpack the destroycode into the struct
       ( (PayloadDestroy*)result )->destroy_code = *packed_cell;
       packed_cell += 1;
@@ -1122,6 +1164,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_RESOLVED:
       result = malloc( sizeof( RelayPayloadResolved ) );
+
       // unpack the type of address
       ( (RelayPayloadResolved*)result )->type = *packed_cell;
       packed_cell += 1;
@@ -1148,6 +1191,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_EXTENDED2:
       result = malloc( sizeof( PayloadCreated2 ) );
+
       // unpack the handshake length into the struct
       ( (PayloadCreated2*)result )->handshake_length = unpack_two_bytes( &packed_cell );
       // create buffer for the handshake data
@@ -1173,6 +1217,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
     case RELAY_COMMAND_INTRODUCE2:
       // introduce 1 and 2 both use the same struct
       result = malloc( sizeof( RelayPayloadIntroduce1 ) );
+
       // unpack the legacy_key_id into the struct
       unpack_buffer(
         ( (RelayPayloadIntroduce1*)result )->legacy_key_id,
@@ -1197,7 +1242,6 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       packed_cell += 1;
       // create a buffer of buffers for the extensions
       ( (RelayPayloadIntroduce1*)result )->extensions = malloc( sizeof( IntroExtension* ) * ( (RelayPayloadIntroduce1*)result )->extension_count );
-      // set the packed cell pointer to the current position since from here on we can't keep proper track of our position
 
       for ( i = 0; i < ( (RelayPayloadIntroduce1*)result )->extension_count; i++ ) {
         // create a buffer for each extension
@@ -1211,7 +1255,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
 
         // check which type of extension we're dealing with
         switch( ( (RelayPayloadIntroduce1*)result )->extensions[i]->type ) {
-          case ED25519:
+          case EXTENSION_ED25519:
             // create a buffer for the extension
             ( (RelayPayloadIntroduce1*)result )->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
             // unpack the the nonce and move the buffer
@@ -1235,17 +1279,29 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
             
             break;
         }
-
-        // TODO check if pointer arithmatic actually returns the difference
-        // create buffer to hold the encrypted data
-        ( (RelayPayloadIntroduce1*)result )->encrypted = malloc( sizeof( unsigned char ) * ( packed_cell_relay_end - packed_cell ) );
-        // unpack the encryped data into the buffer
-        unpack_buffer(
-          ( (RelayPayloadIntroduce1*)result )->encrypted,
-          packed_cell_relay_end - packed_cell,
-          &packed_cell
-          );
       }
+
+      unpack_buffer(
+        ( (RelayPayloadIntroduce1*)result )->client_pk,
+        PK_PUBKEY_LEN,
+        &packed_cell
+        );
+
+      ( (RelayPayloadIntroduce1*)result )->encrypted_length = packed_cell_relay_end - packed_cell - MAC_LEN;
+      // create buffer to hold the encrypted data
+      ( (RelayPayloadIntroduce1*)result )->encrypted_data = malloc( sizeof( unsigned char ) * ( (RelayPayloadIntroduce1*)result )->encrypted_length );
+      // unpack the encryped data into the buffer
+      unpack_buffer(
+        ( (RelayPayloadIntroduce1*)result )->encrypted_data,
+        ( (RelayPayloadIntroduce1*)result )->encrypted_length,
+        &packed_cell
+        );
+
+      unpack_buffer(
+        ( (RelayPayloadIntroduce1*)result )->mac,
+        MAC_LEN,
+        &packed_cell
+        );
 
       break;
     // TODO we shouldn't need to unpack a relay rendezvous 1 because this isn't an introduction point
@@ -1256,6 +1312,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
       break;
     case RELAY_COMMAND_INTRO_ESTABLISHED:
       result = malloc( sizeof( RelayPayloadIntroEstablished ) );
+
       // unpack the extension count and increment pointer
       ( (RelayPayloadIntroEstablished*)result )->extension_count = *packed_cell;
       packed_cell += 1;
@@ -1273,7 +1330,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
 
         // check which type of extension we're dealing with
         switch( ( (RelayPayloadIntroEstablished*)result )->extensions[i]->type ) {
-          case ED25519:
+          case EXTENSION_ED25519:
             // create a buffer for the extension
             ( (RelayPayloadIntroEstablished*)result )->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
             // unpack the the nonce and move the buffer
@@ -1309,6 +1366,75 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
   }
 
   return result;
+}
+
+int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* unpacked_data ) {
+  int i;
+
+  unpack_buffer( unpacked_data->rendezvous_cookie, 20, &packed_data );
+
+  unpacked_data->extension_count = *packed_data;
+  packed_data++;
+
+  if ( unpacked_data->extension_count > 0 ) {
+    unpacked_data->extensions = malloc( sizeof( IntroExtension* ) * unpacked_data->extension_count );
+  }
+
+  for ( i = 0; i < unpacked_data->extension_count; i++ ) {
+    unpacked_data->extensions[i] = malloc( sizeof( IntroExtension ) );
+
+    unpacked_data->extensions[i]->type = *packed_data;
+    packed_data++;
+
+    unpacked_data->extensions[i]->length = *packed_data;
+    packed_data++;
+
+    switch( unpacked_data->extensions[i]->type ) {
+      case EXTENSION_ED25519:
+        unpacked_data->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
+
+        unpack_buffer( ( (IntroExtensionFieldEd25519*)unpacked_data->extensions[i]->intro_extension_field )->nonce, 16, &packed_data );
+
+        unpack_buffer( ( (IntroExtensionFieldEd25519*)unpacked_data->extensions[i]->intro_extension_field )->pubkey, 32, &packed_data );
+
+        unpack_buffer( ( (IntroExtensionFieldEd25519*)unpacked_data->extensions[i]->intro_extension_field )->signature, 64, &packed_data );
+        break;
+      default:
+        return -1;
+    }
+  }
+
+  unpacked_data->onion_key_type = *packed_data;
+  packed_data++;
+
+  unpacked_data->onion_key_length = unpack_two_bytes( &packed_data );
+
+  unpacked_data->onion_key = malloc( sizeof( unsigned char ) * unpacked_data->onion_key_length );
+
+  unpack_buffer( unpacked_data->onion_key, unpacked_data->onion_key_length, &packed_data );
+
+  unpacked_data->specifier_count = *packed_data;
+  packed_data++;
+
+  if ( unpacked_data->specifier_count > 0 ) {
+    unpacked_data->link_specifiers = malloc( sizeof( LinkSpecifier* ) * unpacked_data->specifier_count );
+  }
+
+  for ( i = 0; i < unpacked_data->specifier_count; i++ ) {
+    unpacked_data->link_specifiers[i] = malloc( sizeof( LinkSpecifier ) );
+
+    unpacked_data->link_specifiers[i]->type = *packed_data;
+    packed_data++;
+
+    unpacked_data->link_specifiers[i]->length = *packed_data;
+    packed_data++;
+
+    unpacked_data->link_specifiers[i]->specifier = malloc( sizeof( unsigned char ) * unpacked_data->link_specifiers[i]->length );
+
+    unpack_buffer( unpacked_data->link_specifiers[i]->specifier, unpacked_data->link_specifiers[i]->length, &packed_data );
+  }
+
+  return 0;
 }
 
 // TODO verify this works on the risc-v chip
@@ -1348,14 +1474,9 @@ unsigned short unpack_two_bytes( unsigned char** packed_cell ) {
 
 // copy the contents of the packed cell into the target buffer
 void unpack_buffer( unsigned char* buffer, int length, unsigned char** packed_cell ) {
-  int i;
-
-  // loop over the length of the target buffer and put the bytes
-  // from start to start + length into the target buffer
-  for ( i = 0; i < length; i++ ) {
-    buffer[i] = **packed_cell;
-    *packed_cell += 1;
-  }
+  // memcpy the data and then increment the pointer by length
+  memcpy( buffer, *packed_cell, length );
+  *packed_cell += length;
 }
 
 // copy the contents of the packed cell into the target buffer of unsigned short type
@@ -1503,7 +1624,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
   switch ( command ) {
     case RELAY_BEGIN:
       // free the address and port string
-      free( ( (RelayPayloadBegin*)payload )->address_and_port );
+      free( ( (RelayPayloadBegin*)payload )->address );
 
       break;
     case RELAY_DATA:
@@ -1626,14 +1747,12 @@ void free_relay_payload( void * payload, unsigned char command ) {
 
       // TODO figure out how to properly handle the encrypted data
       // free the encrypted data
-      free( ( (RelayPayloadIntroduce1*)payload )->encrypted );
+      free( ( (RelayPayloadIntroduce1*)payload )->encrypted_data );
 
       break;
-    // cells are identical
+    // cells are identical, no malloc pointers
     case RELAY_COMMAND_RENDEZVOUS1:
     case RELAY_COMMAND_RENDEZVOUS2:
-      free( ( (RelayPayloadCommandRendezvous1*)payload )->handshake_info );
-
       break;
     case RELAY_COMMAND_INTRO_ESTABLISHED:
       for ( i = 0; i < ( (RelayPayloadIntroEstablished*)payload )->extension_count; i++ ) {
@@ -1666,4 +1785,26 @@ void free_relay_payload( void * payload, unsigned char command ) {
   }
 
   free( payload );
+}
+
+void v_free_introduce_2_data( DecryptedIntroduce2* unpacked_data ) {
+  int i;
+
+  for ( i = 0; i < unpacked_data->extension_count; i++ ) {
+    free( unpacked_data->extensions[i]->intro_extension_field );
+    free( unpacked_data->extensions[i] );
+  }
+
+  if ( unpacked_data->extension_count > 0 ) {
+    free( unpacked_data->extensions );
+  }
+
+  free( unpacked_data->onion_key );
+
+  for ( i = 0; i < unpacked_data->specifier_count; i++ ) {
+    free( unpacked_data->link_specifiers[i]->specifier );
+    free( unpacked_data->link_specifiers[i] );
+  }
+
+  free( unpacked_data->link_specifiers );
 }
