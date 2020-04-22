@@ -48,7 +48,7 @@ Now we're ready to set Minitor level settings, edit `components/wifi_connect/inc
 #define EXAMPLE_ESP_WIFI_SSID      "feff"
 #define EXAMPLE_ESP_WIFI_PASS      "feff"
 ```
-Now edit `components/minitor/include/config.h` and change `MINITOR_CHUTNEY_ADDRESS` to be your ip address as a small endian integer. The ip stack lwip uses small endian integers for addresses while tor uses big endian integers for its addresses, keep this in mind when encoding addresses:
+Now edit `components/minitor/include/config.h` and change `MINITOR_CHUTNEY_ADDRESS` to be your ip address as a small endian integer and `MINITOR_CHUTNEY_ADDRESS_STR` to be the ipv4 string of that address. The ip stack lwip uses small endian integers for addresses while tor uses big endian integers for its addresses, keep this in mind when encoding addresses:
 As an example, if your address is `192.168.1.2`, you would set `#define MINITOR_CHUTNEY_ADDRESS 0x0201a8c0` where `0xc0` is `192`, `0xa8` is `168`, `0x01` is `1` and `0x02` is `2`
 Now we need to insure our sd card breakout is setup correctly, I've included two images, setup1.jpg and setup2.jpg, that show how to connect the breakout to the esp. The cs pin connects to D13, the DI pin connects to D15, the DO pin connects to D4 and the CLK pin connects to D14
 Additionally you must connect the 3v pin to the 3v3 on the esp32 and the GND pin to the GND pin. You must also attatch a 10K-OHM resistor, connecting the DO pin and the 3v3 pin. This will pull the DO pin up which is required

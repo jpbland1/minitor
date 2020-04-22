@@ -20,10 +20,6 @@
 
 #include "minitor.h"
 
-#define WEB_SERVER "192.168.1.138"
-#define WEB_PORT 7001
-#define WEB_URL "/tor/status-vote/current/consensus"
-
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
 static const char* MINITOR_TAG = "MINITOR";
@@ -193,8 +189,7 @@ void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
 // fetch the network consensus so we can correctly create circuits
 int d_fetch_consensus_info() {
   const char* REQUEST = "GET /tor/status-vote/current/consensus HTTP/1.0\r\n"
-      /* "Host: 192.168.1.138\r\n" */
-      "Host: 192.168.1.16\r\n"
+      "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
       "User-Agent: esp-idf/1.0 esp3266\r\n"
       "\r\n";
   // we will have multiple threads trying to read the network consensus so we can't
@@ -313,8 +308,7 @@ int d_fetch_consensus_info() {
   struct sockaddr_in dest_addr;
 
   // set the address of the directory server
-  /* dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" ); */
-  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.16" );
+  dest_addr.sin_addr.s_addr = MINITOR_CHUTNEY_ADDRESS;
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons( 7000 );
 
@@ -2887,8 +2881,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 // fetch the descriptor info for the list of relays
 int d_fetch_descriptor_info( OnionCircuit* circuit ) {
   const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
-      /* "Host: 192.168.1.138\r\n" */
-      "Host: 192.168.1.16\r\n"
+      "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
       "User-Agent: esp-idf/1.0 esp3266\r\n"
       "\r\n";
   char REQUEST[126];
@@ -2912,8 +2905,7 @@ int d_fetch_descriptor_info( OnionCircuit* circuit ) {
   strcpy( REQUEST, REQUEST_CONST );
 
   // set the address of the directory server
-  /* dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.138" ); */
-  dest_addr.sin_addr.s_addr = inet_addr( "192.168.1.16" );
+  dest_addr.sin_addr.s_addr = MINITOR_CHUTNEY_ADDRESS;
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons( 7000 );
 
@@ -4754,7 +4746,7 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
 int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit ) {
   const char* REQUEST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
-    "Host: 192.168.1.16\r\n"
+    "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
     "User-Agent: esp-idf/1.0 esp3266\r\n"
     "Content-Type: text/plain\r\n"
     "Content-Length: "
