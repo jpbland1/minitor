@@ -1,3 +1,6 @@
+#ifndef MINITOR_STRUCTURES_ONION_MESSAGE_H
+#define MINITOR_STRUCTURES_ONION_MESSAGE_H
+
 typedef enum OnionMessageType {
   ONION_CELL,
   SERVICE_TCP_DATA,
@@ -12,3 +15,12 @@ typedef struct OnionMessage {
   OnionMessageType type;
   void* data;
 } OnionMessage;
+
+typedef struct ServiceTcpTraffic {
+  int circ_id;
+  int stream_id;
+  int length;
+  unsigned char* data;
+} ServiceTcpTraffic;
+
+#endif
