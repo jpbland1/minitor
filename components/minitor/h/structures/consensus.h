@@ -1,6 +1,7 @@
-#ifndef MINITOR_STRUCTURES_CONSENSUS
-#define MINITOR_STRUCTURES_CONSENSUS
+#ifndef MINITOR_STRUCTURES_CONSENSUS_H
+#define MINITOR_STRUCTURES_CONSENSUS_H
 
+#include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/aes.h"
 

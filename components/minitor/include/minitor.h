@@ -22,55 +22,17 @@
 #include "wolfssl/wolfcrypt/error-crypt.h"
 
 #include "./config.h"
-#include "./cell.h"
+#include "../h/cell.h"
+#include "../h/circuit.h"
 #include "../h/consensus.h"
-
-// typedef struct ed25519_key ed25519_key;
-
-#define SERVER_STR "Server"
-#define SERVER_STR_LENGTH 6
-
-#define PROTOID "ntor-curve25519-sha256-1"
-#define PROTOID_LENGTH 24
-#define PROTOID_MAC PROTOID ":mac"
-#define PROTOID_MAC_LENGTH PROTOID_LENGTH + 4
-#define PROTOID_KEY PROTOID ":key_extract"
-#define PROTOID_KEY_LENGTH PROTOID_LENGTH + 12
-#define PROTOID_VERIFY PROTOID ":verify"
-#define PROTOID_VERIFY_LENGTH PROTOID_LENGTH + 7
-#define PROTOID_EXPAND PROTOID ":key_expand"
-#define PROTOID_EXPAND_LENGTH PROTOID_LENGTH + 11
-
-#define HS_PROTOID "tor-hs-ntor-curve25519-sha3-256-1"
-#define HS_PROTOID_LENGTH 33
-#define HS_PROTOID_MAC HS_PROTOID ":hs_mac"
-#define HS_PROTOID_MAC_LENGTH HS_PROTOID_LENGTH + 7
-#define HS_PROTOID_KEY HS_PROTOID ":hs_key_extract"
-#define HS_PROTOID_KEY_LENGTH HS_PROTOID_LENGTH + 15
-#define HS_PROTOID_VERIFY HS_PROTOID ":hs_verify"
-#define HS_PROTOID_VERIFY_LENGTH HS_PROTOID_LENGTH + 10
-#define HS_PROTOID_EXPAND HS_PROTOID ":hs_key_expand"
-#define HS_PROTOID_EXPAND_LENGTH HS_PROTOID_LENGTH + 14
-
-#define SECRET_INPUT_LENGTH 32 * 5 + ID_LENGTH + PROTOID_LENGTH
-#define AUTH_INPUT_LENGTH 32 * 4 + ID_LENGTH + PROTOID_LENGTH + SERVER_STR_LENGTH
 
 #define HS_ED_BASEPOINT "(15112221349535400772501151409588531511454012693041857206046113283949847762202, 46316835694926478169428394003475163141307993866256225615783033603165251855960)"
 #define HS_ED_BASEPOINT_LENGTH 158
 #define HS_DESC_SIG_PREFIX "Tor onion service descriptor sig v3"
 #define HS_DESC_SIG_PREFIX_LENGTH 35
 
-typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
 typedef struct DoublyLinkedRendezvousCookie DoublyLinkedRendezvousCookie;
 typedef struct DoublyLinkedLocalStream DoublyLinkedLocalStream;
-
-typedef enum CircuitStatus {
-  CIRCUIT_BUILDING,
-  CIRCUIT_STANDBY,
-  CIRCUIT_INTRO_POINT,
-  CIRCUIT_PUBLISH,
-  CIRCUIT_RENDEZVOUS,
-} CircuitStatus;
 
 struct DoublyLinkedRendezvousCookie {
   unsigned char rendezvous_cookie[20];
@@ -83,41 +45,6 @@ typedef struct DoublyLinkedRendezvousCookieList {
   DoublyLinkedRendezvousCookie* head;
   DoublyLinkedRendezvousCookie* tail;
 } DoublyLinkedRendezvousCookieList;
-
-typedef struct IntroCrypto {
-  ed25519_key auth_key;
-  curve25519_key encrypt_key;
-} IntroCrypto;
-
-typedef struct HsCrypto {
-  Sha3 hs_running_sha_forward;
-  Sha3 hs_running_sha_backward;
-  Aes hs_aes_forward;
-  Aes hs_aes_backward;
-} HsCrypto;
-
-typedef struct OnionCircuit {
-  int circ_id;
-  CircuitStatus status;
-  WOLFSSL* ssl;
-  QueueHandle_t rx_queue;
-  TaskHandle_t task_handle;
-  DoublyLinkedOnionRelayList relay_list;
-  HsCrypto* hs_crypto;
-  IntroCrypto* intro_crypto;
-} OnionCircuit;
-
-struct DoublyLinkedOnionCircuit {
-  DoublyLinkedOnionCircuit* previous;
-  DoublyLinkedOnionCircuit* next;
-  OnionCircuit circuit;
-};
-
-typedef struct DoublyLinkedOnionCircuitList {
-  int length;
-  DoublyLinkedOnionCircuit* head;
-  DoublyLinkedOnionCircuit* tail;
-} DoublyLinkedOnionCircuitList;
 
 typedef struct HsDirIndexNode {
   unsigned char hash[WC_SHA3_256_DIGEST_SIZE];
@@ -154,21 +81,6 @@ typedef struct OnionService {
   DoublyLinkedLocalStreamList local_streams;
 } OnionService;
 
-typedef enum OnionMessageType {
-  ONION_CELL,
-  SERVICE_TCP_DATA,
-  SERVICE_COMMAND,
-} OnionMessageType;
-
-typedef enum ServiceCommand {
-  SERVICE_COMMAND_STOP,
-} ServiceCommand;
-
-typedef struct OnionMessage {
-  OnionMessageType type;
-  void* data;
-} OnionMessage;
-
 typedef struct ServiceTcpTraffic {
   int circ_id;
   int stream_id;
@@ -179,32 +91,8 @@ typedef struct ServiceTcpTraffic {
 int v_minitor_INIT();
 void v_circuit_keepalive( void* pv_parameters );
 void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list );
-void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );
 void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list );
-int d_setup_init_circuits( int circuit_count );
-int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length );
-int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
-int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
-int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude );
-int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, unsigned char* exclude );
-int d_build_onion_circuit( OnionCircuit* circuit );
-int d_destroy_onion_circuit( OnionCircuit* circuit );
-int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length );
-void v_handle_circuit( void* pv_parameters );
-int d_router_extend2( OnionCircuit* onion_circuit, int node_index );
-int d_router_create2( OnionCircuit* onion_circuit );
-int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
-int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key );
-int d_router_handshake( WOLFSSL* ssl );
-int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der );
-int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
-void v_destroy_onion_circuit( int circ_id );
-int d_fetch_descriptor_info( OnionCircuit* circuit );
-int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto );
-int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha, OnionCircuit* rend_circuit );
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, OnionCircuit* rend_circuit );
-unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size );
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );
 void v_handle_onion_service( void* pv_parameters );
 int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceTcpTraffic* tcp_traffic );

@@ -1,5 +1,5 @@
-#ifndef MINITOR_CONSENSUS
-#define MINITOR_CONSENSUS
+#ifndef MINITOR_CONSENSUS_H
+#define MINITOR_CONSENSUS_H
 
 #include "./structures/consensus.h"
 
