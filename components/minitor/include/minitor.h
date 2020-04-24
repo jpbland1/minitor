@@ -23,6 +23,7 @@
 
 #include "./config.h"
 #include "./cell.h"
+#include "../h/consensus.h"
 
 // typedef struct ed25519_key ed25519_key;
 
@@ -51,24 +52,15 @@
 #define HS_PROTOID_EXPAND HS_PROTOID ":hs_key_expand"
 #define HS_PROTOID_EXPAND_LENGTH HS_PROTOID_LENGTH + 14
 
-#define H_LENGTH 32
-#define ID_LENGTH 20
-#define G_LENGTH 32
-#define DIGEST_LEN 20
 #define SECRET_INPUT_LENGTH 32 * 5 + ID_LENGTH + PROTOID_LENGTH
 #define AUTH_INPUT_LENGTH 32 * 4 + ID_LENGTH + PROTOID_LENGTH + SERVER_STR_LENGTH
 
 #define HS_ED_BASEPOINT "(15112221349535400772501151409588531511454012693041857206046113283949847762202, 46316835694926478169428394003475163141307993866256225615783033603165251855960)"
 #define HS_ED_BASEPOINT_LENGTH 158
-#define HSDIR_INTERVAL_DEFAULT 1440
-#define HSDIR_N_REPLICAS_DEFAULT 2
-#define HSDIR_SPREAD_STORE_DEFAULT 4
 #define HS_DESC_SIG_PREFIX "Tor onion service descriptor sig v3"
 #define HS_DESC_SIG_PREFIX_LENGTH 35
 
-typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
-typedef struct DoublyLinkedHsDirRelay DoublyLinkedHsDirRelay;
 typedef struct DoublyLinkedRendezvousCookie DoublyLinkedRendezvousCookie;
 typedef struct DoublyLinkedLocalStream DoublyLinkedLocalStream;
 
@@ -79,50 +71,6 @@ typedef enum CircuitStatus {
   CIRCUIT_PUBLISH,
   CIRCUIT_RENDEZVOUS,
 } CircuitStatus;
-
-typedef struct NetworkConsensus {
-  unsigned int method;
-  long int valid_after;
-  unsigned int fresh_until;
-  unsigned int valid_until;
-  unsigned char previous_shared_rand[32];
-  unsigned char shared_rand[32];
-  unsigned int hsdir_interval;
-  unsigned int hsdir_n_replicas;
-  unsigned int hsdir_spread_store;
-} NetworkConsensus;
-
-typedef struct OnionRelay {
-  unsigned char identity[ID_LENGTH];
-  unsigned char digest[ID_LENGTH];
-  unsigned char ntor_onion_key[H_LENGTH];
-  unsigned int address;
-  short or_port;
-  short dir_port;
-  unsigned char hsdir;
-} OnionRelay;
-
-typedef struct RelayCrypto {
-  Sha running_sha_forward;
-  Sha running_sha_backward;
-  Aes aes_forward;
-  Aes aes_backward;
-  unsigned char nonce[DIGEST_LEN];
-} RelayCrypto;
-
-struct DoublyLinkedOnionRelay {
-  DoublyLinkedOnionRelay* previous;
-  DoublyLinkedOnionRelay* next;
-  OnionRelay* relay;
-  RelayCrypto* relay_crypto;
-};
-
-typedef struct DoublyLinkedOnionRelayList {
-  int length;
-  int built_length;
-  DoublyLinkedOnionRelay* head;
-  DoublyLinkedOnionRelay* tail;
-} DoublyLinkedOnionRelayList;
 
 struct DoublyLinkedRendezvousCookie {
   unsigned char rendezvous_cookie[20];
@@ -231,12 +179,6 @@ typedef struct ServiceTcpTraffic {
 int v_minitor_INIT();
 void v_circuit_keepalive( void* pv_parameters );
 void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list );
-int d_fetch_consensus_info();
-int d_parse_date_byte( char byte, int* year, int* year_found, int* month, int* month_found, int* day, int* day_found, int* hour, int* hour_found, int* minute, int* minute_found, int* second, int* second_found, struct tm* temp_time );
-void v_base_64_decode( unsigned char* destination, char* source, int source_length );
-void v_base_64_encode( char* destination, unsigned char* source, int source_length );
-void v_base_32_encode( char* destination, unsigned char* source, int source_length );
-void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );
 void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list );
