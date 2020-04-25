@@ -1,29 +1,43 @@
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <sys/unistd.h>
-#include <sys/stat.h>
-#include <sys/fcntl.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "esp_system.h"
-#include "esp_event.h"
-#include "esp_log.h"
-
-#include "lwip/err.h"
-#include "lwip/sockets.h"
-#include "lwip/sys.h"
-#include "lwip/netdb.h"
-
-#include "minitor.h"
-#include "../h/encoding.h"
-#include "../h/structures/onion_message.h"
+#include "../include/minitor.h"
+#include "../h/consensus.h"
+#include "../h/circuit.h"
 #include "../h/onion_service.h"
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
+
+static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
+  int i;
+  Cell padding_cell;
+  DoublyLinkedOnionCircuit* node;
+  unsigned char* packed_cell;
+
+  padding_cell.command = PADDING;
+  padding_cell.payload = NULL;
+  node = list->head;
+
+  for ( i = 0; i < list->length; i++ ) {
+    padding_cell.circ_id = node->circuit.circ_id;
+    packed_cell = pack_and_free( &padding_cell );
+
+    if ( wolfSSL_send( node->circuit.ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit.circ_id );
+#endif
+    }
+
+    free( packed_cell );
+    node = node->next;
+  }
+}
+
+static void v_circuit_keepalive( void* pv_parameters ) {
+  while ( 1 ) {
+    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+    v_keep_circuitlist_alive( &standby_circuits );
+    xSemaphoreGive( standby_circuits_mutex );
+    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
+  }
+}
 
 // intialize tor
 int v_minitor_INIT() {
@@ -61,40 +75,6 @@ int v_minitor_INIT() {
   );
 
   return 1;
-}
-
-void v_circuit_keepalive( void* pv_parameters ) {
-  while ( 1 ) {
-    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-    v_keep_circuitlist_alive( &standby_circuits );
-    xSemaphoreGive( standby_circuits_mutex );
-    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
-  }
-}
-
-void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
-  int i;
-  Cell padding_cell;
-  DoublyLinkedOnionCircuit* node;
-  unsigned char* packed_cell;
-
-  padding_cell.command = PADDING;
-  padding_cell.payload = NULL;
-  node = list->head;
-
-  for ( i = 0; i < list->length; i++ ) {
-    padding_cell.circ_id = node->circuit.circ_id;
-    packed_cell = pack_and_free( &padding_cell );
-
-    if ( wolfSSL_send( node->circuit.ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit.circ_id );
-#endif
-    }
-
-    free( packed_cell );
-    node = node->next;
-  }
 }
 
 // ONION SERVICES
