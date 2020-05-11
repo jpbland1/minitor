@@ -1,4 +1,11 @@
+#include <stddef.h>
+#include <stdlib.h>
+
+#include "esp_log.h"
+
+#include "../include/config.h"
 #include "../include/minitor.h"
+#include "../h/models/db.h"
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
@@ -50,6 +57,14 @@ int v_minitor_INIT() {
 
   wolfSSL_Init();
   wolfSSL_Debugging_ON();
+
+  if ( d_initialize_database() < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't setup minitor sqlite3 database" );
+#endif
+
+    return -1;
+  }
 
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL ) {
 #ifdef DEBUG_MINITOR
@@ -341,7 +356,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     ESP_LOGE( MINITOR_TAG, "Sending descriptor length: %d", reusable_text_length );
 
     // send outer descriptor wrapper to the correct HSDIR nodes
-    if ( d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, previous_shared_rand, hsdir_spread_store ) ) {
+    if ( d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, previous_shared_rand, hsdir_spread_store, i ) ) {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to send descriptor to hsdir hosts" );
 #endif

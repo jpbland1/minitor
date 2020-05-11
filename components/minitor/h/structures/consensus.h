@@ -29,6 +29,9 @@ typedef struct OnionRelay {
   short or_port;
   short dir_port;
   unsigned char hsdir;
+  unsigned char suitable;
+  unsigned char previous_hash[H_LENGTH];
+  unsigned char current_hash[H_LENGTH];
 } OnionRelay;
 
 typedef struct RelayCrypto {

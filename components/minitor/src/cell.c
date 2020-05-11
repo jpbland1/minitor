@@ -235,7 +235,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
       if ( wolf_succ < 0 ) {
 #ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_backward, error code: %d", wolf_succ );
+        ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
 #endif
 
         return -1;

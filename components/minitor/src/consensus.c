@@ -1,12 +1,17 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "esp_log.h"
 #include "lwip/sockets.h"
+
+#include "user_settings.h"
+#include "wolfssl/wolfcrypt/sha3.h"
 
 #include "../include/config.h"
 #include "../h/constants.h"
 #include "../h/consensus.h"
 #include "../h/encoding.h"
+#include "../h/models/relay.h"
 
 // parse the date using a single byte, relies on other variables to determine how far
 // in the date we are
@@ -91,7 +96,12 @@ int d_fetch_consensus_info() {
     .valid_after = 0,
     .fresh_until = 0,
     .valid_until = 0,
+    .hsdir_interval = HSDIR_INTERVAL_DEFAULT,
+    .hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT,
+    .hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT,
   };
+  int time_period = 0;
+  unsigned char tmp_64_buffer[8];
 
   // in order to find the strings we need, we just compare each byte to the string
   // and every time we get a match we increment how many we've found. If we don't
@@ -143,19 +153,14 @@ int d_fetch_consensus_info() {
   // variable for string a canidate relay. because we parse one byte at
   // a time we need to store data on a relay before we know if its actuall
   // suitable
-  DoublyLinkedOnionRelay* canidate_relay = NULL;
-  // since many threads may be accessing the suitable relay list we need
-  // to use a temp variable to keep our critical section short
-  DoublyLinkedOnionRelayList result_suitable_relays = {
-    .head = NULL,
-    .tail = NULL,
-    .length = 0,
+  OnionRelay canidate_relay = {
+    .address = 0,
+    .or_port = 0,
+    .dir_port = 0,
+    .hsdir = 0,
+    .suitable = 0,
   };
-  DoublyLinkedOnionRelayList result_hsdir_relays = {
-    .head = NULL,
-    .tail = NULL,
-    .length = 0,
-  };
+  Sha3 reusable_sha3;
   // string matching variables for relays and tags
   const char* relay = "\nr ";
   int relay_found = 0;
@@ -165,7 +170,7 @@ int d_fetch_consensus_info() {
   int pr_tag_found = 0;
   // counts the current element of the relay we're on since they are in
   // a set order
-  int relay_element_num = -1;
+  int relay_element_num = 0;
   // holds the base64 encoded value of the relay's identity
   char identity[27] = {0};
   int identity_length = 0;
@@ -197,6 +202,16 @@ int d_fetch_consensus_info() {
   char rx_buffer[512];
   struct sockaddr_in dest_addr;
 
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  if ( d_destroy_all_relays() < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to clear old relays out of the database" );
+#endif
+
+    return -1;
+  }
+
   // set the address of the directory server
   dest_addr.sin_addr.s_addr = MINITOR_CHUTNEY_ADDRESS;
   dest_addr.sin_family = AF_INET;
@@ -207,7 +222,7 @@ int d_fetch_consensus_info() {
 
   if ( sock_fd < 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server\n" );
+    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
 #endif
 
     return -1;
@@ -306,6 +321,8 @@ int d_fetch_consensus_info() {
             // fill the result network consensus with the epoch
             if ( d_parse_date_byte( rx_buffer[i], &year, &year_found, &month, &month_found, &day, &day_found, &hour, &hour_found, &minute, &minute_found, &second, &second_found, &temp_time ) == 1 ) {
               result_network_consensus.valid_after = mktime( &temp_time );
+
+              time_period = ( result_network_consensus.valid_after / 60 - 12 * 60 ) / result_network_consensus.hsdir_interval;
             }
           // otherwise if we match a a caracter, increment found
           } else if ( result_network_consensus.valid_after == 0 && rx_buffer[i] == valid_after[valid_after_found] ) {
@@ -389,27 +406,13 @@ int d_fetch_consensus_info() {
 
         // if we've found a relay tag
         if ( relay_found == strlen( relay ) ) {
-          // if we don't already have a canidate relay the we just hit the tag
-          // create the relay node and set the necessary variables
-          if ( canidate_relay == NULL ) {
-            canidate_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-            canidate_relay->next = NULL;
-            canidate_relay->previous = NULL;
-            canidate_relay->relay = malloc( sizeof( OnionRelay ) );
-            canidate_relay->relay->address = 0;
-            canidate_relay->relay->or_port = 0;
-            canidate_relay->relay->dir_port = 0;
-            // reset relay element num from -1 to 0
-            relay_element_num = 0;
-          }
-
           // if we haven't finished parsing all the relay elements
           if ( relay_element_num != -1 ) {
             // if we hit a space
             if ( rx_buffer[i] == ' ' ) {
               // if we're on element 5 we need to update the address
               if ( relay_element_num == 5 ) {
-                canidate_relay->relay->address |= ( (int)address_byte ) << address_offset;
+                canidate_relay.address |= ( (int)address_byte ) << address_offset;
                 // reset the address byte and offset for next relay
                 address_byte = 0;
                 address_offset = 0;
@@ -438,7 +441,7 @@ int d_fetch_consensus_info() {
 
                   // if we hit 27 decode the base64 string into the char array for the relay
                   if ( identity_length == 27 ) {
-                    v_base_64_decode( canidate_relay->relay->identity, identity, identity_length );;
+                    v_base_64_decode( canidate_relay.identity, identity, identity_length );;
                   }
 
                   break;
@@ -449,7 +452,7 @@ int d_fetch_consensus_info() {
                   digest_length++;
 
                   if ( digest_length == 27 ) {
-                    v_base_64_decode( canidate_relay->relay->digest, digest, digest_length );;
+                    v_base_64_decode( canidate_relay.digest, digest, digest_length );;
                   }
 
                   break;
@@ -458,7 +461,7 @@ int d_fetch_consensus_info() {
                   // if we hit a period we ned to store that byte of the address
                   if ( rx_buffer[i] == '.' ) {
                     // add the address to the byte at the correct offset
-                    canidate_relay->relay->address |= ( (int)address_byte ) << address_offset;
+                    canidate_relay.address |= ( (int)address_byte ) << address_offset;
                     // move the offset and reset the byte
                     address_offset += 8;
                     address_byte = 0;
@@ -472,15 +475,15 @@ int d_fetch_consensus_info() {
                 // onion port
                 case 6:
                   // add the character to the short
-                  canidate_relay->relay->or_port *= 10;
-                  canidate_relay->relay->or_port += rx_buffer[i] - 48;
+                  canidate_relay.or_port *= 10;
+                  canidate_relay.or_port += rx_buffer[i] - 48;
 
                   break;
                 // dir port
                 case 7:
                   // add the character to the short
-                  canidate_relay->relay->dir_port *= 10;
-                  canidate_relay->relay->dir_port += rx_buffer[i] - 48;
+                  canidate_relay.dir_port *= 10;
+                  canidate_relay.dir_port += rx_buffer[i] - 48;
 
                   break;
                 // for all other elements we don't need to parse them
@@ -552,23 +555,83 @@ int d_fetch_consensus_info() {
             if ( pr_tag_found == strlen( pr_tag ) ) {
               if ( rx_buffer[i] == '\n' ) {
                 if ( hsdir_found == strlen( hsdir ) ) {
-                  canidate_relay->relay->hsdir = 1;
-                  v_add_relay_to_list( canidate_relay, &result_hsdir_relays );
+                  canidate_relay.hsdir = 1;
+
+                  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
+                  wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
+                  wc_Sha3_256_Update( &reusable_sha3, result_network_consensus.previous_shared_rand, 32 );
+
+                  tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 56 );
+                  tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 48 );
+                  tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 40 );
+                  tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 32 );
+                  tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 24 );
+                  tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 16 );
+                  tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 8 );
+                  tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period - 1 ) );
+
+                  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+                  tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 56 );
+                  tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 48 );
+                  tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 40 );
+                  tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 32 );
+                  tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 24 );
+                  tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 16 );
+                  tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 8 );
+                  tmp_64_buffer[7] = (unsigned char)( (int64_t)( result_network_consensus.hsdir_interval ) );
+
+                  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+                  wc_Sha3_256_Final( &reusable_sha3, canidate_relay.previous_hash );
+
+                  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
+                  wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
+                  wc_Sha3_256_Update( &reusable_sha3, result_network_consensus.shared_rand, 32 );
+
+                  tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period ) ) >> 56 );
+                  tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period ) ) >> 48 );
+                  tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period ) ) >> 40 );
+                  tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period ) ) >> 32 );
+                  tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period ) ) >> 24 );
+                  tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period ) ) >> 16 );
+                  tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period ) ) >> 8 );
+                  tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period ) );
+
+                  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+                  tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 56 );
+                  tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 48 );
+                  tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 40 );
+                  tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 32 );
+                  tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 24 );
+                  tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 16 );
+                  tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( result_network_consensus.hsdir_interval ) ) >> 8 );
+                  tmp_64_buffer[7] = (unsigned char)( (int64_t)( result_network_consensus.hsdir_interval ) );
+
+                  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+                  wc_Sha3_256_Final( &reusable_sha3, canidate_relay.current_hash );
                 }
 
                 // if the relay is fast, running, stable and valid then we want to use it
                 if ( fast_found == strlen( fast ) && running_found == strlen( running ) && stable_found == strlen( stable ) && valid_found == strlen( valid ) ) {
-                  ESP_LOGE( MINITOR_TAG, "found one" );
-                  v_add_relay_to_list( canidate_relay, &result_suitable_relays );
+                  canidate_relay.suitable = 1;
                 // otherwise its not suiteable and wee need to free the canidate
-                } else {
-                  free( canidate_relay->relay );
-                  free( canidate_relay );
+                }
+
+                if ( canidate_relay.hsdir || canidate_relay.suitable ) {
+                  if ( d_create_relay( &canidate_relay ) < 0 ) {
+#ifdef DEBUG_MINITOR
+                    ESP_LOGE( MINITOR_TAG, "Failed to create canidate relay in the database" );
+#endif
+
+                    return -1;
+                  }
                 }
 
                 // clean up the associated string matching variables and
                 // reset the canidate relay to null
-                canidate_relay = NULL;
                 relay_found = 0;
                 identity_length = 0;
                 digest_length = 0;
@@ -579,6 +642,13 @@ int d_fetch_consensus_info() {
                 valid_found = 0;
                 pr_tag_found = 0;
                 hsdir_found = 0;
+                relay_element_num = 0;
+
+                canidate_relay.address = 0;
+                canidate_relay.or_port = 0;
+                canidate_relay.dir_port = 0;
+                canidate_relay.hsdir = 0;
+                canidate_relay.suitable = 0;
               } else {
                 if ( hsdir_found < strlen( hsdir ) ) {
                   if ( hsdir[hsdir_found] == rx_buffer[i] ) {
@@ -605,6 +675,8 @@ int d_fetch_consensus_info() {
     }
   }
 
+  wc_Sha3_256_Free( &reusable_sha3 );
+
 #ifdef DEBUG_MINITOR
   ESP_LOGE( MINITOR_TAG, "finished recving" );
 #endif
@@ -626,75 +698,6 @@ int d_fetch_consensus_info() {
 #ifdef DEBUG_MINITOR
   ESP_LOGE( MINITOR_TAG, "finished setting consensus" );
 #endif
-
-  // BEGIN mutex for suitable relays
-  xSemaphoreTake( suitable_relays_mutex, portMAX_DELAY );
-
-  suitable_relays.length = result_suitable_relays.length;
-  suitable_relays.head = result_suitable_relays.head;
-  suitable_relays.tail = result_suitable_relays.tail;
-
-#ifdef DEBUG_MINITOR
-  // print all the info we got from the directory server
-  DoublyLinkedOnionRelay* node;
-  /* ESP_LOGE( MINITOR_TAG, "Consensus method: %d", network_consensus.method ); */
-  /* ESP_LOGE( MINITOR_TAG, "Consensus valid after: %u", network_consensus.valid_after ); */
-  /* ESP_LOGE( MINITOR_TAG, "Consensus fresh until: %u", network_consensus.fresh_until ); */
-  /* ESP_LOGE( MINITOR_TAG, "Consensus valid until: %u", network_consensus.valid_until ); */
-
-  /* ESP_LOGE( MINITOR_TAG, "Previous shared random value:" ); */
-
-  /* for ( i = 0; i < 32; i++ ) { */
-    /* ESP_LOGE( MINITOR_TAG, "%x", network_consensus.previous_shared_rand[i] ); */
-  /* } */
-
-  /* ESP_LOGE( MINITOR_TAG, "Shared random value:" ); */
-
-  /* for ( i = 0; i < 32; i++ ) { */
-    /* ESP_LOGE( MINITOR_TAG, "%x", network_consensus.shared_rand[i] ); */
-  /* } */
-
-  ESP_LOGE( MINITOR_TAG, "Found %d suitable relays:", suitable_relays.length );
-  node = suitable_relays.head;
-
-  for ( i = 0; i < suitable_relays.length; i++ ) {
-    /* ESP_LOGE( MINITOR_TAG, "address: %x, or_port: %d, dir_port: %d", node->relay->address, node->relay->or_port, node->relay->dir_port ); */
-#ifdef MINITOR_CHUTNEY
-    // override the address if we're using chutney
-    node->relay->address = MINITOR_CHUTNEY_ADDRESS;
-#endif
-    /* ESP_LOGE( MINITOR_TAG, "identity:" ); */
-
-    /* for ( i = 0; i < ID_LENGTH; i++ ) { */
-      /* ESP_LOGE( MINITOR_TAG, "%x", node->relay->identity[i] ); */
-    /* } */
-
-    /* ESP_LOGE( MINITOR_TAG, "digest:" ); */
-
-    /* for ( i = 0; i < ID_LENGTH; i++ ) { */
-      /* ESP_LOGE( MINITOR_TAG, "%x", node->relay->digest[i] ); */
-    /* } */
-
-    node = node->next;
-  }
-#endif
-
-  xSemaphoreGive( suitable_relays_mutex );
-  // END mutex for suitable relays
-
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "finished spoofing addresses" );
-#endif
-
-  // BEGIN mutex for the network consensus
-  xSemaphoreTake( hsdir_relays_mutex, portMAX_DELAY );
-
-  hsdir_relays.length = result_hsdir_relays.length;
-  hsdir_relays.head = result_hsdir_relays.head;
-  hsdir_relays.tail = result_hsdir_relays.tail;
-
-  xSemaphoreGive( hsdir_relays_mutex );
-  // END mutex for the network consensus
 
   // we're done reading data from the directory server, shutdown and close the socket
   shutdown( sock_fd, 0 );
