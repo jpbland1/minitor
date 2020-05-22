@@ -19,6 +19,7 @@
 #include "wifi_connect.h"
 #include "minitor.h"
 
+#include "test/circuit.h"
 
 #include <esp_event.h>
 #include "esp_netif.h"
@@ -226,10 +227,30 @@ void app_main()
     /* return -1; */
   /* } */
 
-  ESP_LOGE(TAG, "before INIT");
   v_minitor_INIT();
-  ESP_LOGE(TAG, "after INIT");
 
   OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
-  ESP_LOGE(TAG, "after service");
+
+  /* int free_before; */
+  /* int free_after; */
+
+  /* free_before = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
+
+  /* d_test_circuit_memory_leak( 30 ); */
+
+  /* free_after = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
+
+  /* ESP_LOGE( TAG, "start mem: %d", free_before ); */
+  /* ESP_LOGE( TAG, "end mem: %d", free_after ); */
+  /* ESP_LOGE( TAG, "total diff mem: %d", free_before - free_after ); */
+
+  /* free_before = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
+
+  /* d_test_circuit_memory_leak_truncate( 30 ); */
+
+  /* free_after = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
+
+  /* ESP_LOGE( TAG, "start mem: %d", free_before ); */
+  /* ESP_LOGE( TAG, "end mem: %d", free_after ); */
+  /* ESP_LOGE( TAG, "total diff mem: %d", free_before - free_after ); */
 }

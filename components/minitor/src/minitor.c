@@ -6,6 +6,7 @@
 #include "../include/config.h"
 #include "../include/minitor.h"
 #include "../h/models/db.h"
+#include "../h/models/revision_counter.h"
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
@@ -56,7 +57,7 @@ int v_minitor_INIT() {
   standby_circuits_mutex = xSemaphoreCreateMutex();
 
   wolfSSL_Init();
-  wolfSSL_Debugging_ON();
+  /* wolfSSL_Debugging_ON(); */
 
   if ( d_initialize_database() < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -114,6 +115,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   unsigned char blinded_pub_key[ED25519_PUB_KEY_SIZE];
+  int revision_counter;
   OnionService* onion_service = malloc( sizeof( OnionService ) );
 
   wc_InitRng( &rng );
@@ -229,6 +231,16 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
 
   time_period = ( valid_after / 60 - 12 * 60 ) / hsdir_interval;
 
+  revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
+
+  if ( revision_counter < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to roll the revision_counter" );
+#endif
+
+    return NULL;
+  }
+
   /* for ( i = 0; i < 2; i++ ) { */
   for ( i = 0; i < 1; i++ ) {
     if ( d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period, hsdir_interval, NULL, 0 ) < 0 ) {
@@ -294,7 +306,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
         ED25519_PUB_KEY_SIZE,
         "hsdir-encrypted-data",
         strlen( "hsdir-encrypted-data" ),
-        reusable_sha3_sum, 0 )
+        reusable_sha3_sum, revision_counter )
       ) < 0 ) {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
@@ -329,7 +341,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
         ED25519_PUB_KEY_SIZE,
         "hsdir-superencrypted-data",
         strlen( "hsdir-superencrypted-data" ),
-        reusable_sha3_sum, 0 )
+        reusable_sha3_sum, revision_counter )
       ) < 0 ) {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
@@ -343,7 +355,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     ESP_LOGE( MINITOR_TAG, "Generating outer plaintext, length %d", reusable_text_length );
 
     // create outer descriptor wrapper
-    if ( ( reusable_text_length = d_generate_outer_descriptor( &reusable_plaintext, reusable_ciphertext, reusable_text_length, &descriptor_signing_key, valid_after, &blinded_key, 0 ) ) < 0 ) {
+    if ( ( reusable_text_length = d_generate_outer_descriptor( &reusable_plaintext, reusable_ciphertext, reusable_text_length, &descriptor_signing_key, valid_after, &blinded_key, revision_counter ) ) < 0 ) {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
 #endif

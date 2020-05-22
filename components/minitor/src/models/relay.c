@@ -91,8 +91,24 @@ int d_create_relay_table() {
   "suitable INT1 DEFAULT 0,"
   "guard INT1 DEFAULT 0,"
   "previous_hash CHAR(32) NOT NULL,"
-  "current_hash CHAR(32) NOT NULL"
+  "current_hash CHAR(32) NOT NULL,"
+  "can_guard INT1 NOT NULL,"
+  "can_exit INT1 NOT NULL"
 ");",
+    NULL, NULL, &err );
+
+  if ( ret != SQLITE_OK ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to create OnionRelay Table, err msg: %s", err );
+#endif
+
+    sqlite3_free( err );
+
+    return -1;
+  }
+
+  ret = sqlite3_exec( minitor_db,
+"UPDATE main.OnionRelays SET guard = 0;",
     NULL, NULL, &err );
 
   if ( ret != SQLITE_OK ) {
@@ -112,14 +128,14 @@ int d_create_relay( OnionRelay* onion_relay ) {
   int ret;
   sqlite3_stmt* statement;
 
-  if ( d_open_database() < 0 ) {
-    return -1;
-  }
+  /* if ( d_open_database() < 0 ) { */
+    /* return -1; */
+  /* } */
 
   ret = sqlite3_prepare_v2( minitor_db,
 "INSERT INTO main.OnionRelays"
-  " ( identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash )"
-  " VALUES ( ?1, ?2, ?3, ?4, ?5, ?6 , ?7, ?8, ?9, ?10 );",
+  " ( identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash, can_guard, can_exit )"
+  " VALUES ( ?1, ?2, ?3, ?4, ?5, ?6 , ?7, ?8, ?9, ?10, ?11, ?12 );",
     -1, &statement, NULL );
 
   if ( ret != SQLITE_OK ) {
@@ -127,7 +143,7 @@ int d_create_relay( OnionRelay* onion_relay ) {
     ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay create statement, err code: %d", ret );
 #endif
 
-    return -1;
+    goto cleanup;
   }
 
   sqlite3_bind_text( statement, 1, (const char*)onion_relay->identity, ID_LENGTH, SQLITE_STATIC );
@@ -140,32 +156,42 @@ int d_create_relay( OnionRelay* onion_relay ) {
   sqlite3_bind_int( statement, 8, onion_relay->suitable );
   sqlite3_bind_text( statement, 9, (const char*)onion_relay->previous_hash, H_LENGTH, SQLITE_STATIC );
   sqlite3_bind_text( statement, 10, (const char*)onion_relay->current_hash, H_LENGTH, SQLITE_STATIC );
+  sqlite3_bind_int( statement, 11, onion_relay->can_guard );
+  sqlite3_bind_int( statement, 12, onion_relay->can_exit );
 
   if ( ( ret = sqlite3_step( statement ) ) != SQLITE_DONE ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to insert OnionRelay, err code: %d", ret );
 #endif
 
-    return -1;
+    sqlite3_finalize( statement );
+
+    goto cleanup;
   }
 
   sqlite3_finalize( statement );
 
-  if ( d_close_database() < 0 ) {
-    return -1;
-  }
+  /* if ( d_close_database() < 0 ) { */
+    /* return -1; */
+  /* } */
 
   return 0;
+
+cleanup:
+  /* d_close_database(); */
+  return -1;
 }
 
 OnionRelay* px_get_relay( unsigned char* identity ) {
   int ret;
   sqlite3_stmt* statement;
-  OnionRelay* onion_relay = malloc( sizeof( OnionRelay ) );
+  OnionRelay* onion_relay;
 
   if ( d_open_database() < 0 ) {
-    goto db_fail;
+    return NULL;
   }
+
+  onion_relay = malloc( sizeof( OnionRelay ) );
 
   ret = sqlite3_prepare_v2( minitor_db, "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE identity = ?1", -1, &statement, NULL );
 
@@ -198,9 +224,7 @@ OnionRelay* px_get_relay( unsigned char* identity ) {
   return onion_relay;
 
 cleanup:
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+  d_close_database();
 db_fail:
   free( onion_relay );
   return NULL;
@@ -218,15 +242,15 @@ OnionRelay* px_get_random_relay( DoublyLinkedOnionRelayList* relay_list, unsigne
   OnionRelay* onion_relay;
   DoublyLinkedOnionRelay* db_onion_relay;
 
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
-
   if ( relay_list->length < 1 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Relay list must have at least one element" );
 #endif
 
+    return NULL;
+  }
+
+  if ( d_open_database() < 0 ) {
     return NULL;
   }
 
@@ -327,9 +351,7 @@ OnionRelay* px_get_random_relay( DoublyLinkedOnionRelayList* relay_list, unsigne
   return onion_relay;
 
 cleanup:
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+  d_close_database();
 db_fail:
   free( not_in_query );
   free( full_query );
@@ -341,16 +363,18 @@ OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude ) {
   int rand_index;
   int ret;
   sqlite3_stmt* statement;
-  OnionRelay* onion_relay = malloc( sizeof( OnionRelay ) );
+  OnionRelay* onion_relay;
 
   if ( d_open_database() < 0 ) {
-    goto db_fail;
+    return NULL;
   }
 
+  onion_relay = malloc( sizeof( OnionRelay ) );
+
   if ( exclude != NULL ) {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND suitable = 1 AND identity != ?1;", -1, &statement, NULL );
+    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND can_guard = 1 AND suitable = 1 AND identity != ?1;", -1, &statement, NULL );
   } else {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND suitable = 1;", -1, &statement, NULL );
+    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND can_guard = 1 AND suitable = 1;", -1, &statement, NULL );
   }
 
   if ( ret != SQLITE_OK ) {
@@ -369,6 +393,8 @@ OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay count non guard relays, err code: %d", ret );
 #endif
+
+    sqlite3_finalize( statement );
 
     goto cleanup;
   }
@@ -403,6 +429,8 @@ OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude ) {
     ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay non guard relays, err code: %d", ret );
 #endif
 
+    sqlite3_finalize( statement );
+
     goto cleanup;
   }
 
@@ -417,9 +445,7 @@ OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude ) {
   return onion_relay;
 
 cleanup:
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+  d_close_database();
 db_fail:
   free( onion_relay );
   return NULL;
@@ -456,24 +482,27 @@ int d_get_hsdir_count() {
   sqlite3_finalize( statement );
 
   if ( d_close_database() < 0 ) {
-    return -1;
+    goto db_fail;
   }
 
   return ret;
 
 cleanup:
   d_close_database();
+db_fail:
   return -1;
 }
 
 unsigned char* puc_get_hash_by_index( int index, int previous ) {
   int ret;
-  unsigned char* hash = malloc( sizeof( unsigned char ) * H_LENGTH );
+  unsigned char* hash;
   sqlite3_stmt* statement;
 
   if ( d_open_database() < 0 ) {
-    goto db_fail;
+    return NULL;
   }
+
+  hash = malloc( sizeof( unsigned char ) * H_LENGTH );
 
   if ( previous ) {
     ret = sqlite3_prepare_v2( minitor_db, "SELECT previous_hash FROM main.OnionRelays WHERE hsdir = 1 ORDER BY previous_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
@@ -494,7 +523,6 @@ unsigned char* puc_get_hash_by_index( int index, int previous ) {
   if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to query OnionRelay get hash by index, err code: %d", ret );
-    ESP_LOGE( MINITOR_TAG, "heap_caps_check_integrity_all: %d", heap_caps_check_integrity_all( 1 ) );
 #endif
 
     goto cleanup;
@@ -511,24 +539,23 @@ unsigned char* puc_get_hash_by_index( int index, int previous ) {
   return hash;
 
 cleanup:
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+  d_close_database();
 db_fail:
+  sqlite3_finalize( statement );
   free( hash );
   return NULL;
 }
 
 OnionRelay* px_get_relay_by_hash_index( int index, int previous ) {
   int ret;
-  OnionRelay* onion_relay = malloc( sizeof( OnionRelay ) );
+  OnionRelay* onion_relay;
   sqlite3_stmt* statement;
 
   if ( d_open_database() < 0 ) {
-    goto db_fail;
+    return NULL;
   }
+
+  onion_relay = malloc( sizeof( OnionRelay ) );
 
   if ( previous ) {
     ret = sqlite3_prepare_v2( minitor_db, "SELECT identity FROM main.OnionRelays WHERE hsdir = 1 ORDER BY previous_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
@@ -565,9 +592,7 @@ OnionRelay* px_get_relay_by_hash_index( int index, int previous ) {
   return onion_relay;
 
 cleanup:
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+  d_close_database();
 db_fail:
   free( onion_relay );
   return NULL;
@@ -586,11 +611,13 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( unsigned char* hash, i
   char* not_in_optional;
   char* not_in_query;
   DoublyLinkedOnionRelay* db_onion_relay;
-  DoublyLinkedOnionRelayList* relay_list = malloc( sizeof( DoublyLinkedOnionRelayList ) );
+  DoublyLinkedOnionRelayList* relay_list;
 
   if ( d_open_database() < 0 ) {
-    goto db_fail;
+    return NULL;
   }
+
+  relay_list = malloc( sizeof( DoublyLinkedOnionRelayList ) );
 
   relay_list->length = 0;
   relay_list->head = NULL;
@@ -731,23 +758,21 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( unsigned char* hash, i
     goto cleanup;
   }
 
-  free( full_query );
-  free( not_in_optional );
-
   if ( d_close_database() < 0 ) {
     goto db_fail;
   }
+
+  free( full_query );
+  free( not_in_optional );
 
   return relay_list;
 
 cleanup:
+  d_close_database();
+db_fail:
   free( full_query );
   free( not_in_optional );
 
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-db_fail:
   db_onion_relay = relay_list->head;
 
   for ( i = 0; i < relay_list->length; i++ ) {
@@ -835,7 +860,7 @@ int d_destroy_all_relays() {
 
   if ( ret != SQLITE_OK ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create OnionRelay Table, err msg: %s", err );
+    ESP_LOGE( MINITOR_TAG, "Failed to delete OnionRelays, err msg: %s", err );
 #endif
 
     sqlite3_free( err );

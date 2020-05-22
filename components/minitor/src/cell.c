@@ -9,6 +9,7 @@
 #include "../h/cell.h"
 
 int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto ) {
+  int ret = 0;
   int i;
   int wolf_succ;
   unsigned char tmp_digest[WC_SHA3_256_DIGEST_SIZE];
@@ -37,7 +38,8 @@ int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell,
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY payload, error code: %d", wolf_succ );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     db_relay = db_relay->previous;
@@ -51,7 +53,8 @@ int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell,
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY payload using hs crypto, error code: %d", wolf_succ );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
   }
 
@@ -61,12 +64,14 @@ int d_send_packed_relay_cell_and_free( WOLFSSL* ssl, unsigned char* packed_cell,
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY cell" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
+finish:
   free( packed_cell );
 
-  return 0;
+  return ret;
 }
 
 // recv a cell from our ssl connection
@@ -139,10 +144,12 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
     // put the contents of the rx_buffer into the packed cell and increment the
     // rx_length_total
-    for ( i = 0; i < rx_length; i++ ) {
-      (*packed_cell)[rx_length_total] = rx_buffer[i];
-      rx_length_total++;
-    }
+    memcpy( *packed_cell + rx_length_total, rx_buffer, rx_length );
+    rx_length_total += rx_length;
+    /* for ( i = 0; i < rx_length; i++ ) { */
+      /* (*packed_cell)[rx_length_total] = rx_buffer[i]; */
+      /* rx_length_total++; */
+    /* } */
 
     // if the total number of bytes we've read in is the fixed header length,
     // check for a versions variable length cell, if we have one, extend the

@@ -1301,9 +1301,43 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
   return 0;
 }
 
+static char* pc_ipv4_to_string( unsigned int address ) {
+  int i;
+  int length = 0;
+  char* result = malloc( sizeof( char ) * 16 );
+  int tmp_length = 0;
+  unsigned char tmp_byte;
+
+  for ( i = 0; i < 4; i++ ) {
+    tmp_byte = ( address >> ( 8 * i ) ) & 0xff;
+
+    if ( tmp_byte < 10 ) {
+      tmp_length = 1;
+    } else if ( tmp_byte < 100 ) {
+      tmp_length = 2;
+    } else {
+      tmp_length = 3;
+    }
+
+    sprintf( result + length, "%d", tmp_byte );
+    length += tmp_length;
+
+    if ( i != 3 ) {
+      result[length] = '.';
+      length++;
+    }
+  }
+
+  result[length] = 0;
+
+  return result;
+}
+
 int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit ) {
-  const char* REQUEST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
-    "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
+  char* REQUEST;
+  char* ipv4_string;
+  const char* REQUEST_CONST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
+    "Host: \r\n"
     "User-Agent: esp-idf/1.0 esp3266\r\n"
     "Content-Type: text/plain\r\n"
     "Content-Length: "
@@ -1319,6 +1353,16 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
   Cell unpacked_cell;
   unsigned char* packed_cell;
 
+  ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
+  REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) ) );
+
+  memcpy( REQUEST, REQUEST_CONST, 39 );
+  strcpy( REQUEST + 39, ipv4_string );
+  strcpy( REQUEST + 39 + strlen( ipv4_string ), REQUEST_CONST + 39 );
+
+  free( ipv4_string );
+
+  ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
   ESP_LOGE( MINITOR_TAG, "descriptor has length %d", descriptor_length );
 
   unpacked_cell.circ_id = publish_circuit->circ_id;
@@ -1387,6 +1431,8 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
     if ( total_tx_length == 0 ) {
       memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
       total_tx_length += strlen( REQUEST );
+
+      free( REQUEST );
 
       memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, content_length, strlen( content_length ) );
       total_tx_length += strlen( content_length );
@@ -1468,26 +1514,31 @@ void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_a
 int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* ciphertext, int ciphertext_length, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter ) {
   unsigned int idx;
   int wolf_succ;
+  int layer_length;
+  char revision_counter_str[32];
   unsigned char* working_outer_layer;
   unsigned char tmp_signature[64];
 
-  const char* outer_layer_template =
+  const char* outer_layer_template_0 =
     "hs-descriptor 3\n"
     "descriptor-lifetime 180\n"
     "descriptor-signing-key-cert\n"
     "-----BEGIN ED25519 CERT-----\n"
     "*******************************************************************************************************************************************************************************************"
     "-----END ED25519 CERT-----\n"
-    "revision-counter *\n"
-    "superencrypted\n"
+    "revision-counter ";
+  const char* outer_layer_template_1 =
+    "\nsuperencrypted\n"
     "-----BEGIN MESSAGE-----\n"
     ;
-  const char* outer_layer_template_end =
+  const char* outer_layer_template_2 =
     "-----END MESSAGE-----\n"
     "signature **************************************************************************************"
     ;
 
-  int layer_length = HS_DESC_SIG_PREFIX_LENGTH + strlen( outer_layer_template ) + ciphertext_length * 4 / 3 + strlen( outer_layer_template_end );
+  sprintf( revision_counter_str, "%d", revision_counter );
+
+  layer_length = HS_DESC_SIG_PREFIX_LENGTH + strlen( outer_layer_template_0 ) + strlen( revision_counter_str ) + strlen( outer_layer_template_1 ) + ciphertext_length * 4 / 3 + strlen( outer_layer_template_2 );
 
   if ( ciphertext_length % 6 != 0 ) {
     layer_length ++;
@@ -1501,7 +1552,7 @@ int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* cip
   // skip past the prefix
   working_outer_layer += HS_DESC_SIG_PREFIX_LENGTH;
 
-  memcpy( working_outer_layer, outer_layer_template, strlen( outer_layer_template ) );
+  memcpy( working_outer_layer, outer_layer_template_0, strlen( outer_layer_template_0 ) );
 
   // skip past all the headers to the cert body
   working_outer_layer += 97;
@@ -1517,11 +1568,16 @@ int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* cip
   // skip past cert body and next header
   working_outer_layer += 187 + 44;
 
-  // TODO need to come up with solution for when the revision counter is greater than 9
-  *working_outer_layer = revision_counter + '0';
+  // copy revision counter
+  memcpy( working_outer_layer, revision_counter_str, strlen( revision_counter_str ) );
 
-  // skip past revision counter next header
-  working_outer_layer += 41;
+  working_outer_layer += strlen( revision_counter_str );
+
+  // copy the next part of the template
+  memcpy( working_outer_layer, outer_layer_template_1, strlen( outer_layer_template_1 ) );
+
+  // skip over the template headers
+  working_outer_layer += strlen( outer_layer_template_1 );
 
   v_base_64_encode( (char*)working_outer_layer, ciphertext, ciphertext_length );
 
@@ -1532,7 +1588,7 @@ int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* cip
     working_outer_layer++;
   }
 
-  memcpy( working_outer_layer, outer_layer_template_end, strlen( outer_layer_template_end ) );
+  memcpy( working_outer_layer, outer_layer_template_2, strlen( outer_layer_template_2 ) );
 
   // skip past the header
   working_outer_layer += 32;

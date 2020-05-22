@@ -11,9 +11,9 @@ typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 
 typedef struct NetworkConsensus {
   unsigned int method;
-  long int valid_after;
-  unsigned int fresh_until;
-  unsigned int valid_until;
+  unsigned long int valid_after;
+  unsigned long int fresh_until;
+  unsigned long int valid_until;
   unsigned char previous_shared_rand[32];
   unsigned char shared_rand[32];
   unsigned int hsdir_interval;
@@ -32,6 +32,8 @@ typedef struct OnionRelay {
   unsigned char suitable;
   unsigned char previous_hash[H_LENGTH];
   unsigned char current_hash[H_LENGTH];
+  unsigned char can_guard;
+  unsigned char can_exit;
 } OnionRelay;
 
 typedef struct RelayCrypto {
@@ -57,6 +59,7 @@ typedef struct DoublyLinkedOnionRelayList {
 } DoublyLinkedOnionRelayList;
 
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
+void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
 
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;

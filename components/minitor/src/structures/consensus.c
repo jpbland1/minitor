@@ -45,3 +45,24 @@ void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayLi
   // increase the length of the list
   list->length++;
 }
+
+void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list ) {
+  DoublyLinkedOnionRelay* tmp_node;
+
+  if ( list->length == 0 ) {
+    return;
+  }
+
+  tmp_node = list->tail;
+
+  if ( list->length > 1 ) {
+    list->tail->previous->next = NULL;
+  }
+
+  list->tail = list->tail->previous;
+
+  free( tmp_node->relay );
+  free( tmp_node );
+
+  list->length--;
+}
