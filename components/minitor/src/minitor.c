@@ -95,6 +95,7 @@ int v_minitor_INIT() {
 
 // ONION SERVICES
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory ) {
+  time_t now;
   int i;
   unsigned int idx;
   int wolf_succ;
@@ -229,7 +230,9 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   xSemaphoreGive( network_consensus_mutex );
   // END mutex
 
-  time_period = ( valid_after / 60 - 12 * 60 ) / hsdir_interval;
+  time( &now );
+  // TODO this is based on chutney settings, need to change it for real tor
+  time_period = ( now / 60 - (4) ) / hsdir_interval;
 
   revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
 
@@ -241,7 +244,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     return NULL;
   }
 
-  /* for ( i = 0; i < 2; i++ ) { */
+  //for ( i = 0; i < 2; i++ ) {
   for ( i = 0; i < 1; i++ ) {
     if ( d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period, hsdir_interval, NULL, 0 ) < 0 ) {
 #ifdef DEBUG_MINITOR

@@ -1015,13 +1015,13 @@ cleanup:
 }
 
 static int d_test_db() {
-  unsigned char* tmp_hash = puc_get_hash_by_index( 5, 0 );
+  //unsigned char* tmp_hash = puc_get_hash_by_index( 5, 0 );
 
-  if ( tmp_hash == NULL ) {
-    return -1;
-  }
+  //if ( tmp_hash == NULL ) {
+    //return -1;
+  //}
 
-  free( tmp_hash );
+  //free( tmp_hash );
 
   return 0;
 }
@@ -1089,6 +1089,20 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
     wc_Sha3_256_Final( &reusable_sha3, hs_index[i] );
+
+    {
+      int j;
+
+      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
+      {
+        ESP_LOGE( MINITOR_TAG, "blinded_pub_key[%d]: %d", j, blinded_pub_key[j] );
+      }
+
+      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
+      {
+        ESP_LOGE( MINITOR_TAG, "hs_index[%d][%d]: %d", i, j, hs_index[i][j] );
+      }
+    }
   }
 
   for ( i = 0; i < hsdir_n_replicas; i++ ) {
@@ -2159,6 +2173,22 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   unsigned char tmp_64_array[8];
   unsigned char zero[32] = { 0 };
 
+  {
+    for ( i = 0; i < secret_length; i++ )
+    {
+      ESP_LOGE( MINITOR_TAG, "secret[%d]: 0x%x", i, secret[i] );
+    }
+
+    ESP_LOGE( MINITOR_TAG, "period_number: %lld", period_number );
+
+    ESP_LOGE( MINITOR_TAG, "period_length: %lld", period_length );
+
+    for ( i = 0; i < secret_length; i++ )
+    {
+      ESP_LOGE( MINITOR_TAG, "secret[%d]: 0x%x", i, secret[i] );
+    }
+  }
+
   memset( zero, 0, 32 );
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
@@ -2167,6 +2197,11 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   idx = ED25519_PRV_KEY_SIZE;
   idy = ED25519_PUB_KEY_SIZE;
   wolf_succ = wc_ed25519_export_key( master_key, out_priv_key, &idx, tmp_pub_key, &idy );
+
+  for ( i = 0; i < ED25519_PUB_KEY_SIZE; i++ )
+  {
+    ESP_LOGE( MINITOR_TAG, "tmp_pub_key[%d]: 0x%x", i, tmp_pub_key[i] );
+  }
 
   if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
 #ifdef DEBUG_MINITOR

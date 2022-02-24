@@ -8,7 +8,11 @@ NetworkConsensus network_consensus = {
   .valid_after = 0,
   .fresh_until = 0,
   .valid_until = 0,
+#ifdef MINITOR_CHUTNEY
+  .hsdir_interval = 8;
+#else
   .hsdir_interval = HSDIR_INTERVAL_DEFAULT,
+#endif
   .hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT,
   .hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT,
 };

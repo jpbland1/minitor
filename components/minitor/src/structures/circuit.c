@@ -18,6 +18,9 @@ DoublyLinkedOnionCircuitList standby_circuits = {
 SemaphoreHandle_t standby_circuits_mutex;
 
 void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list ) {
+  node->previous = NULL;
+  node->next = NULL;
+
   if ( list->length == 0 ) {
     list->head = node;
     list->tail = node;

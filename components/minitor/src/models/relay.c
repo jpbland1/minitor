@@ -230,6 +230,82 @@ db_fail:
   return NULL;
 }
 
+OnionRelay* px_get_random_relay_standalone()
+{
+  int i;
+  int rand_index;
+  int ret;
+  const char* count_query = "SELECT COUNT(identity) FROM main.OnionRelays WHERE suitable = 1;";
+  const char* data_query = "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE suitable = 1 LIMIT 1 OFFSET ?1;";
+  sqlite3_stmt* statement;
+  OnionRelay* onion_relay;
+  DoublyLinkedOnionRelay* db_onion_relay;
+
+  if ( d_open_database() < 0 ) {
+    return NULL;
+  }
+
+  onion_relay = malloc( sizeof( OnionRelay ) );
+
+  ret = sqlite3_prepare_v2( minitor_db, count_query, -1, &statement, NULL );
+
+  if ( ret != SQLITE_OK ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay count non guard relays, err code: %d", ret );
+#endif
+
+    goto cleanup;
+  }
+
+  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay count relays, err code: %d", ret );
+#endif
+
+    goto cleanup;
+  }
+
+  rand_index = esp_random() % sqlite3_column_int( statement, 0 );
+
+  sqlite3_finalize( statement );
+
+  ret = sqlite3_prepare_v2( minitor_db, data_query, -1, &statement, NULL );
+
+  if ( ret != SQLITE_OK ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get random relay, err code: %d", ret );
+#endif
+
+    goto cleanup;
+  }
+
+  sqlite3_bind_int( statement, 1, rand_index );
+
+  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay non guard relays, err code: %d", ret );
+#endif
+
+    goto cleanup;
+  }
+
+  v_parse_onion_relay( statement, onion_relay );
+
+  sqlite3_finalize( statement );
+
+  if ( d_close_database() < 0 ) {
+    goto db_fail;
+  }
+
+  return onion_relay;
+
+cleanup:
+  d_close_database();
+db_fail:
+  free( onion_relay );
+  return NULL;
+}
+
 OnionRelay* px_get_random_relay( DoublyLinkedOnionRelayList* relay_list, unsigned char* exclude ) {
   int i;
   int rand_index;

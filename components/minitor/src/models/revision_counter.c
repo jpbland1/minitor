@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "esp_log.h"
 #include "sqlite3.h"
 

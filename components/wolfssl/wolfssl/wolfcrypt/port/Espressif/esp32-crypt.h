@@ -37,7 +37,7 @@
 #include <freertos/FreeRTOS.h>
 #include "soc/dport_reg.h"
 #include "soc/hwcrypto_reg.h"
-#include "soc/cpu.h"
+//#include "soc/cpu.h"
 #include "driver/periph_ctrl.h"
 #if ESP_IDF_VERSION_MAJOR >= 4 && ESP_IDF_VERSION_MINOR >= 1
 #include <esp32/rom/ets_sys.h>

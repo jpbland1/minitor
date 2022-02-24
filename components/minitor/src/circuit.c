@@ -78,12 +78,39 @@ int d_setup_init_circuits( int circuit_count ) {
 
   int i;
   DoublyLinkedOnionCircuit* node;
+  DoublyLinkedOnionCircuit* standby_node;
+  OnionRelay* unique_final_relay;
+
+  unique_final_relay = NULL;
 
   for ( i = 0; i < circuit_count; i++ ) {
     node = malloc( sizeof( DoublyLinkedOnionCircuit ) );
     node->circuit.task_handle = NULL;
 
-    switch ( d_build_random_onion_circuit( &node->circuit, 3 ) ) {
+    do
+    {
+      unique_final_relay = px_get_random_relay_standalone();
+
+      standby_node = standby_circuits.head;
+
+      while ( standby_node != NULL )
+      {
+        if ( memcmp( standby_node->circuit.relay_list.tail->relay->identity, unique_final_relay->identity, ID_LENGTH ) == 0 )
+        {
+          ESP_LOGE( MINITOR_TAG, "non-unique or port: %d", unique_final_relay->or_port );
+
+          free( unique_final_relay );
+          unique_final_relay = NULL;
+          break;
+        }
+
+        standby_node = standby_node->next;
+      }
+    } while ( unique_final_relay == NULL );
+
+    ESP_LOGE( MINITOR_TAG, "unique or port: %d", unique_final_relay->or_port );
+
+    switch ( d_build_onion_circuit_to( &node->circuit, 3, unique_final_relay ) ) {
       case -1:
         i--;
         free( node );
@@ -309,7 +336,7 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
 
   if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 ) {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to connect socket" );
+    ESP_LOGE( MINITOR_TAG, "Failed to connect socket, errno: %d", errno );
 #endif
 
     close( sock_fd );

@@ -6,6 +6,7 @@
 int d_create_relay_table();
 int d_create_relay( OnionRelay* onion_relay );
 OnionRelay* px_get_relay( unsigned char* identity );
+OnionRelay* px_get_random_relay_standalone();
 OnionRelay* px_get_random_relay( DoublyLinkedOnionRelayList* relay_list, unsigned char* exclude );
 OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude );
 int d_get_hsdir_count();
