@@ -84,10 +84,6 @@ static int d_download_consensus() {
     return -1;
   }
 
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "connected to http socket" );
-#endif
-
   // send the http request to the dir server
   err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
 
@@ -98,10 +94,6 @@ static int d_download_consensus() {
 
     return -1;
   }
-
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "sent to http socket" );
-#endif
 
   if ( ( fd = open( "/sdcard/consensus", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
 #ifdef DEBUG_MINITOR

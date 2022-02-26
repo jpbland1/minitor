@@ -81,8 +81,6 @@ int d_setup_init_circuits( int circuit_count ) {
   DoublyLinkedOnionCircuit* standby_node;
   OnionRelay* unique_final_relay;
 
-  unique_final_relay = NULL;
-
   for ( i = 0; i < circuit_count; i++ ) {
     node = malloc( sizeof( DoublyLinkedOnionCircuit ) );
     node->circuit.task_handle = NULL;
@@ -1967,10 +1965,6 @@ int d_fetch_descriptor_info( OnionCircuit* circuit ) {
       }
     }
 
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "connected to http socket" );
-#endif
-
     for ( i = 0; i < 20; i++ ) {
       if ( node->relay->digest[i] >> 4 < 10 ) {
         REQUEST[18 + 2 * i] = 48 + ( node->relay->digest[i] >> 4 );
@@ -1996,10 +1990,6 @@ int d_fetch_descriptor_info( OnionCircuit* circuit ) {
       return -1;
     }
 
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "sent to http socket" );
-#endif
-
     // keep reading forever, we will break inside when the transfer is over
     while ( 1 ) {
       // recv data from the destination and fill the rx_buffer with the data
@@ -2017,10 +2007,6 @@ int d_fetch_descriptor_info( OnionCircuit* circuit ) {
       } else if ( rx_length == 0 ) {
         break;
       }
-
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "recved from http socket" );
-#endif
 
       // iterate over each byte we got back from the socket recv
       // NOTE that we can't rely on all the data being there, we

@@ -9,44 +9,63 @@
 #include "../h/cell.h"
 #include "../h/circuit.h"
 #include "../h/models/relay.h"
+#include "../h/models/revision_counter.h"
 
 void v_handle_onion_service( void* pv_parameters ) {
+  time_t now;
+  unsigned int hsdir_interval;
   OnionService* onion_service = (OnionService*)pv_parameters;
   OnionMessage* onion_message;
 
   while ( 1 ) {
     // TODO block on rx_queue
-    xQueueReceive( onion_service->rx_queue, &onion_message, portMAX_DELAY );
+    if ( xQueueReceive( onion_service->rx_queue, &onion_message, 1000 * 60 / portTICK_PERIOD_MS ) == pdTRUE )
+    {
+      switch ( onion_message->type ) {
+        case ONION_CELL:
+          if ( d_onion_service_handle_cell( onion_service, (Cell*)onion_message->data ) < 0 ) {
+  #ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to handle a cell on circuit: %.8x", ( (Cell*)onion_message->data )->circ_id );
+  #endif
+          }
 
-    switch ( onion_message->type ) {
-      case ONION_CELL:
-        if ( d_onion_service_handle_cell( onion_service, (Cell*)onion_message->data ) < 0 ) {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to handle a cell on circuit: %.8x", ( (Cell*)onion_message->data )->circ_id );
-#endif
-        }
+          free_cell( (Cell*)onion_message->data );
 
-        free_cell( (Cell*)onion_message->data );
+          break;
+        case SERVICE_TCP_DATA:
+          if ( d_onion_service_handle_local_tcp_data( onion_service, (ServiceTcpTraffic*)onion_message->data ) < 0 ) {
+  #ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to handle local tcp traffic on circuit %.8x and stream %d", ( (ServiceTcpTraffic*)onion_message->data )->circ_id, ( (ServiceTcpTraffic*)onion_message->data )->stream_id );
+  #endif
+          }
 
-        break;
-      case SERVICE_TCP_DATA:
-        if ( d_onion_service_handle_local_tcp_data( onion_service, (ServiceTcpTraffic*)onion_message->data ) < 0 ) {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to handle local tcp traffic on circuit %.8x and stream %d", ( (ServiceTcpTraffic*)onion_message->data )->circ_id, ( (ServiceTcpTraffic*)onion_message->data )->stream_id );
-#endif
-        }
+          if ( ( (ServiceTcpTraffic*)onion_message->data )->length > 0 ) {
+            free( ( (ServiceTcpTraffic*)onion_message->data )->data );
+          }
 
-        if ( ( (ServiceTcpTraffic*)onion_message->data )->length > 0 ) {
-          free( ( (ServiceTcpTraffic*)onion_message->data )->data );
-        }
+          break;
+        case SERVICE_COMMAND:
+          break;
+      }
 
-        break;
-      case SERVICE_COMMAND:
-        break;
+      free( onion_message->data );
+      free( onion_message );
     }
 
-    free( onion_message->data );
-    free( onion_message );
+    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+    hsdir_interval = network_consensus.hsdir_interval;
+
+    xSemaphoreGive( network_consensus_mutex );
+
+    time( &now );
+
+    // TODO this is based on chutney settings, need to change it for real tor
+    if ( ( now / 60 - (4) ) / hsdir_interval > onion_service->last_hsdir_update )
+    {
+      d_push_hsdir( onion_service );
+      ESP_LOGE( MINITOR_TAG, "heap check: %d", xPortGetFreeHeapSize() );
+    }
   }
 }
 
@@ -936,6 +955,7 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( unsigned char* hash, i
     mid = left + ( right - left ) / 2;
 
     ESP_LOGE( MINITOR_TAG, "mid: %d", mid );
+
     if ( mid == hsdir_relay_count ) {
       mid = 0;
       break;
@@ -1014,19 +1034,8 @@ cleanup:
   return NULL;
 }
 
-static int d_test_db() {
-  //unsigned char* tmp_hash = puc_get_hash_by_index( 5, 0 );
-
-  //if ( tmp_hash == NULL ) {
-    //return -1;
-  //}
-
-  //free( tmp_hash );
-
-  return 0;
-}
-
-int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store, int previous ) {
+int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store, int previous )
+{
   int i;
   int j;
   int k;
@@ -1044,12 +1053,14 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
   DoublyLinkedOnionRelay* hsdir_relay_node;
   DoublyLinkedOnionRelay* tmp_relay_node;
   OnionCircuit publish_circuit = {
-    .ssl = NULL
+    .ssl = NULL,
+    .task_handle = NULL,
   };
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
-  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+  for ( i = 0; i < hsdir_n_replicas; i++ )
+  {
     hs_index[i] = malloc( sizeof( unsigned char ) * WC_SHA3_256_DIGEST_SIZE );
 
     wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"store-at-idx", strlen( "store-at-idx" ) );
@@ -1089,26 +1100,16 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
     wc_Sha3_256_Final( &reusable_sha3, hs_index[i] );
-
-    {
-      int j;
-
-      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
-      {
-        ESP_LOGE( MINITOR_TAG, "blinded_pub_key[%d]: %d", j, blinded_pub_key[j] );
-      }
-
-      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
-      {
-        ESP_LOGE( MINITOR_TAG, "hs_index[%d][%d]: %d", i, j, hs_index[i][j] );
-      }
-    }
   }
 
-  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+  for ( i = 0; i < hsdir_n_replicas; i++ )
+  {
     to_store = hsdir_spread_store;
 
-    if ( ( hsdir_index_list = px_get_relays_by_hash( hs_index[i], hsdir_spread_store, &used_relays, previous ) ) == NULL ) {
+    hsdir_index_list = px_get_relays_by_hash( hs_index[i], hsdir_spread_store, &used_relays, previous );
+
+    if ( hsdir_index_list == NULL )
+    {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to get the list of relays to send to for the time period" );
 #endif
@@ -1119,13 +1120,13 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     hsdir_relay_node = hsdir_index_list->head;
 
     ESP_LOGE( MINITOR_TAG, "hsdir_index_list->length: %d", hsdir_index_list->length );
-    for ( j = 0; j < hsdir_index_list->length && to_store > 0; j++ ) {
-      if ( d_test_db() < 0 ) {
-        ESP_LOGE( MINITOR_TAG, "db test failed on geff" );
-        return -1;
-      }
 
-      if ( ( target_relay = px_get_relay( hsdir_relay_node->relay->identity ) ) == NULL ) {
+    for ( j = 0; j < hsdir_index_list->length && to_store > 0; j++ )
+    {
+      target_relay = px_get_relay( hsdir_relay_node->relay->identity );
+
+      if ( target_relay == NULL )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to get the target relay from its identity" );
 #endif
@@ -1133,17 +1134,16 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
         return -1;
       }
 
-      if ( d_test_db() < 0 ) {
-        ESP_LOGE( MINITOR_TAG, "db test failed on feff" );
-        return -1;
-      }
-
-      if ( publish_circuit.ssl != NULL ) {
+      if ( publish_circuit.ssl != NULL )
+      {
         tmp_relay_node = publish_circuit.relay_list.head;
 
-        for ( k = 0; k < publish_circuit.relay_list.length; k++ ) {
-          if ( memcmp( tmp_relay_node->relay->identity, target_relay->identity, ID_LENGTH ) == 0 || k == publish_circuit.relay_list.length - 1 ) {
-            if ( k == 0 ) {
+        for ( k = 0; k < publish_circuit.relay_list.length; k++ )
+        {
+          if ( memcmp( tmp_relay_node->relay->identity, target_relay->identity, ID_LENGTH ) == 0 || k == publish_circuit.relay_list.length - 1 )
+          {
+            if ( k == 0 )
+            {
               ESP_LOGE( MINITOR_TAG, "First matches, destroying circuit" );
 
               if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
@@ -1157,10 +1157,13 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
               ESP_LOGE( MINITOR_TAG, "Finished destroying" );
 
               publish_circuit.ssl = NULL;
-            } else {
+            }
+            else
+            {
               ESP_LOGE( MINITOR_TAG, "Truncating to length %d", k );
 
-              if ( d_truncate_onion_circuit( &publish_circuit, k ) < 0 ) {
+              if ( d_truncate_onion_circuit( &publish_circuit, k ) < 0 )
+              {
 #ifdef DEBUG_MINITOR
                 ESP_LOGE( MINITOR_TAG, "Failed to truncate publish circuit" );
 #endif
@@ -1170,12 +1173,14 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
               ESP_LOGE( MINITOR_TAG, "Trying to extend to %d", target_relay->or_port );
 
-              if ( d_extend_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 ) {
+              if ( d_extend_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 )
+              {
 #ifdef DEBUG_MINITOR
                 ESP_LOGE( MINITOR_TAG, "Failed to extend publish circuit" );
 #endif
 
-                if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
+                if ( d_destroy_onion_circuit( &publish_circuit ) < 0 )
+                {
 #ifdef DEBUG_MINITOR
                   ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
@@ -1194,20 +1199,18 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
         }
       }
 
-      if ( d_test_db() < 0 ) {
-        ESP_LOGE( MINITOR_TAG, "db test failed on eeff" );
-        return -1;
-      }
-
-      while ( publish_circuit.ssl == NULL ) {
+      while ( publish_circuit.ssl == NULL )
+      {
         ESP_LOGE( MINITOR_TAG, "Inside the create circuit" );
 
-        if ( d_build_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 ) {
+        if ( d_build_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 )
+        {
 #ifdef DEBUG_MINITOR
           ESP_LOGE( MINITOR_TAG, "Failed to build publish circuit" );
 #endif
 
-          if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
+          if ( d_destroy_onion_circuit( &publish_circuit ) < 0 )
+          {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
@@ -1221,12 +1224,8 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
         ESP_LOGE( MINITOR_TAG, "Finished building circuit" );
       }
 
-      if ( d_test_db() < 0 ) {
-        ESP_LOGE( MINITOR_TAG, "db test failed on deff" );
-        return -1;
-      }
-
-      if ( d_post_descriptor( descriptor_text, descriptor_length, &publish_circuit ) < 0 ) {
+      if ( d_post_descriptor( descriptor_text, descriptor_length, &publish_circuit ) < 0 )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to post descriptor" );
 #endif
@@ -1246,21 +1245,12 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
       v_add_relay_to_list( tmp_relay_node, &used_relays );
 
       hsdir_relay_node = hsdir_relay_node->next;
-
-      if ( d_test_db() < 0 ) {
-        ESP_LOGE( MINITOR_TAG, "db test failed on ceff" );
-        return -1;
-      }
-    }
-
-    if ( d_test_db() < 0 ) {
-      ESP_LOGE( MINITOR_TAG, "db test failed on beff" );
-      return -1;
     }
 
     hsdir_relay_node = hsdir_index_list->head;
 
-    for ( j = 0; j < hsdir_index_list->length; j++ ) {
+    for ( j = 0; j < hsdir_index_list->length; j++ )
+    {
       free( hsdir_relay_node->relay );
 
       if ( j != hsdir_index_list->length - 1 ) {
@@ -1273,16 +1263,12 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     }
 
     free( hsdir_index_list );
-
-    if ( d_test_db() < 0 ) {
-      ESP_LOGE( MINITOR_TAG, "db test failed on aeff" );
-      return -1;
-    }
   }
 
   tmp_relay_node = used_relays.head;
 
-  for ( i = 0; i < used_relays.length; i++ ) {
+  for ( i = 0; i < used_relays.length; i++ )
+  {
     free( tmp_relay_node->relay );
 
     if ( i != used_relays.length - 1 ) {
@@ -1294,7 +1280,8 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     }
   }
 
-  if ( d_destroy_onion_circuit( &publish_circuit ) < 0 ) {
+  if ( d_destroy_onion_circuit( &publish_circuit ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
@@ -1304,7 +1291,8 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
   wc_Sha3_256_Free( &reusable_sha3 );
 
-  for ( i = 0; i < hsdir_n_replicas; i++ ) {
+  for ( i = 0; i < hsdir_n_replicas; i++ )
+  {
     free( hs_index[i] );
   }
 
@@ -1461,11 +1449,11 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
       total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length;
     }
 
-    for ( i = 0; i < ( (PayloadRelay*)unpacked_cell.payload )->length; i++ ) {
-      putchar( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload[i] );
-    }
+    //for ( i = 0; i < ( (PayloadRelay*)unpacked_cell.payload )->length; i++ ) {
+      //putchar( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload[i] );
+    //}
 
-    putchar( '\n' );
+    //putchar( '\n' );
 
     packed_cell = pack_and_free( &unpacked_cell );
 
@@ -2499,6 +2487,264 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
   }
 
   wc_Sha3_256_Free( &reusable_sha3 );
+
+  return 0;
+}
+
+int d_push_hsdir( OnionService* onion_service )
+{
+  int i;
+  int wolf_succ;
+  int mini_succ;
+  unsigned int idx;
+  time_t now;
+  long int valid_after;
+  unsigned int hsdir_interval;
+  unsigned int hsdir_n_replicas;
+  unsigned int hsdir_spread_store;
+  unsigned char previous_shared_rand[32];
+  unsigned char shared_rand[32];
+  int time_period = 0;
+  int revision_counter;
+  WC_RNG rng;
+  ed25519_key blinded_key;
+  ed25519_key descriptor_signing_key;
+  Sha3 reusable_sha3;
+  int reusable_text_length;
+  unsigned char* reusable_plaintext;
+  unsigned char* reusable_ciphertext;
+  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char blinded_pub_key[ED25519_PUB_KEY_SIZE];
+
+  wc_InitRng( &rng );
+
+  wc_ed25519_init( &blinded_key );
+  blinded_key.expanded = 1;
+
+  wc_ed25519_init( &descriptor_signing_key );
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  wc_ed25519_make_key( &rng, 32, &descriptor_signing_key );
+
+  wc_FreeRng( &rng );
+
+  // BEGIN mutex
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+  valid_after = network_consensus.valid_after;
+  hsdir_interval = network_consensus.hsdir_interval;
+  hsdir_n_replicas = network_consensus.hsdir_n_replicas;
+  hsdir_spread_store = network_consensus.hsdir_spread_store;
+  memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
+  memcpy( shared_rand, network_consensus.shared_rand, 32 );
+
+  xSemaphoreGive( network_consensus_mutex );
+  // END mutex
+
+  time( &now );
+  // TODO this is based on chutney settings, need to change it for real tor
+  time_period = ( now / 60 - (4) ) / hsdir_interval;
+
+  revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
+
+  if ( revision_counter < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to roll the revision_counter" );
+#endif
+
+    return -1;
+  }
+
+  for ( i = 0; i < 1; i++ )
+  {
+    ESP_LOGE( MINITOR_TAG, "heap before d_derive_blinded_key: %d", xPortGetFreeHeapSize() );
+    mini_succ = d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period - i, hsdir_interval, NULL, 0 );
+    ESP_LOGE( MINITOR_TAG, "heap after d_derive_blinded_key: %d", xPortGetFreeHeapSize() );
+
+    if ( mini_succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
+#endif
+
+      return -1;
+    }
+
+    idx = ED25519_PUB_KEY_SIZE;
+    wolf_succ = wc_ed25519_export_public( &blinded_key, blinded_pub_key, &idx );
+
+    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Generating second plaintext" );
+
+    // generate second layer plaintext
+    ESP_LOGE( MINITOR_TAG, "heap before d_generate_second_plaintext: %d", xPortGetFreeHeapSize() );
+    reusable_text_length = d_generate_second_plaintext( &reusable_plaintext, &onion_service->intro_circuits, valid_after, &descriptor_signing_key );
+    ESP_LOGE( MINITOR_TAG, "heap after d_generate_second_plaintext: %d", xPortGetFreeHeapSize() );
+
+    if ( reusable_text_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Creating sub cred" );
+
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"credential", strlen( "credential" ) );
+    wc_Sha3_256_Update( &reusable_sha3, onion_service->master_key.p, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"subcredential", strlen( "subcredential" ) );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_key, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+    if ( i == 0 )
+    {
+      ESP_LOGE( MINITOR_TAG, "Storing current sub cred" );
+
+      memcpy( onion_service->current_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    }
+    else
+    {
+      ESP_LOGE( MINITOR_TAG, "Storing previous sub cred" );
+
+      memcpy( onion_service->previous_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Encrypting second plaintext, length %d", reusable_text_length );
+
+    // encrypt second layer plaintext
+    ESP_LOGE( MINITOR_TAG, "heap before d_encrypt_descriptor_plaintext: %d", xPortGetFreeHeapSize() );
+    reusable_text_length = d_encrypt_descriptor_plaintext(
+      &reusable_ciphertext,
+      reusable_plaintext,
+      reusable_text_length,
+      blinded_pub_key,
+      ED25519_PUB_KEY_SIZE,
+      "hsdir-encrypted-data",
+      strlen( "hsdir-encrypted-data" ),
+      reusable_sha3_sum,
+      revision_counter
+    );
+    ESP_LOGE( MINITOR_TAG, "heap after d_encrypt_descriptor_plaintext: %d", xPortGetFreeHeapSize() );
+
+    free( reusable_plaintext );
+
+    if ( reusable_text_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Generating first plaintext, length %d", reusable_text_length );
+
+    // create first layer plaintext
+    ESP_LOGE( MINITOR_TAG, "heap before d_generate_first_plaintext: %d", xPortGetFreeHeapSize() );
+    reusable_text_length = d_generate_first_plaintext( &reusable_plaintext, reusable_ciphertext, reusable_text_length );
+    ESP_LOGE( MINITOR_TAG, "heap after d_generate_first_plaintext: %d", xPortGetFreeHeapSize() );
+
+    if ( reusable_text_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
+#endif
+
+      return -1;
+    }
+
+    free( reusable_ciphertext );
+
+    ESP_LOGE( MINITOR_TAG, "Encrypting first plaintext, length %d", reusable_text_length );
+
+    // encrypt first layer plaintext
+    reusable_text_length = d_encrypt_descriptor_plaintext(
+      &reusable_ciphertext,
+      reusable_plaintext,
+      reusable_text_length,
+      blinded_pub_key,
+      ED25519_PUB_KEY_SIZE,
+      "hsdir-superencrypted-data",
+      strlen( "hsdir-superencrypted-data" ),
+      reusable_sha3_sum,
+      revision_counter
+    );
+
+    free( reusable_plaintext );
+
+    if ( reusable_text_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Generating outer plaintext, length %d", reusable_text_length );
+
+    // create outer descriptor wrapper
+    ESP_LOGE( MINITOR_TAG, "heap before d_generate_outer_descriptor: %d", xPortGetFreeHeapSize() );
+    reusable_text_length = d_generate_outer_descriptor(
+      &reusable_plaintext,
+      reusable_ciphertext,
+      reusable_text_length,
+      &descriptor_signing_key,
+      valid_after,
+      &blinded_key,
+      revision_counter
+    );
+    ESP_LOGE( MINITOR_TAG, "heap after d_generate_outer_descriptor: %d", xPortGetFreeHeapSize() );
+
+    free( reusable_ciphertext );
+
+    if ( reusable_text_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "Sending descriptor length: %d", reusable_text_length );
+
+    // send outer descriptor wrapper to the correct HSDIR nodes
+    mini_succ = d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period - i, hsdir_interval, previous_shared_rand, hsdir_spread_store, i );
+
+    if ( mini_succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send descriptor to hsdir hosts" );
+#endif
+
+      return -1;
+    }
+
+    free( reusable_plaintext );
+
+    memcpy( shared_rand, previous_shared_rand, 32 );
+  }
+
+  onion_service->last_hsdir_update = time_period;
+
+  wc_Sha3_256_Free( &reusable_sha3 );
+  wc_ed25519_free( &blinded_key );
+  wc_ed25519_free( &descriptor_signing_key );
 
   return 0;
 }

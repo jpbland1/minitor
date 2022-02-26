@@ -33,5 +33,6 @@ void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* 
 int d_router_establish_intro( OnionCircuit* circuit );
 int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int64_t period_number, int64_t period_length, unsigned char* secret, int secret_length );
 int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_directory );
+int d_push_hsdir();
 
 #endif

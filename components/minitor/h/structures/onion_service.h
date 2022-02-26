@@ -50,12 +50,13 @@ typedef struct OnionService {
   char* onion_service_directory;
   ed25519_key master_key;
   QueueHandle_t rx_queue;
-  unsigned char* current_sub_credential;
-  unsigned char* previous_sub_credential;
+  unsigned char current_sub_credential[WC_SHA3_256_DIGEST_SIZE];
+  unsigned char previous_sub_credential[WC_SHA3_256_DIGEST_SIZE];
   DoublyLinkedOnionCircuitList intro_circuits;
   DoublyLinkedOnionCircuitList rend_circuits;
   DoublyLinkedRendezvousCookieList rendezvous_cookies;
   DoublyLinkedLocalStreamList local_streams;
+  unsigned int last_hsdir_update;
 } OnionService;
 
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );

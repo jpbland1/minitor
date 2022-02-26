@@ -6,7 +6,6 @@
 #include "../include/config.h"
 #include "../include/minitor.h"
 #include "../h/models/db.h"
-#include "../h/models/revision_counter.h"
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
@@ -39,11 +38,39 @@ static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
 }
 
 static void v_circuit_keepalive( void* pv_parameters ) {
+  time_t now;
+  unsigned long int fresh_until;
+
   while ( 1 ) {
-    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-    v_keep_circuitlist_alive( &standby_circuits );
-    xSemaphoreGive( standby_circuits_mutex );
     vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
+
+    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+
+    v_keep_circuitlist_alive( &standby_circuits );
+
+    xSemaphoreGive( standby_circuits_mutex );
+
+/*
+    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+    fresh_until = network_consensus.fresh_until;
+
+    xSemaphoreGive( network_consensus_mutex );
+
+    time( &now );
+
+    if ( now >= fresh_until )
+    {
+      while ( d_fetch_consensus_info() < 0 )
+      {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "couldn't refresh the consensus, retrying" );
+#endif
+
+        vTaskDelay( 1000 * 5 / portTICK_PERIOD_MS );
+      }
+    }
+*/
   }
 }
 
@@ -83,7 +110,7 @@ int v_minitor_INIT() {
   xTaskCreatePinnedToCore(
     v_circuit_keepalive,
     "CIRCUIT_KEEPALIVE",
-    4096,
+    8192,
     NULL,
     6,
     NULL,
@@ -95,54 +122,15 @@ int v_minitor_INIT() {
 
 // ONION SERVICES
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory ) {
-  time_t now;
   int i;
-  unsigned int idx;
-  int wolf_succ;
-  long int valid_after;
-  unsigned int hsdir_interval;
-  unsigned int hsdir_n_replicas;
-  unsigned int hsdir_spread_store;
-  int time_period = 0;
-  unsigned char previous_shared_rand[32];
-  unsigned char shared_rand[32];
   DoublyLinkedOnionCircuit* node;
-  int reusable_text_length;
-  unsigned char* reusable_plaintext;
-  unsigned char* reusable_ciphertext;
-  WC_RNG rng;
-  ed25519_key blinded_key;
-  ed25519_key descriptor_signing_key;
-  Sha3 reusable_sha3;
-  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
-  unsigned char blinded_pub_key[ED25519_PUB_KEY_SIZE];
-  int revision_counter;
   OnionService* onion_service = malloc( sizeof( OnionService ) );
 
-  wc_InitRng( &rng );
-
-  wc_ed25519_init( &blinded_key );
-  blinded_key.expanded = 1;
-
-  wc_ed25519_init( &descriptor_signing_key );
-  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
-
-  wc_ed25519_make_key( &rng, 32, &descriptor_signing_key );
-
-  wc_FreeRng( &rng );
+  memset( onion_service, 0, sizeof( OnionService ) );
 
   onion_service->local_port = local_port;
   onion_service->exit_port = exit_port;
   onion_service->rx_queue = xQueueCreate( 5, sizeof( OnionMessage* ) );
-  onion_service->rend_circuits.length = 0;
-  onion_service->rend_circuits.head = NULL;
-  onion_service->rend_circuits.tail = NULL;
-  onion_service->rendezvous_cookies.length = 0;
-  onion_service->rendezvous_cookies.head = NULL;
-  onion_service->rendezvous_cookies.tail = NULL;
-  onion_service->local_streams.length = 0;
-  onion_service->local_streams.head = NULL;
-  onion_service->local_streams.tail = NULL;
 
   if ( d_generate_hs_keys( onion_service, onion_service_directory ) < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -217,172 +205,13 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     node = node->next;
   }
 
-  // BEGIN mutex
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-  valid_after = network_consensus.valid_after;
-  hsdir_interval = network_consensus.hsdir_interval;
-  hsdir_n_replicas = network_consensus.hsdir_n_replicas;
-  hsdir_spread_store = network_consensus.hsdir_spread_store;
-  memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
-  memcpy( shared_rand, network_consensus.shared_rand, 32 );
-
-  xSemaphoreGive( network_consensus_mutex );
-  // END mutex
-
-  time( &now );
-  // TODO this is based on chutney settings, need to change it for real tor
-  time_period = ( now / 60 - (4) ) / hsdir_interval;
-
-  revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
-
-  if ( revision_counter < 0 ) {
+  if ( d_push_hsdir( onion_service ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to roll the revision_counter" );
+    ESP_LOGE( MINITOR_TAG, "Failed to push hsdir" );
 #endif
 
     return NULL;
-  }
-
-  //for ( i = 0; i < 2; i++ ) {
-  for ( i = 0; i < 1; i++ ) {
-    if ( d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period, hsdir_interval, NULL, 0 ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
-#endif
-
-      return NULL;
-    }
-
-    idx = ED25519_PUB_KEY_SIZE;
-    wolf_succ = wc_ed25519_export_public( &blinded_key, blinded_pub_key, &idx );
-
-    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
-#endif
-
-      return NULL;
-    }
-
-
-    ESP_LOGE( MINITOR_TAG, "Generating second plaintext" );
-    // generate second layer plaintext
-    if ( ( reusable_text_length = d_generate_second_plaintext( &reusable_plaintext, &onion_service->intro_circuits, valid_after, &descriptor_signing_key ) ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
-#endif
-
-      return NULL;
-    }
-
-    ESP_LOGE( MINITOR_TAG, "Creating sub cred" );
-
-    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"credential", strlen( "credential" ) );
-    wc_Sha3_256_Update( &reusable_sha3, onion_service->master_key.p, ED25519_PUB_KEY_SIZE );
-    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-
-    wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"subcredential", strlen( "subcredential" ) );
-    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_key, ED25519_PUB_KEY_SIZE );
-    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-
-    if ( i == 0 ) {
-      ESP_LOGE( MINITOR_TAG, "Storing current sub cred" );
-      onion_service->current_sub_credential = malloc( sizeof( unsigned char ) * WC_SHA3_256_DIGEST_SIZE );
-      memcpy( onion_service->current_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    } else {
-      ESP_LOGE( MINITOR_TAG, "Storing previous sub cred" );
-      onion_service->previous_sub_credential = malloc( sizeof( unsigned char ) * WC_SHA3_256_DIGEST_SIZE );
-      memcpy( onion_service->previous_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    }
-
-    ESP_LOGE( MINITOR_TAG, "Encrypting second plaintext, length %d", reusable_text_length );
-
-    // encrypt second layer plaintext
-    if ( (
-      reusable_text_length = d_encrypt_descriptor_plaintext(
-        &reusable_ciphertext,
-        reusable_plaintext,
-        reusable_text_length,
-        blinded_pub_key,
-        ED25519_PUB_KEY_SIZE,
-        "hsdir-encrypted-data",
-        strlen( "hsdir-encrypted-data" ),
-        reusable_sha3_sum, revision_counter )
-      ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
-#endif
-
-      return NULL;
-    }
-
-    free( reusable_plaintext );
-
-    ESP_LOGE( MINITOR_TAG, "Generating first plaintext, length %d", reusable_text_length );
-    // create first layer plaintext
-    if ( ( reusable_text_length = d_generate_first_plaintext( &reusable_plaintext, reusable_ciphertext, reusable_text_length ) ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
-#endif
-
-      return NULL;
-    }
-
-    free( reusable_ciphertext );
-
-    ESP_LOGE( MINITOR_TAG, "Encrypting first plaintext, length %d", reusable_text_length );
-
-    // encrypt first layer plaintext
-    if ( (
-      reusable_text_length = d_encrypt_descriptor_plaintext(
-        &reusable_ciphertext,
-        reusable_plaintext,
-        reusable_text_length,
-        blinded_pub_key,
-        ED25519_PUB_KEY_SIZE,
-        "hsdir-superencrypted-data",
-        strlen( "hsdir-superencrypted-data" ),
-        reusable_sha3_sum, revision_counter )
-      ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
-#endif
-
-      return NULL;
-    }
-
-    free( reusable_plaintext );
-
-    ESP_LOGE( MINITOR_TAG, "Generating outer plaintext, length %d", reusable_text_length );
-
-    // create outer descriptor wrapper
-    if ( ( reusable_text_length = d_generate_outer_descriptor( &reusable_plaintext, reusable_ciphertext, reusable_text_length, &descriptor_signing_key, valid_after, &blinded_key, revision_counter ) ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
-#endif
-
-      return NULL;
-    }
-
-    free( reusable_ciphertext );
-
-    ESP_LOGE( MINITOR_TAG, "Sending descriptor length: %d", reusable_text_length );
-
-    // send outer descriptor wrapper to the correct HSDIR nodes
-    if ( d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, previous_shared_rand, hsdir_spread_store, i ) ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send descriptor to hsdir hosts" );
-#endif
-
-      return NULL;
-    }
-
-    free( reusable_plaintext );
-
-    time_period--;
-    memcpy( shared_rand, previous_shared_rand, 32 );
   }
 
   // create a task to block on the rx_queue

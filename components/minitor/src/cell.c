@@ -196,7 +196,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     }
 
     db_relay = relay_list->head;
-    wc_InitSha( &tmp_sha );
+    //wc_InitSha( &tmp_sha );
 
     for ( i = 0; i < relay_list->built_length; i++ ) {
       wolf_succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_backward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
@@ -218,7 +218,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         wc_ShaGetHash( &tmp_sha, tmp_digest );
 
         if ( memcmp( tmp_digest, *packed_cell + 10, 4 ) == 0 ) {
-          wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
+          //wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
           wc_ShaCopy( &tmp_sha, &db_relay->relay_crypto->running_sha_backward );
           fully_recognized = 1;
           break;
