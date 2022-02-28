@@ -64,6 +64,9 @@ extern SemaphoreHandle_t used_guards_mutex;
 extern DoublyLinkedOnionCircuitList standby_circuits;
 extern SemaphoreHandle_t standby_circuits_mutex;
 
+extern DoublyLinkedOnionCircuitList standby_rend_circuits;
+extern SemaphoreHandle_t standby_rend_circuits_mutex;
+
 void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
 
 #endif

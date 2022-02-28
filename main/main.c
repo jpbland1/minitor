@@ -28,11 +28,19 @@
 
 static const char* TAG = "MAIN";
 
+/*
 #define SPI_DMA_CHAN 1
 #define PIN_NUM_MISO 4
 #define PIN_NUM_MOSI 15
 #define PIN_NUM_CLK  14
 #define PIN_NUM_CS   13
+*/
+
+#define SPI_DMA_CHAN 1
+#define PIN_NUM_MISO 19
+#define PIN_NUM_MOSI 23
+#define PIN_NUM_CLK  18
+#define PIN_NUM_CS   4
 
 /* An HTTP GET handler */
 static esp_err_t hello_get_handler(httpd_req_t *req)

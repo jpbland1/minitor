@@ -381,7 +381,8 @@ void v_handle_local( void* pv_parameters ) {
   }
 }
 
-int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell ) {
+int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell )
+{
   int i;
   int wolf_succ;
   DoublyLinkedOnionCircuit* db_intro_circuit;
@@ -392,9 +393,11 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   DoublyLinkedRendezvousCookie* db_rendezvous_cookie;
   DoublyLinkedOnionCircuit* db_rend_circuit;
   OnionRelay* rend_relay;
+  HsCrypto* hs_crypto;
   unsigned char auth_input_mac[MAC_LEN];
 
-  if ( onion_service->rendezvous_cookies.length > 0 ) {
+  if ( onion_service->rendezvous_cookies.length > 0 )
+  {
     return -1;
   }
 
@@ -402,15 +405,18 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   db_intro_circuit = onion_service->intro_circuits.head;
 
-  for ( i = 0; i < onion_service->intro_circuits.length; i++ ) {
-    if ( db_intro_circuit->circuit.circ_id == unpacked_cell->circ_id ) {
+  for ( i = 0; i < onion_service->intro_circuits.length; i++ )
+  {
+    if ( db_intro_circuit->circuit.circ_id == unpacked_cell->circ_id )
+    {
       break;
     }
 
     db_intro_circuit = db_intro_circuit->next;
   }
 
-  if ( db_intro_circuit == NULL ) {
+  if ( db_intro_circuit == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to find the circuit for this RELAY_COMMAND_INTRODUCE2" );
 #endif
@@ -418,7 +424,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_type != EDSHA3 ) {
+  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_type != EDSHA3 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key type for RELAY_COMMAND_INTRODUCE2 was not EDSHA3" );
 #endif
@@ -426,7 +433,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length != 32 ) {
+  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length != 32 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key length for RELAY_COMMAND_INTRODUCE2 was not 32" );
 #endif
@@ -434,7 +442,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  if ( memcmp( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, db_intro_circuit->circuit.intro_crypto->auth_key.p, 32 ) != 0 ) {
+  if ( memcmp( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, db_intro_circuit->circuit.intro_crypto->auth_key.p, 32 ) != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key for RELAY_COMMAND_INTRODUCE2 does not match" );
 #endif
@@ -446,7 +455,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   wolf_succ = wc_curve25519_import_public_ex( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, PK_PUBKEY_LEN, &client_handshake_key, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 ) {
+  if ( wolf_succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to import client public key, error code %d", wolf_succ );
 #endif
@@ -455,7 +465,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   }
 
   // verify and decrypt
-  if ( d_verify_and_decrypt_introduce_2( onion_service, unpacked_cell, &db_intro_circuit->circuit, &client_handshake_key ) < 0 ) {
+  if ( d_verify_and_decrypt_introduce_2( onion_service, unpacked_cell, &db_intro_circuit->circuit, &client_handshake_key ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to verify and decrypt RELAY_COMMAND_INTRODUCE2" );
 #endif
@@ -464,7 +475,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   }
 
   // unpack the decrypted secction
-  if ( d_unpack_introduce_2_data( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, &unpacked_introduce_data ) < 0 ) {
+  if ( d_unpack_introduce_2_data( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, &unpacked_introduce_data ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to unpack RELAY_COMMAND_INTRODUCE2 decrypted data" );
 #endif
@@ -476,8 +488,10 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   ESP_LOGE( MINITOR_TAG, "cookie count %d", onion_service->rendezvous_cookies.length );
 
-  for ( i = 0; i < onion_service->rendezvous_cookies.length; i++ ) {
-    if ( memcmp( db_rendezvous_cookie->rendezvous_cookie, unpacked_introduce_data.rendezvous_cookie, 20 ) == 0 ) {
+  for ( i = 0; i < onion_service->rendezvous_cookies.length; i++ )
+  {
+    if ( memcmp( db_rendezvous_cookie->rendezvous_cookie, unpacked_introduce_data.rendezvous_cookie, 20 ) == 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Got a replay, silently dropping" );
 #endif
@@ -502,7 +516,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   wc_FreeRng( &rng );
 
-  if ( wolf_succ != 0 ) {
+  if ( wolf_succ != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to make hs_handshake_key, error code %d", wolf_succ );
 #endif
@@ -510,11 +525,10 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-  db_rend_circuit->next = NULL;
-  db_rend_circuit->previous = NULL;
+  hs_crypto = malloc( sizeof( HsCrypto ) );
 
-  if ( d_hs_ntor_handshake_finish( unpacked_cell, &db_intro_circuit->circuit, &hs_handshake_key, &client_handshake_key, &db_rend_circuit->circuit, auth_input_mac ) < 0 ) {
+  if ( d_hs_ntor_handshake_finish( unpacked_cell, &db_intro_circuit->circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
 #endif
@@ -529,8 +543,10 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   memcpy( rend_relay->ntor_onion_key, unpacked_introduce_data.onion_key, 32 );
 
-  for ( i = 0; i < unpacked_introduce_data.specifier_count; i++ ) {
-    if ( unpacked_introduce_data.link_specifiers[i]->type == IPv4Link ) {
+  for ( i = 0; i < unpacked_introduce_data.specifier_count; i++ )
+  {
+    if ( unpacked_introduce_data.link_specifiers[i]->type == IPv4Link )
+    {
       // comes in big endian, lwip wants it little endian
       rend_relay->address |= (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[0];
       rend_relay->address |= ( (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[1] ) << 8;
@@ -539,23 +555,88 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
       rend_relay->or_port |= ( (unsigned short)unpacked_introduce_data.link_specifiers[i]->specifier[4] ) << 8;
       rend_relay->or_port |= (unsigned short)unpacked_introduce_data.link_specifiers[i]->specifier[5];
-    } else if ( unpacked_introduce_data.link_specifiers[i]->type == LEGACYLink ) {
+    }
+    else if ( unpacked_introduce_data.link_specifiers[i]->type == LEGACYLink )
+    {
       memcpy( rend_relay->identity, unpacked_introduce_data.link_specifiers[i]->specifier, ID_LENGTH );
     }
   }
 
-  if ( d_build_onion_circuit_to( &db_rend_circuit->circuit, 3, rend_relay ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to build the rendezvous circuit" );
-#endif
+  // BEGIN mutex for standby circuits
+  xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
 
-    return -1;
+  db_rend_circuit = standby_rend_circuits.head;
+
+  for ( i = 0; i < standby_rend_circuits.length; i++ )
+  {
+    if ( memcmp( db_rend_circuit->circuit.relay_list.head->relay->identity, rend_relay->identity, ID_LENGTH ) != 0 )
+    {
+      if ( i == 0 )
+      {
+        standby_rend_circuits.head = db_rend_circuit->next;
+      }
+
+      if ( i == standby_rend_circuits.length - 1 )
+      {
+        standby_rend_circuits.tail = db_rend_circuit->previous;
+      }
+
+      if ( db_rend_circuit->next != NULL )
+      {
+        db_rend_circuit->next->previous = db_rend_circuit->previous;
+      }
+
+      if ( db_rend_circuit->previous != NULL )
+      {
+        db_rend_circuit->previous->next = db_rend_circuit->next;
+      }
+
+      standby_rend_circuits.length--;
+      break;
+    }
+
+    db_rend_circuit = db_rend_circuit->next;
   }
 
+  xSemaphoreGive( standby_rend_circuits_mutex );
+  // END mutex for standby circuits
+
+  if ( db_rend_circuit == NULL )
+  {
+    db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+
+    if ( d_build_onion_circuit_to( &db_rend_circuit->circuit, 3, rend_relay ) < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to build the rendezvous circuit" );
+#endif
+
+      return -1;
+    }
+  }
+  else
+  {
+    // stop the handle task so we can use the ssl object it's attached to
+    vTaskDelete( db_rend_circuit->circuit.task_handle );
+
+    if ( d_extend_onion_circuit_to( &db_rend_circuit->circuit, 2, rend_relay ) < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to extend to the rendezvous circuit" );
+#endif
+
+      return -1;
+    }
+
+    ESP_LOGE( MINITOR_TAG, "post rend extend" );
+  }
+
+  db_rend_circuit->circuit.hs_crypto = hs_crypto;
   db_rend_circuit->circuit.status = CIRCUIT_RENDEZVOUS;
   db_rend_circuit->circuit.rx_queue = onion_service->rx_queue;
 
-  if ( d_router_join_rendezvous( &db_rend_circuit->circuit, unpacked_introduce_data.rendezvous_cookie, hs_handshake_key.p.point, auth_input_mac ) < 0 ) {
+  if ( d_router_join_rendezvous( &db_rend_circuit->circuit, unpacked_introduce_data.rendezvous_cookie, hs_handshake_key.p.point, auth_input_mac ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to join the rendezvous relay" );
 #endif
@@ -757,7 +838,7 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
   return 0;
 }
 
-int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, OnionCircuit* rend_circuit, unsigned char* auth_input_mac ) {
+int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, HsCrypto* hs_crypto, unsigned char* auth_input_mac ) {
   int i;
   unsigned int idx;
   int wolf_succ;
@@ -871,20 +952,18 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
     ESP_LOGE( MINITOR_TAG, "%.2x", expanded_keys[i] );
   }
 
-  rend_circuit->hs_crypto = malloc( sizeof( HsCrypto ) );
+  wc_InitSha3_256( &hs_crypto->hs_running_sha_forward, NULL, INVALID_DEVID );
+  wc_InitSha3_256( &hs_crypto->hs_running_sha_backward, NULL, INVALID_DEVID );
+  wc_AesInit( &hs_crypto->hs_aes_forward, NULL, INVALID_DEVID );
+  wc_AesInit( &hs_crypto->hs_aes_backward, NULL, INVALID_DEVID );
 
-  wc_InitSha3_256( &rend_circuit->hs_crypto->hs_running_sha_forward, NULL, INVALID_DEVID );
-  wc_InitSha3_256( &rend_circuit->hs_crypto->hs_running_sha_backward, NULL, INVALID_DEVID );
-  wc_AesInit( &rend_circuit->hs_crypto->hs_aes_forward, NULL, INVALID_DEVID );
-  wc_AesInit( &rend_circuit->hs_crypto->hs_aes_backward, NULL, INVALID_DEVID );
+  wc_Sha3_256_Update( &hs_crypto->hs_running_sha_forward, expanded_keys, WC_SHA3_256_DIGEST_SIZE );
 
-  wc_Sha3_256_Update( &rend_circuit->hs_crypto->hs_running_sha_forward, expanded_keys, WC_SHA3_256_DIGEST_SIZE );
+  wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, expanded_keys + WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256_DIGEST_SIZE );
 
-  wc_Sha3_256_Update( &rend_circuit->hs_crypto->hs_running_sha_backward, expanded_keys + WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256_DIGEST_SIZE );
+  wc_AesSetKeyDirect( &hs_crypto->hs_aes_forward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ), AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
 
-  wc_AesSetKeyDirect( &rend_circuit->hs_crypto->hs_aes_forward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ), AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
-
-  wc_AesSetKeyDirect( &rend_circuit->hs_crypto->hs_aes_backward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ) + AES_256_KEY_SIZE, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+  wc_AesSetKeyDirect( &hs_crypto->hs_aes_backward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ) + AES_256_KEY_SIZE, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
 
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_Shake256_Free( &reusable_shake );
@@ -1166,7 +1245,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
   DoublyLinkedOnionRelayList* target_relays;
   OnionRelay* target_relay;
   OnionRelay* start_node;
-  OnionRelay* tmp_start_node;
   DoublyLinkedOnionRelay* db_target_relay;
   DoublyLinkedOnionRelay* tmp_relay_node;
   OnionCircuit publish_circuit = {
@@ -1255,13 +1333,12 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
       if ( start_node != NULL )
       {
-        if ( d_build_onion_circuit_to( &publish_circuit, 1, tmp_start_node ) < 0 )
+        if ( d_build_onion_circuit_to( &publish_circuit, 1, start_node ) < 0 )
         {
 #ifdef DEBUG_MINITOR
           ESP_LOGE( MINITOR_TAG, "Failed to build publish circuit to start node" );
 #endif
           publish_circuit.ssl = NULL;
-          start_node = NULL;
         }
         else if ( d_extend_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 )
         {
@@ -1279,8 +1356,9 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
           }
 
           publish_circuit.ssl = NULL;
-          start_node = NULL;
         }
+
+        start_node = NULL;
       }
       else if ( d_build_onion_circuit_to( &publish_circuit, 3, target_relay ) < 0 )
       {

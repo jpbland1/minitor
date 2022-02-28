@@ -72,6 +72,81 @@ static unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size 
   return 0;
 }
 
+int d_setup_init_rend_circuits( int circuit_count )
+{
+  int res = 0;
+
+  int i;
+  DoublyLinkedOnionCircuit* linked_circuit;
+  DoublyLinkedOnionCircuit* standby_node;
+  OnionRelay* unique_relay;
+
+  for ( i = 0; i < circuit_count; i++ )
+  {
+    linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+    linked_circuit->circuit.task_handle = NULL;
+
+    do
+    {
+      unique_relay = px_get_random_relay_standalone();
+
+      standby_node = standby_rend_circuits.head;
+
+      while ( standby_node != NULL )
+      {
+        if ( memcmp( standby_node->circuit.relay_list.tail->relay->identity, unique_relay->identity, ID_LENGTH ) == 0 )
+        {
+          free( unique_relay );
+          unique_relay = NULL;
+          break;
+        }
+
+        standby_node = standby_node->next;
+      }
+    } while ( unique_relay == NULL );
+
+    switch ( d_build_onion_circuit_to( &linked_circuit->circuit, 1, unique_relay ) )
+    {
+      case -1:
+        i--;
+        free( linked_circuit );
+        break;
+      case -2:
+        i = circuit_count;
+        free( linked_circuit );
+        break;
+      case 0:
+        linked_circuit->circuit.status = CIRCUIT_STANDBY;
+
+        // spawn a task to block on the tls buffer and put the data into the rx_queue
+        xTaskCreatePinnedToCore(
+          v_handle_circuit,
+          "HANDLE_CIRCUIT",
+          4096,
+          (void*)(&linked_circuit->circuit),
+          6,
+          &linked_circuit->circuit.task_handle,
+          tskNO_AFFINITY
+        );
+
+        // BEGIN mutex for standby circuits
+        xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+        v_add_circuit_to_list( linked_circuit, &standby_rend_circuits );
+
+        xSemaphoreGive( standby_rend_circuits_mutex );
+        // END mutex for standby circuits
+
+        res++;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return res;
+}
+
 // create three hop circuits that can quickly be turned into introduction points
 int d_setup_init_circuits( int circuit_count ) {
   int res = 0;

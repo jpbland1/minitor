@@ -6,6 +6,7 @@
 #include "./cell.h"
 
 int d_setup_init_circuits( int circuit_count );
+int d_setup_init_rend_circuits( int circuit_count );
 int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length );
 int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );
 int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay );

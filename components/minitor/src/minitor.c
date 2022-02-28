@@ -50,6 +50,12 @@ static void v_circuit_keepalive( void* pv_parameters ) {
 
     xSemaphoreGive( standby_circuits_mutex );
 
+    xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+    v_keep_circuitlist_alive( &standby_rend_circuits );
+
+    xSemaphoreGive( standby_rend_circuits_mutex );
+
 /*
     xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
@@ -75,18 +81,21 @@ static void v_circuit_keepalive( void* pv_parameters ) {
 }
 
 // intialize tor
-int v_minitor_INIT() {
+int v_minitor_INIT()
+{
   circ_id_mutex = xSemaphoreCreateMutex();
   network_consensus_mutex = xSemaphoreCreateMutex();
   suitable_relays_mutex = xSemaphoreCreateMutex();
   used_guards_mutex = xSemaphoreCreateMutex();
   hsdir_relays_mutex = xSemaphoreCreateMutex();
   standby_circuits_mutex = xSemaphoreCreateMutex();
+  standby_rend_circuits_mutex = xSemaphoreCreateMutex();
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
 
-  if ( d_initialize_database() < 0 ) {
+  if ( d_initialize_database() < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't setup minitor sqlite3 database" );
 #endif
@@ -94,7 +103,8 @@ int v_minitor_INIT() {
     return -1;
   }
 
-  if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL ) {
+  if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't setup wolfssl context" );
 #endif
@@ -103,7 +113,8 @@ int v_minitor_INIT() {
   }
 
   // fetch network consensus
-  if ( d_fetch_consensus_info() < 0 ) {
+  if ( d_fetch_consensus_info() < 0 )
+  {
     return -1;
   }
 
@@ -121,7 +132,8 @@ int v_minitor_INIT() {
 }
 
 // ONION SERVICES
-OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory ) {
+OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory )
+{
   int i;
   DoublyLinkedOnionCircuit* node;
   OnionService* onion_service = malloc( sizeof( OnionService ) );
@@ -132,7 +144,8 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   onion_service->exit_port = exit_port;
   onion_service->rx_queue = xQueueCreate( 5, sizeof( OnionMessage* ) );
 
-  if ( d_generate_hs_keys( onion_service, onion_service_directory ) < 0 ) {
+  if ( d_generate_hs_keys( onion_service, onion_service_directory ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to generate hs keys" );
 #endif
@@ -141,7 +154,8 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   }
 
   // setup starting circuits
-  if ( d_setup_init_circuits( 3 ) < 3 ) {
+  if ( d_setup_init_circuits( 3 ) < 3 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to setup init circuits" );
 #endif
@@ -153,7 +167,8 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   // BEGIN mutex
   xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
 
-  if ( standby_circuits.length < 3 ) {
+  if ( standby_circuits.length < 3 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Not enough standby circuits to register intro points" );
 #endif
@@ -170,7 +185,8 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   onion_service->intro_circuits.tail = standby_circuits.head->next->next;
 
   // if there is a fourth standby circuit, set its previous to NULL
-  if ( standby_circuits.length > 3 ) {
+  if ( standby_circuits.length > 3 )
+  {
     standby_circuits.head->next->next->next->previous = NULL;
   }
 
@@ -189,7 +205,8 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   // send establish intro commands to our three circuits
   node = onion_service->intro_circuits.head;
 
-  for ( i = 0; i < onion_service->intro_circuits.length; i++ ) {
+  for ( i = 0; i < onion_service->intro_circuits.length; i++ )
+  {
     node->circuit.rx_queue = onion_service->rx_queue;
 
     if ( d_router_establish_intro( &node->circuit ) < 0 ) {
@@ -213,6 +230,17 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
 
     return NULL;
   }
+
+  if ( d_setup_init_rend_circuits( 2 ) < 2 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to setup init rend circuits" );
+#endif
+
+    return NULL;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "starting HANDLE_HS" );
 
   // create a task to block on the rx_queue
   xTaskCreatePinnedToCore(
