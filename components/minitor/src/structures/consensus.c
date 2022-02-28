@@ -33,14 +33,21 @@ DoublyLinkedOnionRelayList hsdir_relays = {
 SemaphoreHandle_t hsdir_relays_mutex;
 
 // add a linked onion relay to a doubly linked list of onion relays
-void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list ) {
+void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list )
+{
+  node->next = NULL;
+  node->previous = NULL;
+
   // if our length is 0, just set this node as the head and tail
-  if ( list->length == 0 ) {
+  if ( list->length == 0 )
+  {
     list->head = node;
     list->tail = node;
   // otherwise set the new node's previous to the current tail, set the current tail's
   // next to the new node and set the new node as the new tail
-  } else {
+  }
+  else
+  {
     node->previous = list->tail;
     list->tail->next = node;
     list->tail = node;
@@ -50,16 +57,19 @@ void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayLi
   list->length++;
 }
 
-void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list ) {
+void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list )
+{
   DoublyLinkedOnionRelay* tmp_node;
 
-  if ( list->length == 0 ) {
+  if ( list->length == 0 )
+  {
     return;
   }
 
   tmp_node = list->tail;
 
-  if ( list->length > 1 ) {
+  if ( list->length > 1 )
+  {
     list->tail->previous->next = NULL;
   }
 

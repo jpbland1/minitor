@@ -77,13 +77,14 @@ int d_setup_init_circuits( int circuit_count ) {
   int res = 0;
 
   int i;
-  DoublyLinkedOnionCircuit* node;
+  DoublyLinkedOnionCircuit* linked_circuit;
   DoublyLinkedOnionCircuit* standby_node;
   OnionRelay* unique_final_relay;
 
-  for ( i = 0; i < circuit_count; i++ ) {
-    node = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-    node->circuit.task_handle = NULL;
+  for ( i = 0; i < circuit_count; i++ )
+  {
+    linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+    linked_circuit->circuit.task_handle = NULL;
 
     do
     {
@@ -95,8 +96,6 @@ int d_setup_init_circuits( int circuit_count ) {
       {
         if ( memcmp( standby_node->circuit.relay_list.tail->relay->identity, unique_final_relay->identity, ID_LENGTH ) == 0 )
         {
-          ESP_LOGE( MINITOR_TAG, "non-unique or port: %d", unique_final_relay->or_port );
-
           free( unique_final_relay );
           unique_final_relay = NULL;
           break;
@@ -106,35 +105,34 @@ int d_setup_init_circuits( int circuit_count ) {
       }
     } while ( unique_final_relay == NULL );
 
-    ESP_LOGE( MINITOR_TAG, "unique or port: %d", unique_final_relay->or_port );
-
-    switch ( d_build_onion_circuit_to( &node->circuit, 3, unique_final_relay ) ) {
+    switch ( d_build_onion_circuit_to( &linked_circuit->circuit, 3, unique_final_relay ) )
+    {
       case -1:
         i--;
-        free( node );
+        free( linked_circuit );
         break;
       case -2:
         i = circuit_count;
-        free( node );
+        free( linked_circuit );
         break;
       case 0:
-        node->circuit.status = CIRCUIT_STANDBY;
+        linked_circuit->circuit.status = CIRCUIT_STANDBY;
 
         // spawn a task to block on the tls buffer and put the data into the rx_queue
         xTaskCreatePinnedToCore(
           v_handle_circuit,
           "HANDLE_CIRCUIT",
           4096,
-          (void*)(&node->circuit),
+          (void*)(&linked_circuit->circuit),
           6,
-          &node->circuit.task_handle,
+          &linked_circuit->circuit.task_handle,
           tskNO_AFFINITY
         );
 
         // BEGIN mutex for standby circuits
         xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
 
-        v_add_circuit_to_list( node, &standby_circuits );
+        v_add_circuit_to_list( linked_circuit, &standby_circuits );
 
         xSemaphoreGive( standby_circuits_mutex );
         // END mutex for standby circuits
@@ -153,39 +151,27 @@ int d_setup_init_circuits( int circuit_count ) {
 int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length ) {
   int succ;
 
-  succ = d_prepare_random_onion_circuit( circuit, circuit_length, NULL );
-
-  if ( succ < 0 ) {
-    while ( circuit->relay_list.length ) {
-      v_pop_relay_from_list_back( &circuit->relay_list );
-    }
-
-    return succ;
+  if ( d_prepare_random_onion_circuit( circuit, circuit_length, NULL ) < 0 ) {
+    return -1;
   }
 
   return d_build_onion_circuit( circuit );
 }
 
-int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay ) {
+int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay )
+{
   int succ;
-  DoublyLinkedOnionRelay* node;
+  DoublyLinkedOnionRelay* db_relay;
 
-  succ = d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity );
-
-  if ( succ < 0 ) {
-    while ( circuit->relay_list.length ) {
-      v_pop_relay_from_list_back( &circuit->relay_list );
-    }
-
-    return succ;
+  if ( d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity ) < 0 )
+  {
+    return -1;
   }
 
-  node = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  node->previous = NULL;
-  node->next = NULL;
-  node->relay = destination_relay;
+  db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+  db_relay->relay = destination_relay;
 
-  v_add_relay_to_list( node, &circuit->relay_list );
+  v_add_relay_to_list( db_relay, &circuit->relay_list );
 
   return d_build_onion_circuit( circuit );
 }
@@ -201,8 +187,6 @@ int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionR
   }
 
   node = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  node->previous = NULL;
-  node->next = NULL;
   node->relay = destination_relay;
 
   v_add_relay_to_list( node, &circuit->relay_list );
@@ -234,7 +218,8 @@ int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionR
   return 0;
 }
 
-int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude ) {
+int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude )
+{
   // find 3 suitable relays from our directory information
   circuit->status = CIRCUIT_BUILDING;
   circuit->rx_queue = NULL;
@@ -253,63 +238,82 @@ int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, u
   return d_get_suitable_onion_relays( &circuit->relay_list, circuit_length, exclude );
 }
 
-int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, unsigned char* exclude ) {
+int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, unsigned char* exclude )
+{
   int i;
-  DoublyLinkedOnionRelay* tmp_node;
+  DoublyLinkedOnionRelay* db_relay;
 
-  for ( i = relay_list->length; i < desired_length; i++ ) {
-    tmp_node = malloc( sizeof( DoublyLinkedOnionRelay ) );
+  for ( i = relay_list->length; i < desired_length; i++ )
+  {
+    db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
 
-    tmp_node->next = NULL;
-    tmp_node->previous = NULL;
+    if ( i == 0 )
+    {
+      db_relay->relay = px_get_random_relay_non_guard( exclude );
 
-    if ( i == 0 ) {
-      if ( ( tmp_node->relay = px_get_random_relay_non_guard( exclude ) ) == NULL ) {
+      if ( db_relay->relay == NULL )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to get guard relay" );
 #endif
 
-        free( tmp_node );
+        free( db_relay );
 
         return -1;
       }
 
-      if ( d_mark_relay_as_guard( tmp_node->relay->identity ) < 0 ) {
+      if ( d_mark_relay_as_guard( db_relay->relay->identity ) < 0 )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to mark guard relay" );
 #endif
 
-        free( tmp_node->relay );
-        free( tmp_node );
+        free( db_relay->relay );
+        free( db_relay );
 
-        return -1;
+        goto cleanup;
       }
-    } else {
-      if ( ( tmp_node->relay = px_get_random_relay( relay_list, exclude ) ) == NULL ) {
+    }
+    else
+    {
+      db_relay->relay = px_get_random_relay( relay_list, exclude );
+
+      if ( db_relay->relay == NULL )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to get mid relay" );
 #endif
 
-        free( tmp_node );
+        free( db_relay );
 
-        return -1;
+        goto cleanup;
       }
     }
 
-    v_add_relay_to_list( tmp_node, relay_list );
+    v_add_relay_to_list( db_relay, relay_list );
   }
 
   return 0;
+
+cleanup:
+  while ( relay_list->length > 0 )
+  {
+    v_pop_relay_from_list_back( relay_list );
+  }
+
+  return -1;
 }
 
-int d_build_onion_circuit( OnionCircuit* circuit ) {
+int d_build_onion_circuit( OnionCircuit* circuit )
+{
   int i;
   int sock_fd;
   struct sockaddr_in dest_addr;
   WOLFSSL* ssl;
 
   // get the relay's ntor onion keys
-  if ( d_fetch_descriptor_info( circuit ) < 0 ) {
+  if ( d_fetch_descriptor_info( circuit ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
 #endif
@@ -324,7 +328,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
 
   sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
 
-  if ( sock_fd < 0 ) {
+  if ( sock_fd < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to create socket" );
 #endif
@@ -332,7 +337,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
     goto clean_circuit;
   }
 
-  if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 ) {
+  if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to connect socket, errno: %d", errno );
 #endif
@@ -342,7 +348,16 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
     goto clean_circuit;
   }
 
-  if ( ( ssl = wolfSSL_new( xMinitorWolfSSL_Context ) ) == NULL ) {
+  ESP_LOGE( MINITOR_TAG, "xMinitorWolfSSL_Context: %p", xMinitorWolfSSL_Context );
+
+  while ( xMinitorWolfSSL_Context == NULL )
+  {
+    ESP_LOGE( MINITOR_TAG, "xMinitorWolfSSL_Context is null,not sure why" );
+    xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() );
+  }
+
+  if ( ( ssl = wolfSSL_new( xMinitorWolfSSL_Context ) ) == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
 #endif
@@ -356,7 +371,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
   wolfSSL_set_verify( ssl, SSL_VERIFY_PEER, d_ignore_ca_callback );
   wolfSSL_KeepArrays( ssl );
 
-  if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS ) {
+  if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to set ssl fd" );
 #endif
@@ -367,7 +383,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
     goto clean_ssl;
   }
 
-  if ( wolfSSL_connect( ssl ) != SSL_SUCCESS ) {
+  if ( wolfSSL_connect( ssl ) != SSL_SUCCESS )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to wolfssl_connect" );
 #endif
@@ -378,7 +395,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
   // attach the ssl object to the circuit
   circuit->ssl = ssl;
 
-  if ( d_router_handshake( circuit->ssl ) < 0 ) {
+  if ( d_router_handshake( circuit->ssl ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to handshake with first relay" );
 #endif
@@ -386,7 +404,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
     goto clean_ssl;
   }
 
-  if ( d_router_create2( circuit ) < 0 ) {
+  if ( d_router_create2( circuit ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to CREATE2 with first relay" );
 #endif
@@ -396,7 +415,8 @@ int d_build_onion_circuit( OnionCircuit* circuit ) {
 
   circuit->relay_list.built_length++;
 
-  for ( i = 1; i < circuit->relay_list.length; i++ ) {
+  for ( i = 1; i < circuit->relay_list.length; i++ )
+  {
     // make an extend cell and send it to the hop
     if ( d_router_extend2( circuit, i ) < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -421,7 +441,8 @@ clean_ssl:
 clean_circuit:
   d_unmark_relay_as_guard( circuit->relay_list.head->relay->identity );
 
-  while ( circuit->relay_list.length ) {
+  while ( circuit->relay_list.length )
+  {
     v_pop_relay_from_list_back( &circuit->relay_list );
   }
 

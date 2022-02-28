@@ -120,10 +120,7 @@ static int d_download_consensus() {
       break;
     }
 
-#ifdef DEBUG_MINITOR
     rx_total += rx_length;
-    ESP_LOGE( MINITOR_TAG, "rx_total: %d", rx_total );
-#endif
 
     i = 0;
 
@@ -474,10 +471,6 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
           ret = -1;
           goto finish;
         }
-
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "relay created" );
-#endif
       }
 
       i = ( i + 1 ) % 10;
@@ -552,10 +545,6 @@ int d_fetch_consensus_info() {
       ret = -1;
       goto finish;
     }
-
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "finished recving" );
-#endif
   }
 
   // BEGIN mutex for the network consensus
