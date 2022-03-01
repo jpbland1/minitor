@@ -79,9 +79,10 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLi
   int rx_limit;
   unsigned char* packed_cell;
 
-  rx_limit = d_recv_packed_cell( ssl, &packed_cell, circ_id_length, relay_list, rend_circuit );
+  rx_limit = d_recv_packed_cell( ssl, &packed_cell, circ_id_length, relay_list, rend_circuit, &unpacked_cell->recv_index );
 
-  if ( rx_limit < 0 ) {
+  if ( rx_limit < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't recv packed cell" );
 #endif
@@ -89,7 +90,8 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLi
     return -1;
   }
 
-  if ( sha != NULL ) {
+  if ( sha != NULL )
+  {
     wc_Sha256Update( sha, packed_cell, rx_limit );
   }
 
@@ -97,7 +99,8 @@ int d_recv_cell( WOLFSSL* ssl, Cell* unpacked_cell, int circ_id_length, DoublyLi
   return unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
 }
 
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, OnionCircuit* rend_circuit ) {
+int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, OnionCircuit* rend_circuit, int* recv_index )
+{
   int i;
   int wolf_succ;
   int rx_length;
@@ -122,18 +125,23 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
   // we'll realloc it later
   *packed_cell = malloc( sizeof( unsigned char ) * header_length );
 
-  while ( 1 ) {
+  while ( 1 )
+  {
     // read in at most rx_length, rx_length will be either the length of
     // the cell or the length of the header
 
-    if ( rx_limit - rx_length_total > CELL_LEN ) {
+    if ( rx_limit - rx_length_total > CELL_LEN )
+    {
       rx_length = wolfSSL_recv( ssl, rx_buffer, CELL_LEN, 0 );
-    } else {
+    }
+    else
+    {
       rx_length = wolfSSL_recv( ssl, rx_buffer, rx_limit - rx_length_total, 0 );
     }
 
     // if rx_length is 0 then we've hit an error and should return -1
-    if ( rx_length <= 0 ) {
+    if ( rx_length <= 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to wolfSSL_recv rx_length: %d, error code: %d", rx_length, wolfSSL_get_error( ssl, rx_length ) );
 #endif
@@ -154,8 +162,10 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // if the total number of bytes we've read in is the fixed header length,
     // check for a versions variable length cell, if we have one, extend the
     // header length to include the length field
-    if ( rx_length_total == circ_id_length + 1 ) {
-      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING ) {
+    if ( rx_length_total == circ_id_length + 1 )
+    {
+      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING )
+      {
         header_length = circ_id_length + 3;
         rx_limit = header_length;
         *packed_cell = realloc( *packed_cell, header_length );
@@ -164,13 +174,17 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
     // if we've reached the header we're ready to realloc and move the rx_limit
     // to the length of the cell
-    if ( rx_length_total == header_length ) {
+    if ( rx_length_total == header_length )
+    {
       // set the rx_limit to the length of the cell
-      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING ) {
+      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING )
+      {
         length = ( (unsigned short)(*packed_cell)[circ_id_length + 1] ) << 8;
         length |= (unsigned short)(*packed_cell)[circ_id_length + 2];
         rx_limit = header_length + length;
-      } else {
+      }
+      else
+      {
         rx_limit = CELL_LEN;
       }
 
@@ -181,13 +195,16 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // if we've hit the rx_limit then we're done recv-ing the packed cell,
     // the rx_limit will increase after we've recv-ed the header so we
     // won't hit this prematurely
-    if ( rx_length_total == rx_limit ) {
+    if ( rx_length_total == rx_limit )
+    {
       break;
     }
   }
 
-  if ( (*packed_cell)[circ_id_length] == RELAY ) {
-    if ( relay_list == NULL ) {
+  if ( (*packed_cell)[circ_id_length] == RELAY )
+  {
+    if ( relay_list == NULL )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
 #endif
@@ -198,10 +215,12 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     db_relay = relay_list->head;
     //wc_InitSha( &tmp_sha );
 
-    for ( i = 0; i < relay_list->built_length; i++ ) {
+    for ( i = 0; i < relay_list->built_length; i++ )
+    {
       wolf_succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_backward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
 
-      if ( wolf_succ < 0 ) {
+      if ( wolf_succ < 0 )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
 #endif
@@ -209,7 +228,8 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         return -1;
       }
 
-      if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 ) {
+      if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 )
+      {
         wc_ShaCopy( &db_relay->relay_crypto->running_sha_backward, &tmp_sha );
 
         wc_ShaUpdate( &tmp_sha, *packed_cell + 5, 5 );
@@ -217,7 +237,8 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         wc_ShaUpdate( &tmp_sha, *packed_cell + 14, PAYLOAD_LEN - 9 );
         wc_ShaGetHash( &tmp_sha, tmp_digest );
 
-        if ( memcmp( tmp_digest, *packed_cell + 10, 4 ) == 0 ) {
+        if ( memcmp( tmp_digest, *packed_cell + 10, 4 ) == 0 )
+        {
           //wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
           wc_ShaCopy( &tmp_sha, &db_relay->relay_crypto->running_sha_backward );
           fully_recognized = 1;
@@ -228,19 +249,26 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
       db_relay = db_relay->next;
     }
 
-    if ( !fully_recognized && rend_circuit == NULL ) {
+    // set the recv_index so we know which node in the circuit sent the cell
+    *recv_index = i;
+
+    if ( !fully_recognized && rend_circuit == NULL )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on circuit" );
 #endif
       wc_ShaFree( &tmp_sha );
 
       return -1;
-    } else if ( !fully_recognized && rend_circuit != NULL ) {
+    }
+    else if ( !fully_recognized && rend_circuit != NULL )
+    {
       ESP_LOGE( MINITOR_TAG, "Trying hs crypto" );
 
       wolf_succ = wc_AesCtrEncrypt( &rend_circuit->hs_crypto->hs_aes_forward, *packed_cell + 5, *packed_cell + 5, PAYLOAD_LEN );
 
-      if ( wolf_succ < 0 ) {
+      if ( wolf_succ < 0 )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
 #endif
@@ -248,7 +276,8 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         return -1;
       }
 
-      if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 ) {
+      if ( (*packed_cell)[6] == 0 && (*packed_cell)[7] == 0 )
+      {
         ESP_LOGE( MINITOR_TAG, "hs crypto recognized" );
 
         wc_Sha3_256_Copy( &rend_circuit->hs_crypto->hs_running_sha_forward, &tmp_sha3 );
@@ -258,12 +287,15 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         wc_Sha3_256_Update( &tmp_sha3, *packed_cell + 14, PAYLOAD_LEN - 9 );
         wc_Sha3_256_GetHash( &tmp_sha3, tmp_sha3_digest );
 
-        if ( memcmp( tmp_sha3_digest, *packed_cell + 10, 4 ) == 0 ) {
+        if ( memcmp( tmp_sha3_digest, *packed_cell + 10, 4 ) == 0 )
+        {
           ESP_LOGE( MINITOR_TAG, "hs crypto digest match" );
 
           wc_Sha3_256_Free( &rend_circuit->hs_crypto->hs_running_sha_forward );
           wc_Sha3_256_Copy( &tmp_sha3, &rend_circuit->hs_crypto->hs_running_sha_forward );
-        } else {
+        }
+        else
+        {
 #ifdef DEBUG_MINITOR
           ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on hidden service" );
 #endif
@@ -271,7 +303,9 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
           return -1;
         }
-      } else {
+      }
+      else
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Cell recognized not set to 0" );
 #endif

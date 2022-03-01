@@ -157,9 +157,33 @@ int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cel
 
             return -1;
           }
+
           break;
         case RELAY_END:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_END!" );
+
+          if ( d_onion_service_handle_relay_end( onion_service, unpacked_cell ) < 0 )
+          {
+#ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_END cell" );
+#endif
+
+            return -1;
+          }
+
+          break;
+        case RELAY_TRUNCATED:
+          ESP_LOGE( MINITOR_TAG, "Got a RELAY_TRUNCATED!" );
+
+          if ( d_onion_service_handle_relay_truncated( onion_service, unpacked_cell ) < 0 )
+          {
+#ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_END cell" );
+#endif
+
+            return -1;
+          }
+
           break;
         case RELAY_DROP:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_DROP!" );
@@ -230,7 +254,8 @@ int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpack
   return 0;
 }
 
-int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpacked_cell ) {
+int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpacked_cell )
+{
   int i;
   int err;
   struct sockaddr_in dest_addr;
@@ -241,15 +266,18 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
 
   db_rend_circuit = onion_service->rend_circuits.head;
 
-  for ( i = 0; i < onion_service->rend_circuits.length; i++ ) {
-    if ( db_rend_circuit->circuit.circ_id == unpacked_cell->circ_id ) {
+  for ( i = 0; i < onion_service->rend_circuits.length; i++ )
+  {
+    if ( db_rend_circuit->circuit.circ_id == unpacked_cell->circ_id )
+    {
       break;
     }
 
     db_rend_circuit = db_rend_circuit->next;
   }
 
-  if ( db_rend_circuit == NULL ) {
+  if ( db_rend_circuit == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't find the associated rend circuit" );
 #endif
@@ -257,7 +285,8 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  if ( ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != onion_service->exit_port ) {
+  if ( ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != onion_service->exit_port )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "request was for the wrong port" );
 #endif
@@ -278,20 +307,27 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
 
   db_local_stream->sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
 
-  if ( db_local_stream->sock_fd < 0 ) {
+  if ( db_local_stream->sock_fd < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't create a socket to the local port, err: %d, errno: %d", db_local_stream->sock_fd, errno );
 #endif
+
+    free( db_local_stream );
 
     return -1;
   }
 
   err = connect( db_local_stream->sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
 
-  if ( err != 0 ) {
+  if ( err != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't connect to the local port" );
 #endif
+
+    close( db_local_stream->sock_fd );
+    free( db_local_stream );
 
     return -1;
   }
@@ -302,7 +338,7 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
     4096,
     (void*)(db_local_stream),
     6,
-    db_rend_circuit->circuit.task_handle,
+    &db_local_stream->task_handle,
     tskNO_AFFINITY
   );
 
@@ -329,13 +365,202 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
 
   packed_cell = pack_and_free( &unpacked_connected_cell );
 
-  if ( d_send_packed_relay_cell_and_free( db_rend_circuit->circuit.ssl, packed_cell, &db_rend_circuit->circuit.relay_list, db_rend_circuit->circuit.hs_crypto ) < 0 ) {
+  if ( d_send_packed_relay_cell_and_free( db_rend_circuit->circuit.ssl, packed_cell, &db_rend_circuit->circuit.relay_list, db_rend_circuit->circuit.hs_crypto ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_CONNECTED" );
 #endif
 
     return -1;
   }
+
+  return 0;
+}
+
+int d_onion_service_handle_relay_end( OnionService* onion_service, Cell* unpacked_cell )
+{
+  int i;
+  DoublyLinkedLocalStream* db_local_stream;
+
+  db_local_stream = onion_service->local_streams.head;
+
+  for ( i = 0; i < onion_service->local_streams.length; i++ )
+  {
+    if ( db_local_stream->circ_id == unpacked_cell->circ_id && db_local_stream->stream_id == ( (PayloadRelay*)unpacked_cell->payload )->stream_id )
+    {
+      if ( i == 0 )
+      {
+        onion_service->local_streams.head = db_local_stream->next;
+      }
+
+      if ( i == onion_service->local_streams.length - 1 )
+      {
+        onion_service->local_streams.tail = db_local_stream->previous;
+      }
+
+      if ( db_local_stream->next != NULL )
+      {
+        db_local_stream->next->previous = db_local_stream->previous;
+      }
+
+      if ( db_local_stream->previous != NULL )
+      {
+        db_local_stream->previous->next = db_local_stream->next;
+      }
+
+      onion_service->local_streams.length--;
+
+      break;
+    }
+
+    db_local_stream = db_local_stream->next;
+  }
+
+  if ( db_local_stream == NULL )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't find the associated local_stream" );
+#endif
+
+    return -1;
+  }
+
+  //if ( db_local_stream->task_handle != NULL )
+  //{
+    //vTaskDelete( db_local_stream->task_handle );
+  //}
+
+  shutdown( db_local_stream->sock_fd, 0 );
+  close( db_local_stream->sock_fd );
+
+
+  free( db_local_stream );
+
+  return 0;
+}
+
+int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* unpacked_cell )
+{
+  int i;
+  DoublyLinkedLocalStream* db_local_stream;
+  DoublyLinkedLocalStream* next_db_local_stream;
+  DoublyLinkedOnionCircuit* db_rend_circuit;
+  DoublyLinkedOnionRelay* db_rend_relay;
+
+  db_local_stream = onion_service->local_streams.head;
+
+  while ( db_local_stream != NULL )
+  {
+    next_db_local_stream = db_local_stream->next;
+
+    if ( db_local_stream->circ_id == unpacked_cell->circ_id )
+    {
+      if ( onion_service->local_streams.head == db_local_stream )
+      {
+        onion_service->local_streams.head = db_local_stream->next;
+      }
+
+      if ( onion_service->local_streams.tail == db_local_stream )
+      {
+        onion_service->local_streams.tail = db_local_stream->previous;
+      }
+
+      if ( db_local_stream->next != NULL )
+      {
+        db_local_stream->next->previous = db_local_stream->previous;
+      }
+
+      if ( db_local_stream->previous != NULL )
+      {
+        db_local_stream->previous->next = db_local_stream->next;
+      }
+
+      //if ( db_local_stream->task_handle != NULL )
+      //{
+        //vTaskDelete( db_local_stream->task_handle );
+      //}
+
+      shutdown( db_local_stream->sock_fd, 0 );
+      close( db_local_stream->sock_fd );
+
+      free( db_local_stream );
+    }
+
+    db_local_stream = next_db_local_stream;
+  }
+
+  db_rend_circuit = onion_service->rend_circuits.head;
+
+  for ( i = 0; i < onion_service->rend_circuits.length; i++  )
+  {
+    if ( db_rend_circuit->circuit.circ_id == unpacked_cell->circ_id )
+    {
+      if ( i == 0 )
+      {
+        onion_service->rend_circuits.head = db_rend_circuit->next;
+      }
+
+      if ( i == onion_service->rend_circuits.length - 1 )
+      {
+        onion_service->rend_circuits.tail = db_rend_circuit->previous;
+      }
+
+      if ( db_rend_circuit->next != NULL )
+      {
+        db_rend_circuit->next->previous = db_rend_circuit->previous;
+      }
+
+      if ( db_rend_circuit->previous != NULL )
+      {
+        db_rend_circuit->previous->next = db_rend_circuit->next;
+      }
+
+      break;
+    }
+
+    db_rend_circuit = db_rend_circuit->next;
+  }
+
+  db_rend_relay = db_rend_circuit->circuit.relay_list.tail;
+
+  for ( i = db_rend_circuit->circuit.relay_list.length - 1; i > unpacked_cell->recv_index; i-- )
+  {
+    if ( i < db_rend_circuit->circuit.relay_list.built_length )
+    {
+      wc_ShaFree( &db_rend_relay->relay_crypto->running_sha_forward );
+      wc_ShaFree( &db_rend_relay->relay_crypto->running_sha_backward );
+      wc_AesFree( &db_rend_relay->relay_crypto->aes_forward );
+      wc_AesFree( &db_rend_relay->relay_crypto->aes_backward );
+      free( db_rend_relay->relay_crypto );
+    }
+
+    free( db_rend_relay->relay );
+
+    db_rend_relay = db_rend_relay->previous;
+    free( db_rend_relay->next );
+    db_rend_relay->next = NULL;
+  }
+
+  db_rend_circuit->circuit.relay_list.tail = db_rend_relay;
+  db_rend_circuit->circuit.relay_list.length = unpacked_cell->recv_index + 1;
+  db_rend_circuit->circuit.relay_list.built_length = unpacked_cell->recv_index + 1;
+
+  wc_Sha3_256_Free( &db_rend_circuit->circuit.hs_crypto->hs_running_sha_forward );
+  wc_Sha3_256_Free( &db_rend_circuit->circuit.hs_crypto->hs_running_sha_backward );
+  wc_AesFree( &db_rend_circuit->circuit.hs_crypto->hs_aes_forward );
+  wc_AesFree( &db_rend_circuit->circuit.hs_crypto->hs_aes_backward );
+
+  free( db_rend_circuit->circuit.hs_crypto );
+
+  db_rend_circuit->circuit.status = CIRCUIT_STANDBY;
+
+  // BEGIN mutex for standby circuits
+  xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+  v_add_circuit_to_list( db_rend_circuit, &standby_rend_circuits );
+
+  xSemaphoreGive( standby_rend_circuits_mutex );
+  // END mutex for standby circuits
 
   return 0;
 }
@@ -357,8 +582,6 @@ void v_handle_local( void* pv_parameters ) {
 #endif
 
       vTaskDelete( NULL );
-    // we got 0 bytes back then the connection closed and we're done getting
-    // consensus data
     }
 
     onion_message = malloc( sizeof( OnionMessage ) );
@@ -372,6 +595,7 @@ void v_handle_local( void* pv_parameters ) {
 
     if ( rx_length == 0 ) {
       xQueueSendToBack( db_local_stream->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+      ESP_LOGE( MINITOR_TAG, "self ending" );
       vTaskDelete( NULL );
     } else {
       ( (ServiceTcpTraffic*)onion_message->data )->data = malloc( sizeof( unsigned char ) * rx_length );
@@ -691,7 +915,7 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezv
     4096,
     (void*)(rend_circuit),
     6,
-    rend_circuit->task_handle,
+    &rend_circuit->task_handle,
     tskNO_AFFINITY
   );
 

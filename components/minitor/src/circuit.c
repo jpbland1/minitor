@@ -591,6 +591,8 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   } else if ( circuit->status == CIRCUIT_RENDEZVOUS ) {
     wc_Sha3_256_Free( &circuit->hs_crypto->hs_running_sha_forward );
     wc_Sha3_256_Free( &circuit->hs_crypto->hs_running_sha_backward );
+    wc_AesFree( &circuit->hs_crypto->hs_aes_forward );
+    wc_AesFree( &circuit->hs_crypto->hs_aes_backward );
     free( circuit->hs_crypto );
   }
 
@@ -642,7 +644,6 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
 
   for ( i = circuit->relay_list.length - 1; i >= new_length; i-- ) {
     if ( i < circuit->relay_list.built_length ) {
-      ESP_LOGE( MINITOR_TAG, "freeing crypto" );
       wc_ShaFree( &tmp_relay_node->relay_crypto->running_sha_forward );
       wc_ShaFree( &tmp_relay_node->relay_crypto->running_sha_backward );
       wc_AesFree( &tmp_relay_node->relay_crypto->aes_forward );
@@ -650,7 +651,6 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
       free( tmp_relay_node->relay_crypto );
     }
 
-    ESP_LOGE( MINITOR_TAG, "freeing node" );
     free( tmp_relay_node->relay );
 
     tmp_relay_node = tmp_relay_node->previous;

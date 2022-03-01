@@ -150,6 +150,7 @@ typedef struct Cell {
   Command command;
   unsigned short length;
   void* payload;
+  int recv_index;
 } Cell;
 
 typedef struct Address {

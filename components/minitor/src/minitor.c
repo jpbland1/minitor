@@ -231,7 +231,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     return NULL;
   }
 
-  if ( d_setup_init_rend_circuits( 2 ) < 2 )
+  if ( d_setup_init_rend_circuits( 1 ) < 1 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to setup init rend circuits" );

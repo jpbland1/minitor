@@ -14,6 +14,8 @@ int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceT
 int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cell );
 int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpacked_cell );
 int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpacked_cell );
+int d_onion_service_handle_relay_end( OnionService* onion_service, Cell* unpacked_cell );
+int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* unpacked_cell );
 void v_handle_local( void* pv_parameters );
 int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell );
 int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac );

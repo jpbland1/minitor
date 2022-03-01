@@ -34,6 +34,7 @@ struct DoublyLinkedLocalStream {
   int stream_id;
   QueueHandle_t rx_queue;
   int sock_fd;
+  TaskHandle_t task_handle;
   DoublyLinkedLocalStream* next;
   DoublyLinkedLocalStream* previous;
 };
