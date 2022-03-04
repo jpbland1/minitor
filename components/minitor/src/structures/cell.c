@@ -1367,7 +1367,9 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
   return result;
 }
 
-int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* unpacked_data ) {
+int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* unpacked_data )
+{
+  int ret = 0;
   int i;
 
   unpack_buffer( unpacked_data->rendezvous_cookie, 20, &packed_data );
@@ -1375,11 +1377,13 @@ int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* 
   unpacked_data->extension_count = *packed_data;
   packed_data++;
 
-  if ( unpacked_data->extension_count > 0 ) {
+  if ( unpacked_data->extension_count > 0 )
+  {
     unpacked_data->extensions = malloc( sizeof( IntroExtension* ) * unpacked_data->extension_count );
   }
 
-  for ( i = 0; i < unpacked_data->extension_count; i++ ) {
+  for ( i = 0; i < unpacked_data->extension_count; i++ )
+  {
     unpacked_data->extensions[i] = malloc( sizeof( IntroExtension ) );
 
     unpacked_data->extensions[i]->type = *packed_data;
@@ -1388,7 +1392,8 @@ int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* 
     unpacked_data->extensions[i]->length = *packed_data;
     packed_data++;
 
-    switch( unpacked_data->extensions[i]->type ) {
+    switch( unpacked_data->extensions[i]->type )
+    {
       case EXTENSION_ED25519:
         unpacked_data->extensions[i]->intro_extension_field = malloc( sizeof( IntroExtensionFieldEd25519 ) );
 
@@ -1399,7 +1404,22 @@ int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* 
         unpack_buffer( ( (IntroExtensionFieldEd25519*)unpacked_data->extensions[i]->intro_extension_field )->signature, 64, &packed_data );
         break;
       default:
-        return -1;
+        for ( ret = i; ret >= 0; ret-- )
+        {
+          if ( ret != i )
+          {
+            free( unpacked_data->extensions[i]->intro_extension_field );
+          }
+
+          free( unpacked_data->extensions[i] );
+        }
+
+        free( unpacked_data->extensions );
+
+        // technically ret is already -1 but I'm not going to take chances
+        ret = -1;
+
+        goto finish;
     }
   }
 
@@ -1415,11 +1435,13 @@ int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* 
   unpacked_data->specifier_count = *packed_data;
   packed_data++;
 
-  if ( unpacked_data->specifier_count > 0 ) {
+  if ( unpacked_data->specifier_count > 0 )
+  {
     unpacked_data->link_specifiers = malloc( sizeof( LinkSpecifier* ) * unpacked_data->specifier_count );
   }
 
-  for ( i = 0; i < unpacked_data->specifier_count; i++ ) {
+  for ( i = 0; i < unpacked_data->specifier_count; i++ )
+  {
     unpacked_data->link_specifiers[i] = malloc( sizeof( LinkSpecifier ) );
 
     unpacked_data->link_specifiers[i]->type = *packed_data;
@@ -1433,7 +1455,8 @@ int d_unpack_introduce_2_data( unsigned char* packed_data, DecryptedIntroduce2* 
     unpack_buffer( unpacked_data->link_specifiers[i]->specifier, unpacked_data->link_specifiers[i]->length, &packed_data );
   }
 
-  return 0;
+finish:
+  return ret;
 }
 
 // TODO verify this works on the risc-v chip

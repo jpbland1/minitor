@@ -60,7 +60,7 @@
 #define KEEP_PEER_CERT
 #define WOLFSSL_KEY_GEN
 #define WOLFSSL_CERT_GEN
-#define SHOW_SECRETS
+//#define SHOW_SECRETS
 
 #define WOLFSSL_ESPWROOM32
 

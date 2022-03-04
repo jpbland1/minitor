@@ -484,6 +484,8 @@ int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* u
       close( db_local_stream->sock_fd );
 
       free( db_local_stream );
+
+      onion_service->local_streams.length--;
     }
 
     db_local_stream = next_db_local_stream;
@@ -514,6 +516,8 @@ int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* u
       {
         db_rend_circuit->previous->next = db_rend_circuit->next;
       }
+
+      onion_service->rend_circuits.length--;
 
       break;
     }
@@ -607,8 +611,11 @@ void v_handle_local( void* pv_parameters ) {
 
 int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell )
 {
+  int ret = 0;
   int i;
   int wolf_succ;
+  time_t now;
+  unsigned char auth_input_mac[MAC_LEN];
   DoublyLinkedOnionCircuit* db_intro_circuit;
   WC_RNG rng;
   curve25519_key hs_handshake_key;
@@ -618,14 +625,26 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   DoublyLinkedOnionCircuit* db_rend_circuit;
   OnionRelay* rend_relay;
   HsCrypto* hs_crypto;
-  unsigned char auth_input_mac[MAC_LEN];
 
-  if ( onion_service->rendezvous_cookies.length > 0 )
+  ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", unpacked_cell->circ_id );
+
+  time( &now );
+
+  ESP_LOGE( MINITOR_TAG, "now: %ld, timestap: %ld", now, onion_service->rend_timestamp );
+
+  if ( now - onion_service->rend_timestamp < 20 )
   {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Rate limit in effect, dropping intro" );
+#endif
+
     return -1;
   }
 
-  ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", unpacked_cell->circ_id );
+  wc_curve25519_init( &client_handshake_key );
+  wc_curve25519_init( &hs_handshake_key );
+
+  wc_InitRng( &rng );
 
   db_intro_circuit = onion_service->intro_circuits.head;
 
@@ -645,7 +664,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to find the circuit for this RELAY_COMMAND_INTRODUCE2" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_type != EDSHA3 )
@@ -654,7 +674,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Auth key type for RELAY_COMMAND_INTRODUCE2 was not EDSHA3" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length != 32 )
@@ -663,7 +684,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Auth key length for RELAY_COMMAND_INTRODUCE2 was not 32" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   if ( memcmp( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, db_intro_circuit->circuit.intro_crypto->auth_key.p, 32 ) != 0 )
@@ -672,10 +694,9 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Auth key for RELAY_COMMAND_INTRODUCE2 does not match" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
-
-  wc_curve25519_init( &client_handshake_key );
 
   wolf_succ = wc_curve25519_import_public_ex( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, PK_PUBKEY_LEN, &client_handshake_key, EC25519_LITTLE_ENDIAN );
 
@@ -685,7 +706,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to import client public key, error code %d", wolf_succ );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   // verify and decrypt
@@ -695,7 +717,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to verify and decrypt RELAY_COMMAND_INTRODUCE2" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   // unpack the decrypted secction
@@ -705,12 +728,11 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to unpack RELAY_COMMAND_INTRODUCE2 decrypted data" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_crypto;
   }
 
   db_rendezvous_cookie = onion_service->rendezvous_cookies.head;
-
-  ESP_LOGE( MINITOR_TAG, "cookie count %d", onion_service->rendezvous_cookies.length );
 
   for ( i = 0; i < onion_service->rendezvous_cookies.length; i++ )
   {
@@ -720,11 +742,13 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
       ESP_LOGE( MINITOR_TAG, "Got a replay, silently dropping" );
 #endif
 
-      return 0;
+      goto clean_introduce;
     }
 
     db_rendezvous_cookie = db_rendezvous_cookie->next;
   }
+
+  ESP_LOGE( MINITOR_TAG, "Got new cookie" );
 
   db_rendezvous_cookie = malloc( sizeof( DoublyLinkedRendezvousCookie ) );
 
@@ -732,13 +756,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   v_add_rendezvous_cookie_to_list( db_rendezvous_cookie, &onion_service->rendezvous_cookies );
 
-  wc_curve25519_init( &hs_handshake_key );
-
-  wc_InitRng( &rng );
-
   wolf_succ = wc_curve25519_make_key( &rng, 32, &hs_handshake_key );
-
-  wc_FreeRng( &rng );
 
   if ( wolf_succ != 0 )
   {
@@ -746,7 +764,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to make hs_handshake_key, error code %d", wolf_succ );
 #endif
 
-    return -1;
+    ret = -1;
+    goto clean_introduce;
   }
 
   hs_crypto = malloc( sizeof( HsCrypto ) );
@@ -757,7 +776,10 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
 #endif
 
-    return -1;
+    free( hs_crypto );
+
+    ret = -1;
+    goto clean_introduce;
   }
 
   // extend to the specified relay and send the handshake reply
@@ -829,13 +851,16 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   {
     db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
 
-    if ( d_build_onion_circuit_to( &db_rend_circuit->circuit, 3, rend_relay ) < 0 )
+    if ( d_build_onion_circuit_to( &db_rend_circuit->circuit, 2, rend_relay ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to build the rendezvous circuit" );
 #endif
 
-      return -1;
+      free( hs_crypto );
+
+      ret = -1;
+      goto clean_introduce;
     }
   }
   else
@@ -849,10 +874,11 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
       ESP_LOGE( MINITOR_TAG, "Failed to extend to the rendezvous circuit" );
 #endif
 
-      return -1;
-    }
+      free( hs_crypto );
 
-    ESP_LOGE( MINITOR_TAG, "post rend extend" );
+      ret = -1;
+      goto clean_introduce;
+    }
   }
 
   db_rend_circuit->circuit.hs_crypto = hs_crypto;
@@ -865,18 +891,27 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     ESP_LOGE( MINITOR_TAG, "Failed to join the rendezvous relay" );
 #endif
 
-    return -1;
+    free( hs_crypto );
+
+    ret = -1;
+    goto clean_introduce;
   }
 
   v_add_circuit_to_list( db_rend_circuit, &onion_service->rend_circuits );
 
+  time( &now );
+  onion_service->rend_timestamp = now;
+
+clean_introduce:
+  v_free_introduce_2_data( &unpacked_introduce_data );
+
+clean_crypto:
+  wc_FreeRng( &rng );
+
   wc_curve25519_free( &client_handshake_key );
   wc_curve25519_free( &hs_handshake_key );
 
-
-  v_free_introduce_2_data( &unpacked_introduce_data );
-
-  return 0;
+  return ret;
 }
 
 int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac ) {
@@ -1169,12 +1204,6 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   wc_Shake256_Update( &reusable_shake, hs_key_seed, WC_SHA3_256_DIGEST_SIZE );
   wc_Shake256_Update( &reusable_shake, (unsigned char*)HS_PROTOID_EXPAND, HS_PROTOID_EXPAND_LENGTH );
   wc_Shake256_Final( &reusable_shake, expanded_keys,  WC_SHA3_256_DIGEST_SIZE * 2 + AES_256_KEY_SIZE * 2  );
-
-  ESP_LOGE( MINITOR_TAG, "expanded keys" );
-
-  for ( i = 0; i < WC_SHA3_256_DIGEST_SIZE * 2 + AES_256_KEY_SIZE * 2; i++ ) {
-    ESP_LOGE( MINITOR_TAG, "%.2x", expanded_keys[i] );
-  }
 
   wc_InitSha3_256( &hs_crypto->hs_running_sha_forward, NULL, INVALID_DEVID );
   wc_InitSha3_256( &hs_crypto->hs_running_sha_backward, NULL, INVALID_DEVID );
@@ -2487,22 +2516,6 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   unsigned char tmp_64_array[8];
   unsigned char zero[32] = { 0 };
 
-  {
-    for ( i = 0; i < secret_length; i++ )
-    {
-      ESP_LOGE( MINITOR_TAG, "secret[%d]: 0x%x", i, secret[i] );
-    }
-
-    ESP_LOGE( MINITOR_TAG, "period_number: %lld", period_number );
-
-    ESP_LOGE( MINITOR_TAG, "period_length: %lld", period_length );
-
-    for ( i = 0; i < secret_length; i++ )
-    {
-      ESP_LOGE( MINITOR_TAG, "secret[%d]: 0x%x", i, secret[i] );
-    }
-  }
-
   memset( zero, 0, 32 );
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
@@ -2511,11 +2524,6 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   idx = ED25519_PRV_KEY_SIZE;
   idy = ED25519_PUB_KEY_SIZE;
   wolf_succ = wc_ed25519_export_key( master_key, out_priv_key, &idx, tmp_pub_key, &idy );
-
-  for ( i = 0; i < ED25519_PUB_KEY_SIZE; i++ )
-  {
-    ESP_LOGE( MINITOR_TAG, "tmp_pub_key[%d]: 0x%x", i, tmp_pub_key[i] );
-  }
 
   if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
 #ifdef DEBUG_MINITOR
@@ -2567,12 +2575,6 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
 
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_array, sizeof( tmp_64_array ) );
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-
-  ESP_LOGE( MINITOR_TAG, "param" );
-
-  for ( i = 0; i < WC_SHA3_256_DIGEST_SIZE; i++ ) {
-    ESP_LOGE( MINITOR_TAG, "%.2x", reusable_sha3_sum[i] );
-  }
 
   reusable_sha3_sum[0] &= 248;
   reusable_sha3_sum[31] &= 63;

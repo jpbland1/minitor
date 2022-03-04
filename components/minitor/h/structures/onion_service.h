@@ -58,6 +58,7 @@ typedef struct OnionService {
   DoublyLinkedRendezvousCookieList rendezvous_cookies;
   DoublyLinkedLocalStreamList local_streams;
   unsigned int last_hsdir_update;
+  time_t rend_timestamp;
 } OnionService;
 
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );

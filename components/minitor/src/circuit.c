@@ -425,22 +425,22 @@ int d_build_onion_circuit( OnionCircuit* circuit )
 
   ESP_LOGE( MINITOR_TAG, "xMinitorWolfSSL_Context: %p", xMinitorWolfSSL_Context );
 
-  while ( xMinitorWolfSSL_Context == NULL )
+  ssl = NULL;
+
+  while ( ssl == NULL )
   {
-    ESP_LOGE( MINITOR_TAG, "xMinitorWolfSSL_Context is null,not sure why" );
-    xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() );
-  }
+    ssl = wolfSSL_new( xMinitorWolfSSL_Context );
 
-  if ( ( ssl = wolfSSL_new( xMinitorWolfSSL_Context ) ) == NULL )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
-#endif
+    if ( ssl == NULL )
+    {
+  #ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
+  #endif
 
-    shutdown( sock_fd, 0 );
-    close( sock_fd );
+      wolfSSL_CTX_free( xMinitorWolfSSL_Context );
 
-    goto clean_circuit;
+      xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() );
+    }
   }
 
   wolfSSL_set_verify( ssl, SSL_VERIFY_PEER, d_ignore_ca_callback );
@@ -694,22 +694,28 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
   return 0;
 }
 
-void v_handle_circuit( void* pv_parameters ) {
+void v_handle_circuit( void* pv_parameters )
+{
   int succ;
   OnionCircuit* onion_circuit = (OnionCircuit*)pv_parameters;
   Cell* unpacked_cell;
   OnionMessage* onion_message;
 
-  while ( 1 ) {
+  while ( 1 )
+  {
     unpacked_cell = malloc( sizeof( Cell ) );
 
-    if ( onion_circuit->status == CIRCUIT_RENDEZVOUS ) {
+    if ( onion_circuit->status == CIRCUIT_RENDEZVOUS )
+    {
       succ = d_recv_cell( onion_circuit->ssl, unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, onion_circuit );
-    } else {
+    }
+    else
+    {
       succ = d_recv_cell( onion_circuit->ssl, unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, NULL );
     }
 
-    if ( succ < 0 ) {
+    if ( succ < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Circuit %.8x received error code: %d waiting for a cell", onion_circuit->circ_id, succ );
 #endif
@@ -719,10 +725,13 @@ void v_handle_circuit( void* pv_parameters ) {
     }
 
     // TODO should determine if we need to destroy the circuit on a NULL queue
-    if ( unpacked_cell->command == PADDING || onion_circuit->rx_queue == NULL ) {
+    if ( unpacked_cell->command == PADDING || onion_circuit->rx_queue == NULL )
+    {
       free_cell( unpacked_cell );
       free( unpacked_cell );
-    } else {
+    }
+    else
+    {
       onion_message = malloc( sizeof( OnionMessage ) );
       onion_message->type = ONION_CELL;
       onion_message->data = unpacked_cell;
@@ -827,6 +836,9 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
 #endif
+
+    ret = -1;
+    goto finish;
   }
 
   // recv EXTENDED2 cell and perform the second half of the handshake

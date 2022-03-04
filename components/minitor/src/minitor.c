@@ -56,13 +56,13 @@ static void v_circuit_keepalive( void* pv_parameters ) {
 
     xSemaphoreGive( standby_rend_circuits_mutex );
 
-/*
     xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
     fresh_until = network_consensus.fresh_until;
 
     xSemaphoreGive( network_consensus_mutex );
 
+/*
     time( &now );
 
     if ( now >= fresh_until )
@@ -143,6 +143,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   onion_service->local_port = local_port;
   onion_service->exit_port = exit_port;
   onion_service->rx_queue = xQueueCreate( 5, sizeof( OnionMessage* ) );
+  onion_service->rend_timestamp = 0;
 
   if ( d_generate_hs_keys( onion_service, onion_service_directory ) < 0 )
   {
