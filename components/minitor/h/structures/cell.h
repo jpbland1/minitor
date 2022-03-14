@@ -474,7 +474,7 @@ unsigned char* pack_and_free( Cell* unpacked_cell );
 
 void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length );
 
-int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length );
+void unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length );
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length );
 

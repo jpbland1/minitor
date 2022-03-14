@@ -745,7 +745,8 @@ void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int
 //
 // UNPACK CELL
 //
-int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length ) {
+void unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_id_length )
+{
   int i;
   unsigned char* packed_cell_start = packed_cell;
 
@@ -1002,8 +1003,6 @@ int unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_i
   }
 
   free( packed_cell_start );
-
-  return 0;
 }
 
 void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length ) {

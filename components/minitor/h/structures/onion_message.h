@@ -2,6 +2,7 @@
 #define MINITOR_STRUCTURES_ONION_MESSAGE_H
 
 typedef enum OnionMessageType {
+  PACKED_CELL,
   ONION_CELL,
   SERVICE_TCP_DATA,
   SERVICE_COMMAND,
@@ -13,6 +14,7 @@ typedef enum ServiceCommand {
 
 typedef struct OnionMessage {
   OnionMessageType type;
+  int length;
   void* data;
 } OnionMessage;
 

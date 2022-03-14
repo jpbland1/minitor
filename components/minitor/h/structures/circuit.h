@@ -10,6 +10,7 @@
 
 #include "./consensus.h"
 
+typedef struct OrConnection OrConnection;
 typedef struct DoublyLinkedOnionCircuit DoublyLinkedOnionCircuit;
 
 typedef enum CircuitStatus {
@@ -35,8 +36,9 @@ typedef struct HsCrypto {
 typedef struct OnionCircuit {
   int circ_id;
   CircuitStatus status;
-  WOLFSSL* ssl;
+  OrConnection* or_connection;
   QueueHandle_t rx_queue;
+  QueueHandle_t forward_queue;
   TaskHandle_t task_handle;
   DoublyLinkedOnionRelayList relay_list;
   HsCrypto* hs_crypto;
@@ -46,7 +48,7 @@ typedef struct OnionCircuit {
 struct DoublyLinkedOnionCircuit {
   DoublyLinkedOnionCircuit* previous;
   DoublyLinkedOnionCircuit* next;
-  OnionCircuit circuit;
+  OnionCircuit* circuit;
 };
 
 typedef struct DoublyLinkedOnionCircuitList {
@@ -68,5 +70,7 @@ extern DoublyLinkedOnionCircuitList standby_rend_circuits;
 extern SemaphoreHandle_t standby_rend_circuits_mutex;
 
 void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list );
+
+#include "./or_connection.h"
 
 #endif

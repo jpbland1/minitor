@@ -12,7 +12,8 @@
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
-static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
+static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
+{
   int i;
   Cell padding_cell;
   DoublyLinkedOnionCircuit* node;
@@ -22,22 +23,31 @@ static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list ) {
   padding_cell.payload = NULL;
   node = list->head;
 
-  for ( i = 0; i < list->length; i++ ) {
-    padding_cell.circ_id = node->circuit.circ_id;
+  for ( i = 0; i < list->length; i++ )
+  {
+    padding_cell.circ_id = node->circuit->circ_id;
     packed_cell = pack_and_free( &padding_cell );
 
-    if ( wolfSSL_send( node->circuit.ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+    // MUTEX TAKE
+    xSemaphoreTake( node->circuit->or_connection->access_mutex, portMAX_DELAY );
+
+    if ( d_send_packed_cell_and_free( node->circuit->or_connection, packed_cell ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit.circ_id );
+      ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit->circ_id );
 #endif
     }
+
+    xSemaphoreGive( node->circuit->or_connection->access_mutex );
+    // MUTEX GIVE
 
     free( packed_cell );
     node = node->next;
   }
 }
 
-static void v_circuit_keepalive( void* pv_parameters ) {
+static void v_circuit_keepalive( void* pv_parameters )
+{
   time_t now;
   unsigned long int fresh_until;
 
@@ -90,6 +100,7 @@ int v_minitor_INIT()
   hsdir_relays_mutex = xSemaphoreCreateMutex();
   standby_circuits_mutex = xSemaphoreCreateMutex();
   standby_rend_circuits_mutex = xSemaphoreCreateMutex();
+  or_connections_mutex = xSemaphoreCreateMutex();
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
@@ -208,9 +219,9 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
 
   for ( i = 0; i < onion_service->intro_circuits.length; i++ )
   {
-    node->circuit.rx_queue = onion_service->rx_queue;
+    node->circuit->forward_queue = onion_service->rx_queue;
 
-    if ( d_router_establish_intro( &node->circuit ) < 0 ) {
+    if ( d_router_establish_intro( node->circuit ) < 0 ) {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to establish intro with a circuit" );
 #endif
@@ -218,7 +229,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
       return NULL;
     }
 
-    node->circuit.status = CIRCUIT_INTRO_POINT;
+    node->circuit->status = CIRCUIT_INTRO_POINT;
 
     node = node->next;
   }
@@ -249,7 +260,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     "HANDLE_HS",
     8192,
     (void*)(onion_service),
-    6,
+    7,
     NULL,
     tskNO_AFFINITY
   );

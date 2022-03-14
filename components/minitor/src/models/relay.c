@@ -3,954 +3,1124 @@
 #include <stdio.h>
 
 #include "esp_log.h"
-#include "sqlite3.h"
+#include "driver/spi_master.h"
 
 #include "../../include/config.h"
 #include "../../h/constants.h"
-#include "../../h/models/db.h"
+#include "../../h/consensus.h"
+#include "../../h/models/issi.h"
 #include "../../h/models/relay.h"
 
-static void v_parse_onion_relay( sqlite3_stmt* statement, OnionRelay* onion_relay ) {
-  memcpy( onion_relay->identity, sqlite3_column_text( statement, 0 ), ID_LENGTH );
-  memcpy( onion_relay->digest, sqlite3_column_text( statement, 1 ), ID_LENGTH );
-  memcpy( onion_relay->ntor_onion_key, sqlite3_column_text( statement, 2 ), H_LENGTH );
-  onion_relay->address = sqlite3_column_int( statement, 3 );
-  onion_relay->or_port = sqlite3_column_int( statement, 4 );
-  onion_relay->dir_port = sqlite3_column_int( statement, 5 );
-  onion_relay->hsdir = sqlite3_column_int( statement, 6 );
-  onion_relay->suitable = sqlite3_column_int( statement, 7 );
-  memcpy( onion_relay->previous_hash, sqlite3_column_text( statement, 8 ), H_LENGTH );
-  memcpy( onion_relay->current_hash, sqlite3_column_text( statement, 9 ), H_LENGTH );
-}
+uint32_t hsdir_relay_count = 0;
+uint32_t random_offset_count = 1;
+int hsdir_root_addr = HSDIR_TREE_ROOT;
 
-static char* pc_get_not_in_string( DoublyLinkedOnionRelayList* relay_list, unsigned char* exclude ) {
-  int i;
-  int size = 0;
-  char* not_in_query;
-
-  if ( exclude != NULL ) {
-    if ( relay_list->length > 6 ) {
-      size = 4;
-    } else {
-      size = 3;
-    }
-  }
-
-  if ( relay_list->length > 7 ) {
-    size += 7 * 3;
-    size += ( relay_list->length - 7 ) * 4;
-  } else {
-    size += relay_list->length * 3;
-  }
-
-  not_in_query = malloc( sizeof( char ) * size );
-  not_in_query[size - 1] = '\0';
-
-  for ( i = 0; i < relay_list->length; i++ ) {
-    if ( i < 7 ) {
-      not_in_query[i * 3] = '?';
-      not_in_query[i * 3 + 1] = '3' + i;
-    } else {
-      not_in_query[i * 3] = '?';
-      not_in_query[i * 3 + 1] = '0' + ( i - 7 ) / 10 + 1;
-      not_in_query[i * 3 + 2] = '0' + ( i - 7 ) % 10;
-    }
-
-    if (  i != relay_list->length - 1 || exclude != NULL ) {
-      not_in_query[i * 3 + 2] = ',';
-    }
-  }
-
-  if (  exclude != NULL ) {
-    if ( relay_list->length > 6 ) {
-      not_in_query[size - 4] = '?';
-      not_in_query[size - 3] = '0' + ( relay_list->length - 7 ) / 10 + 1;
-      not_in_query[size - 2] = '0' + ( relay_list->length - 7 ) % 10;
-    } else {
-      not_in_query[size - 3] = '?';
-      not_in_query[size - 2] = '3' + relay_list->length;
-    }
-  }
-
-  return not_in_query;
-}
-
-int d_create_relay_table() {
-  int ret;
-  char* err;
-
-  ret = sqlite3_exec( minitor_db,
-"CREATE TABLE IF NOT EXISTS main.OnionRelays ("
-  "identity CHAR(20) NOT NULL UNIQUE,"
-  "digest CHAR(20) NOT NULL,"
-  "ntor_onion_key CHAR(32) NOT NULL,"
-  "address INT4 NOT NULL,"
-  "or_port INT2 NOT NULL,"
-  "dir_port INT2 NOT NULL,"
-  "hsdir INT1 DEFAULT 0,"
-  "suitable INT1 DEFAULT 0,"
-  "guard INT1 DEFAULT 0,"
-  "previous_hash CHAR(32) NOT NULL,"
-  "current_hash CHAR(32) NOT NULL,"
-  "can_guard INT1 NOT NULL,"
-  "can_exit INT1 NOT NULL"
-");",
-    NULL, NULL, &err );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create OnionRelay Table, err msg: %s", err );
-#endif
-
-    sqlite3_free( err );
-
-    return -1;
-  }
-
-  ret = sqlite3_exec( minitor_db,
-"UPDATE main.OnionRelays SET guard = 0;",
-    NULL, NULL, &err );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create OnionRelay Table, err msg: %s", err );
-#endif
-
-    sqlite3_free( err );
-
-    return -1;
-  }
-
-  return 0;
-}
-
-int d_create_relay( OnionRelay* onion_relay ) {
-  int ret;
-  sqlite3_stmt* statement;
-
-  /* if ( d_open_database() < 0 ) { */
-    /* return -1; */
-  /* } */
-
-  ret = sqlite3_prepare_v2( minitor_db,
-"INSERT INTO main.OnionRelays"
-  " ( identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash, can_guard, can_exit )"
-  " VALUES ( ?1, ?2, ?3, ?4, ?5, ?6 , ?7, ?8, ?9, ?10, ?11, ?12 );",
-    -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay create statement, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_text( statement, 1, (const char*)onion_relay->identity, ID_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_text( statement, 2, (const char*)onion_relay->digest, ID_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_text( statement, 3, (const char*)onion_relay->ntor_onion_key, H_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_int( statement, 4, onion_relay->address );
-  sqlite3_bind_int( statement, 5, onion_relay->or_port );
-  sqlite3_bind_int( statement, 6, onion_relay->dir_port );
-  sqlite3_bind_int( statement, 7, onion_relay->hsdir );
-  sqlite3_bind_int( statement, 8, onion_relay->suitable );
-  sqlite3_bind_text( statement, 9, (const char*)onion_relay->previous_hash, H_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_text( statement, 10, (const char*)onion_relay->current_hash, H_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_int( statement, 11, onion_relay->can_guard );
-  sqlite3_bind_int( statement, 12, onion_relay->can_exit );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_DONE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to insert OnionRelay, err code: %d", ret );
-#endif
-
-    sqlite3_finalize( statement );
-
-    goto cleanup;
-  }
-
-  sqlite3_finalize( statement );
-
-  /* if ( d_close_database() < 0 ) { */
-    /* return -1; */
-  /* } */
-
-  return 0;
-
-cleanup:
-  /* d_close_database(); */
-  return -1;
-}
-
-OnionRelay* px_get_relay( unsigned char* identity ) {
-  int ret;
-  sqlite3_stmt* statement;
-  OnionRelay* onion_relay;
-
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
-
-  onion_relay = malloc( sizeof( OnionRelay ) );
-
-  ret = sqlite3_prepare_v2( minitor_db, "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE identity = ?1", -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get statement, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_text( statement, 1, (const char*)identity, ID_LENGTH, SQLITE_STATIC );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  v_parse_onion_relay( statement, onion_relay );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return onion_relay;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( onion_relay );
-  return NULL;
-}
-
-OnionRelay* px_get_random_relay_standalone()
+static int d_get_relay_at_address( binary_relay* b_relay, int addr )
 {
-  int i;
-  int rand_index;
-  int ret;
-  const char* count_query = "SELECT COUNT(identity) FROM main.OnionRelays WHERE suitable = 1;";
-  const char* data_query = "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE suitable = 1 LIMIT 1 OFFSET ?1;";
-  sqlite3_stmt* statement;
-  OnionRelay* onion_relay;
-  DoublyLinkedOnionRelay* db_onion_relay;
+  int err;
 
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
+  err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
 
-  onion_relay = malloc( sizeof( OnionRelay ) );
+  if ( err != 0 ) {
+    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus" );
 
-  ret = sqlite3_prepare_v2( minitor_db, count_query, -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay count non guard relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay count relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  rand_index = esp_random() % sqlite3_column_int( statement, 0 );
-
-  sqlite3_finalize( statement );
-
-  ret = sqlite3_prepare_v2( minitor_db, data_query, -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get random relay, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_int( statement, 1, rand_index );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay non guard relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  v_parse_onion_relay( statement, onion_relay );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return onion_relay;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( onion_relay );
-  return NULL;
-}
-
-OnionRelay* px_get_random_relay( DoublyLinkedOnionRelayList* relay_list, unsigned char* exclude ) {
-  int i;
-  int rand_index;
-  int ret;
-  char* full_query;
-  char* not_in_query;
-  const char* partial_count_query = "SELECT COUNT(identity) FROM main.OnionRelays WHERE suitable = 1 AND identity NOT IN (%s);";
-  const char* partial_data_query = "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE suitable = 1 AND identity NOT IN (%s) LIMIT 1 OFFSET ?1;";
-  sqlite3_stmt* statement;
-  OnionRelay* onion_relay;
-  DoublyLinkedOnionRelay* db_onion_relay;
-
-  if ( relay_list->length < 1 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Relay list must have at least one element" );
-#endif
-
-    return NULL;
-  }
-
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
-
-  onion_relay = malloc( sizeof( OnionRelay ) );
-
-  not_in_query = pc_get_not_in_string( relay_list, exclude );
-
-  full_query = malloc( sizeof( unsigned char ) * ( strlen( partial_count_query ) + strlen( not_in_query ) ) );
-
-  sprintf( full_query, partial_count_query, not_in_query );
-
-  ESP_LOGE( MINITOR_TAG, "full_query: %s", full_query );
-
-  ret = sqlite3_prepare_v2( minitor_db, full_query, -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay count non guard relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  db_onion_relay = relay_list->head;
-
-  for ( i = 0; i < relay_list->length; i++ ) {
-    sqlite3_bind_text( statement, 3 + i, (char*)db_onion_relay->relay->identity, ID_LENGTH, SQLITE_STATIC );
-
-    db_onion_relay = db_onion_relay->next;
-  }
-
-  if ( exclude != NULL ) {
-    sqlite3_bind_text( statement, 3 + relay_list->length, (char*)exclude, ID_LENGTH, SQLITE_STATIC );
-  }
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay count relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  rand_index = esp_random() % sqlite3_column_int( statement, 0 );
-
-  sqlite3_finalize( statement );
-  free( full_query );
-
-  full_query = malloc( sizeof( unsigned char ) * ( strlen( partial_data_query ) + strlen( not_in_query ) ) );
-
-  sprintf( full_query, partial_data_query, not_in_query );
-
-  ESP_LOGE( MINITOR_TAG, "full_query: %s", full_query );
-
-  ret = sqlite3_prepare_v2( minitor_db, full_query, -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get random relay, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_int( statement, 1, rand_index );
-
-  db_onion_relay = relay_list->head;
-
-  for ( i = 0; i < relay_list->length; i++ ) {
-    sqlite3_bind_text( statement, 3 + i, (char*)db_onion_relay->relay->identity, ID_LENGTH, SQLITE_STATIC );
-
-    db_onion_relay = db_onion_relay->next;
-  }
-
-  if ( exclude != NULL ) {
-    sqlite3_bind_text( statement, 3 + relay_list->length, (char*)exclude, ID_LENGTH, SQLITE_STATIC );
-  }
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay non guard relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  v_parse_onion_relay( statement, onion_relay );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  free( not_in_query );
-  free( full_query );
-
-  return onion_relay;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( not_in_query );
-  free( full_query );
-  free( onion_relay );
-  return NULL;
-}
-
-OnionRelay* px_get_random_relay_non_guard( unsigned char* exclude ) {
-  int rand_index;
-  int ret;
-  sqlite3_stmt* statement;
-  OnionRelay* onion_relay;
-
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
-
-  onion_relay = malloc( sizeof( OnionRelay ) );
-
-  if ( exclude != NULL ) {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND can_guard = 1 AND suitable = 1 AND identity != ?1;", -1, &statement, NULL );
-  } else {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE guard = 0 AND can_guard = 1 AND suitable = 1;", -1, &statement, NULL );
-  }
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay count non guard relays, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  if ( exclude != NULL ) {
-    sqlite3_bind_text( statement, 1, (const char*)exclude, ID_LENGTH, SQLITE_STATIC );
-  }
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay count non guard relays, err code: %d", ret );
-#endif
-
-    sqlite3_finalize( statement );
-
-    goto cleanup;
-  }
-
-  rand_index = esp_random() % sqlite3_column_int( statement, 0 );
-
-  sqlite3_finalize( statement );
-
-  if ( exclude != NULL ) {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE guard = 0 AND suitable = 1 AND identity != ?1 LIMIT 1 OFFSET ?2;", -1, &statement, NULL );
-  } else {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT identity, digest, ntor_onion_key, address, or_port, dir_port, hsdir, suitable, previous_hash, current_hash FROM main.OnionRelays WHERE guard = 0 AND suitable = 1 LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
-  }
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get non guard relay, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  if ( exclude != NULL ) {
-    sqlite3_bind_text( statement, 1, (const char*)exclude, ID_LENGTH, SQLITE_STATIC );
-    sqlite3_bind_int( statement, 2, rand_index );
-  } else {
-    sqlite3_bind_int( statement, 1, rand_index );
-  }
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelay non guard relays, err code: %d", ret );
-#endif
-
-    sqlite3_finalize( statement );
-
-    goto cleanup;
-  }
-
-  v_parse_onion_relay( statement, onion_relay );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return onion_relay;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( onion_relay );
-  return NULL;
-}
-
-int d_get_hsdir_count() {
-  int ret;
-  sqlite3_stmt* statement;
-
-  if ( d_open_database() < 0 ) {
     return -1;
   }
 
-  ret = sqlite3_prepare_v2( minitor_db, "SELECT COUNT(identity) FROM main.OnionRelays WHERE hsdir = 1;", -1, &statement, NULL );
+  spi_transaction_ext_t t;
 
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay count hsdir, err code: %d", ret );
-#endif
+  t.base.cmd = ISSI_READ;
+  t.base.addr = ( addr & 0xffffff );
+  t.base.length = 0;
+  t.base.tx_buffer = NULL;
+  t.base.rxlength = 8 * sizeof( binary_relay );
+  t.base.rx_buffer = b_relay;
+  t.base.flags = SPI_TRANS_VARIABLE_DUMMY;
+  t.dummy_bits = 9;
 
-    goto cleanup;
+  err = spi_device_polling_transmit( issi_spi, &t );
+
+  spi_device_release_bus( issi_spi );
+
+  if ( err != 0 ) {
+    ESP_LOGE( MINITOR_TAG, "Failed to transmit the spi transaction" );
+
+    return -1;
   }
 
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to count OnionRelay hsdir, err code: %d", ret );
-#endif
+  // ensure dma memory is stable, sort of a hack
+  vTaskDelay( 1 );
 
-    goto cleanup;
-  }
+  //ESP_LOGE( MINITOR_TAG, "GET address check: %x", b_relay->relay.address );
+  //ESP_LOGE( MINITOR_TAG, "GET Port check: %d", b_relay->relay.or_port );
 
-  ret = sqlite3_column_int( statement, 0 );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return ret;
-
-cleanup:
-  d_close_database();
-db_fail:
-  return -1;
+  return err;
 }
 
-unsigned char* puc_get_hash_by_index( int index, int previous ) {
-  int ret;
-  unsigned char* hash;
-  sqlite3_stmt* statement;
+static int d_store_relay_at_address( binary_relay* b_relay, int addr )
+{
+  int err;
 
-  if ( d_open_database() < 0 ) {
-    return NULL;
+  err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
+
+  if ( err != 0 ) {
+    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus" );
+
+    return -1;
   }
 
-  hash = malloc( sizeof( unsigned char ) * H_LENGTH );
+  spi_transaction_ext_t t;
 
-  if ( previous ) {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT previous_hash FROM main.OnionRelays WHERE hsdir = 1 ORDER BY previous_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
-  } else {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT current_hash FROM main.OnionRelays WHERE hsdir = 1 ORDER BY current_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
+  t.base.cmd = ISSI_WRITE;
+  t.base.addr = ( addr & 0xffffff );
+  t.base.length = 8 * sizeof( binary_relay );
+  t.base.tx_buffer = b_relay;
+  t.base.rxlength = 0;
+  t.base.rx_buffer = NULL;
+  t.base.flags = 0;
+
+  err = spi_device_polling_transmit( issi_spi, &t );
+
+  spi_device_release_bus( issi_spi );
+
+  if ( err != 0 ) {
+    ESP_LOGE( MINITOR_TAG, "Failed to transmit the spi transaction" );
+
+    return -1;
   }
 
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get hash by index, err code: %d", ret );
-#endif
+  // ensure dma memory is stable, sort of a hack
+  vTaskDelay( 1 );
 
-    goto cleanup;
-  }
+  //ESP_LOGE( MINITOR_TAG, "STORE address check: %x", b_relay->relay.address );
+  //ESP_LOGE( MINITOR_TAG, "STORE Port check: %d", b_relay->relay.or_port );
 
-  sqlite3_bind_int( statement, 1, index );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to query OnionRelay get hash by index, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  memcpy( hash, sqlite3_column_text( statement, 0 ), H_LENGTH );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return hash;
-
-cleanup:
-  d_close_database();
-db_fail:
-  sqlite3_finalize( statement );
-  free( hash );
-  return NULL;
+  return err;
 }
 
-OnionRelay* px_get_relay_by_hash_index( int index, int previous ) {
-  int ret;
-  OnionRelay* onion_relay;
-  sqlite3_stmt* statement;
+int d_reset_hsdir_relay_tree()
+{
+  binary_relay* b_relay;
 
-  if ( d_open_database() < 0 ) {
-    return NULL;
+  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+
+  memset( b_relay, 0xff, sizeof( binary_relay ) );
+
+  if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  {
+    return -1;
   }
 
-  onion_relay = malloc( sizeof( OnionRelay ) );
+  hsdir_relay_count = 0;
+  ESP_LOGE( MINITOR_TAG, "d_reset_hsdir_relay_tree" );
 
-  if ( previous ) {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT identity FROM main.OnionRelays WHERE hsdir = 1 ORDER BY previous_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
-  } else {
-    ret = sqlite3_prepare_v2( minitor_db, "SELECT identity FROM main.OnionRelays WHERE hsdir = 1 ORDER BY current_hash LIMIT 1 OFFSET ?1;", -1, &statement, NULL );
-  }
+  free( b_relay );
 
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get identity by index, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_int( statement, 1, index );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_ROW ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to query OnionRelay get identity by index, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  memcpy( onion_relay->identity, sqlite3_column_text( statement, 0 ), ID_LENGTH );
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
-
-  return onion_relay;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( onion_relay );
-  return NULL;
+  return 0;
 }
 
-static DoublyLinkedOnionRelayList* px_get_relays_by_hash( unsigned char* hash, int relay_count, DoublyLinkedOnionRelayList* used_relay_list, int previous ) {
-  int i;
-  int ret;
-  sqlite3_stmt* statement;
-  const char* current_string = "current_hash";
-  const char* previous_string = "previous_hash";
-  const char* partial_main_query = "SELECT identity FROM main.OnionRelays WHERE %s >= ?1 AND hsdir = 1%s ORDER BY %s LIMIT ?2;";
-  const char* partial_secondary_query = "SELECT identity FROM main.OnionRelays WHERE hsdir = 1%s ORDER BY %s LIMIT ?1;";
-  const char* not_in_string = " AND identity NOT IN (%s)";
-  char* full_query;
-  char* not_in_optional;
-  char* not_in_query;
-  DoublyLinkedOnionRelay* db_onion_relay;
-  DoublyLinkedOnionRelayList* relay_list;
+static int d_rebalance_relays( int parent_addr, int child_addr )
+{
+  int ret = 0;
+  int tmp_addr;
+  binary_relay* parent_relay;
+  binary_relay* child_relay;
+  binary_relay* tmp_relay;
 
-  if ( d_open_database() < 0 ) {
-    return NULL;
-  }
+  parent_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  child_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  tmp_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
 
-  relay_list = malloc( sizeof( DoublyLinkedOnionRelayList ) );
+  while ( child_addr != hsdir_root_addr )
+  {
+    if ( d_get_relay_at_address( parent_relay, parent_addr ) != 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
 
-  relay_list->length = 0;
-  relay_list->head = NULL;
-  relay_list->tail = NULL;
+    if ( parent_relay->right_addr == child_addr )
+    {
+      parent_relay->balance++;
 
-  if ( used_relay_list->length > 0 ) {
-    not_in_query = pc_get_not_in_string( used_relay_list, NULL );
-    not_in_optional = malloc( sizeof( char ) * ( strlen( not_in_string ) + strlen( not_in_query ) ) );
-    sprintf( not_in_optional, not_in_string, not_in_query );
-    free( not_in_query );
-  } else {
-    not_in_optional = malloc( sizeof( char ) );
-    not_in_optional[0] = '\0';
-  }
+      if ( parent_relay->balance > 1 )
+      {
+        if ( d_get_relay_at_address( child_relay, child_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
 
-  if ( previous ) {
-    full_query = malloc( sizeof( char ) * ( strlen( partial_main_query ) + strlen( not_in_optional ) + 2 * strlen( previous_string ) ) + 1 );
-    sprintf( full_query, partial_main_query, previous_string, not_in_optional, previous_string );
-  } else {
-    full_query = malloc( sizeof( char ) * ( strlen( partial_main_query ) + strlen( not_in_optional ) + 2 * strlen( current_string ) ) + 1 );
-    sprintf( full_query, partial_main_query, current_string, not_in_optional, current_string );
-  }
+        // rotate left
+        if ( child_relay->balance > 0 )
+        {
+          ESP_LOGE( MINITOR_TAG, "Rotate left: %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0] );
 
-  ESP_LOGE( MINITOR_TAG, "full_query: %s", full_query );
+          if ( parent_addr == hsdir_root_addr )
+          {
+            hsdir_root_addr = child_addr;
+          }
+          else
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
 
-  ret = sqlite3_prepare_v2( minitor_db, full_query, -1, &statement, NULL );
+            if ( tmp_relay->right_addr == parent_addr )
+            {
+              tmp_relay->right_addr = child_addr;
+            }
+            else
+            {
+              tmp_relay->left_addr = child_addr;
+            }
 
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get relays by hash statement, err code: %d", ret );
-#endif
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
 
-    goto cleanup;
-  }
+          child_relay->parent_addr = parent_relay->parent_addr;
+          parent_relay->parent_addr = child_addr;
+          parent_relay->right_addr = child_relay->left_addr;
+          child_relay->left_addr = parent_addr;
 
-  sqlite3_bind_text( statement, 1, (const char*)hash, H_LENGTH, SQLITE_STATIC );
-  sqlite3_bind_int( statement, 2, relay_count );
+          if ( parent_relay->right_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
 
-  db_onion_relay = used_relay_list->head;
+            tmp_relay->parent_addr = parent_addr;
 
-  for ( i = 0; i < used_relay_list->length; i++ ) {
-    sqlite3_bind_text( statement, 3 + i, (const char*)db_onion_relay->relay->identity, ID_LENGTH, SQLITE_STATIC );
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
 
-    db_onion_relay = db_onion_relay->next;
-  }
+          parent_relay->balance = 0;
+          child_relay->balance = 0;
+        }
+        // rotate right left
+        else if ( child_relay->balance < 0 )
+        {
+          tmp_addr = child_relay->left_addr;
 
-  while ( 1 ) {
-    ret = sqlite3_step( statement );
+          if ( parent_addr == hsdir_root_addr )
+          {
+            hsdir_root_addr = tmp_addr;
+          }
+          else
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
 
-    if ( ret != SQLITE_ROW ) {
-      if ( ret != SQLITE_DONE ) {
-        ESP_LOGE( MINITOR_TAG, "Failed querying for relays by hash, err code: %d", ret );
+            if ( tmp_relay->right_addr == parent_addr )
+            {
+              tmp_relay->right_addr = tmp_addr;
+            }
+            else
+            {
+              tmp_relay->left_addr = tmp_addr;
+            }
 
-        goto cleanup;
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          if ( d_get_relay_at_address( tmp_relay, tmp_addr ) != 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+
+          ESP_LOGE( MINITOR_TAG, "Rotate right left: %d %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0], tmp_relay->relay.id_hash[0] );
+
+          tmp_relay->parent_addr = parent_relay->parent_addr;
+          parent_relay->right_addr = tmp_relay->left_addr;
+          tmp_relay->left_addr = parent_addr;
+          child_relay->left_addr = tmp_relay->right_addr;
+          tmp_relay->right_addr = child_addr;
+          child_relay->parent_addr = tmp_addr;
+          parent_relay->parent_addr = tmp_addr;
+
+          if ( tmp_relay->balance > 0 )
+          {
+            parent_relay->balance = -1;
+            child_relay->balance = 0;
+          }
+          else if ( tmp_relay->balance < 0 )
+          {
+            parent_relay->balance = 0;
+            child_relay->balance = 1;
+          }
+          else
+          {
+            parent_relay->balance = 0;
+            child_relay->balance = 0;
+          }
+
+          tmp_relay->balance = 0;
+
+          if ( d_store_relay_at_address( tmp_relay, tmp_addr ) != 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+
+          if ( parent_relay->right_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->parent_addr = parent_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          if ( child_relay->left_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, child_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->parent_addr = child_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, child_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+        }
+
+        if ( d_store_relay_at_address( child_relay, child_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        if ( d_store_relay_at_address( parent_relay, parent_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        // balance restored, now exit
+        break;
       }
+    }
+    else if ( parent_relay->left_addr == child_addr )
+    {
+      parent_relay->balance--;
 
+      if ( parent_relay->balance < -1 )
+      {
+        if ( d_get_relay_at_address( child_relay, child_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        // rotate right
+        if ( child_relay->balance < 0 )
+        {
+          ESP_LOGE( MINITOR_TAG, "Rotate right: %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0] );
+
+          if ( parent_addr == hsdir_root_addr )
+          {
+            hsdir_root_addr = child_addr;
+          }
+          else
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            if ( tmp_relay->right_addr == parent_addr )
+            {
+              tmp_relay->right_addr = child_addr;
+            }
+            else
+            {
+              tmp_relay->left_addr = child_addr;
+            }
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          child_relay->parent_addr = parent_relay->parent_addr;
+          parent_relay->parent_addr = child_addr;
+          parent_relay->left_addr = child_relay->right_addr;
+          child_relay->right_addr = parent_addr;
+
+          if ( parent_relay->left_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->parent_addr = parent_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          parent_relay->balance = 0;
+          child_relay->balance = 0;
+        }
+        // rotate left right
+        else if ( child_relay->balance > 0 )
+        {
+          tmp_addr = child_relay->right_addr;
+
+          if ( parent_addr == hsdir_root_addr )
+          {
+            hsdir_root_addr = tmp_addr;
+          }
+          else
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            if ( tmp_relay->right_addr == parent_addr )
+            {
+              tmp_relay->right_addr = tmp_addr;
+            }
+            else
+            {
+              tmp_relay->left_addr = tmp_addr;
+            }
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          if ( d_get_relay_at_address( tmp_relay, tmp_addr ) != 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+
+          ESP_LOGE( MINITOR_TAG, "Rotate left right: %d %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0], tmp_relay->relay.id_hash[0] );
+
+          tmp_relay->parent_addr = parent_relay->parent_addr;
+          parent_relay->left_addr = tmp_relay->right_addr;
+          tmp_relay->right_addr = parent_addr;
+          child_relay->right_addr = tmp_relay->left_addr;
+          tmp_relay->left_addr = child_addr;
+          child_relay->parent_addr = tmp_addr;
+          parent_relay->parent_addr = tmp_addr;
+
+          if ( tmp_relay->balance > 0 )
+          {
+            child_relay->balance = -1;
+            parent_relay->balance = 0;
+          }
+          else if ( tmp_relay->balance < 0 )
+          {
+            parent_relay->balance = 1;
+            child_relay->balance = 0;
+          }
+          else
+          {
+            parent_relay->balance = 0;
+            child_relay->balance = 0;
+          }
+
+          tmp_relay->balance = 0;
+
+          if ( d_store_relay_at_address( tmp_relay, tmp_addr ) != 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+
+          if ( parent_relay->left_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->parent_addr = parent_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          if ( child_relay->right_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, child_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->parent_addr = child_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, child_relay->right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+        }
+
+        if ( d_store_relay_at_address( child_relay, child_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        if ( d_store_relay_at_address( parent_relay, parent_addr ) != 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        // balance restored, now exit
+        break;
+      }
+    }
+
+    if ( d_store_relay_at_address( parent_relay, parent_addr ) != 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
+
+    // our addition balanced the subtree, no need to continue up
+    if ( parent_relay->balance == 0 )
+    {
       break;
     }
 
-    ESP_LOGE( MINITOR_TAG, "Got row" );
-    db_onion_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-    db_onion_relay->next = NULL;
-    db_onion_relay->previous = NULL;
-    db_onion_relay->relay = malloc( sizeof( OnionRelay ) );
-
-    memcpy( db_onion_relay->relay->identity, sqlite3_column_text( statement, 0 ), ID_LENGTH );
-
-    v_add_relay_to_list( db_onion_relay, relay_list );
+    child_addr = parent_addr;
+    parent_addr = parent_relay->parent_addr;
   }
 
-  sqlite3_finalize( statement );
+finish:
+  free( parent_relay );
+  free( child_relay );
+  free( tmp_relay );
 
-  if ( relay_list->length < relay_count ) {
-    free( full_query );
+  return ret;
+}
 
-    if ( previous ) {
-      full_query = malloc( sizeof( char ) * ( strlen( partial_secondary_query ) + strlen( not_in_optional ) + strlen( previous_string ) ) + 1 );
-      sprintf( full_query, partial_secondary_query, not_in_optional, previous_string );
-    } else {
-      full_query = malloc( sizeof( char ) * ( strlen( partial_secondary_query ) + strlen( not_in_optional ) + strlen( current_string ) ) + 1 );
-      sprintf( full_query, partial_secondary_query, not_in_optional, current_string );
+int d_create_hsdir_relay( OnionRelay* onion_relay )
+{
+  int ret;
+  int next_addr;
+  int write_addr;
+  binary_relay* b_relay;
+
+  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+
+  next_addr = hsdir_root_addr;
+  write_addr = hsdir_root_addr;
+
+  while ( 1 )
+  {
+    if ( d_get_relay_at_address( b_relay, next_addr ) != 0 )
+    {
+      goto fail;
     }
 
-    ESP_LOGE( MINITOR_TAG, "full_query: %s", full_query );
+    if ( next_addr == hsdir_root_addr )
+    {
+      if ( b_relay->parent_addr == 0xffffffff )
+      {
+        b_relay->parent_addr = hsdir_root_addr + sizeof( binary_relay );
+        b_relay->left_addr = -1;
+        b_relay->right_addr = -1;
+        b_relay->balance = 0;
 
-    ret = sqlite3_prepare_v2( minitor_db, full_query, -1, &statement, NULL );
+        memcpy( &b_relay->relay, onion_relay, sizeof( OnionRelay ) );
 
-    if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to prepare OnionRelay get relays by hash statement, err code: %d", ret );
-#endif
+        if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+        {
+          goto fail;
+        }
 
-      goto cleanup;
+        hsdir_relay_count++;
+        free( b_relay );
+
+        return 0;
+      }
+
+      write_addr = b_relay->parent_addr;
     }
 
-    sqlite3_bind_int( statement, 1, relay_count - relay_list->length );
+    ret = memcmp( onion_relay->id_hash, b_relay->relay.id_hash, H_LENGTH );
 
-    db_onion_relay = used_relay_list->head;
+    if ( ret < 0 )
+    {
+      if ( b_relay->left_addr == -1 )
+      {
+        b_relay->left_addr = write_addr;
 
-    for ( i = 0; i < used_relay_list->length; i++ ) {
-      sqlite3_bind_text( statement, 3 + i, (const char*)db_onion_relay->relay->identity, ID_LENGTH, SQLITE_STATIC );
+        break;
+      }
+      else
+      {
+        next_addr = b_relay->left_addr;
+      }
+    }
+    else
+    {
+      if ( b_relay->right_addr == -1 )
+      {
+        b_relay->right_addr = write_addr;
 
-      db_onion_relay = db_onion_relay->next;
+        break;
+      }
+      else
+      {
+        next_addr = b_relay->right_addr;
+      }
+    }
+  }
+
+  if ( d_store_relay_at_address( b_relay, next_addr ) != 0 )
+  {
+    goto fail;
+  }
+
+  b_relay->parent_addr = next_addr;
+  b_relay->left_addr = -1;
+  b_relay->right_addr = -1;
+  b_relay->balance = 0;
+
+  memcpy( &b_relay->relay, onion_relay, sizeof( OnionRelay ) );
+
+  if ( d_store_relay_at_address( b_relay, write_addr ) != 0 )
+  {
+    goto fail;
+  }
+
+  if ( d_get_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  {
+    goto fail;
+  }
+
+  b_relay->parent_addr = write_addr + sizeof( binary_relay );
+
+  if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  {
+    goto fail;
+  }
+
+  //ESP_LOGE( MINITOR_TAG, "Start rebalance" );
+
+  if ( d_rebalance_relays( next_addr, write_addr ) != 0 )
+  {
+    goto fail;
+  }
+
+  //ESP_LOGE( MINITOR_TAG, "End rebalance" );
+
+  hsdir_relay_count++;
+  free( b_relay );
+
+  return 0;
+
+fail:
+  free( b_relay );
+
+  return -1;
+}
+
+int d_traverse_hsdir_relays_in_order( binary_relay* b_relay, int next_addr, int* previous_addr, int offset )
+{
+  int i;
+
+  // traverse to the next node offset times
+  for ( i = 0; i < offset; i++ )
+  {
+    //ESP_LOGE( MINITOR_TAG, "next_addr: %d", next_addr );
+    //ESP_LOGE( MINITOR_TAG, "previous_addr: %d", *previous_addr );
+
+    if ( hsdir_relay_count == 1 )
+    {
+      if ( d_get_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+      {
+        return -1;
+      }
+
+      return 0;
     }
 
-    while ( 1 ) {
-      ret = sqlite3_step( statement );
+    if ( d_get_relay_at_address( b_relay, next_addr ) != 0 )
+    {
+      return -1;
+    }
 
-      if ( ret != SQLITE_ROW ) {
-        if ( ret != SQLITE_DONE ) {
-          ESP_LOGE( MINITOR_TAG, "Failed querying for secondary relays by hash, err code: %d", ret );
+    //ESP_LOGE( MINITOR_TAG, "parent_addr: %d", b_relay->parent_addr );
+    //ESP_LOGE( MINITOR_TAG, "left_addr: %d", b_relay->left_addr );
+    //ESP_LOGE( MINITOR_TAG, "right_addr: %d", b_relay->right_addr );
+    //ESP_LOGE( MINITOR_TAG, "" );
 
-          goto cleanup;
+    if ( next_addr == hsdir_root_addr && b_relay->parent_addr == 0xffffffff )
+    {
+      return -1;
+    }
+
+    // if we moved up and left, don't count it as next
+    if ( *previous_addr == b_relay->right_addr )
+    {
+      i--;
+      *previous_addr = next_addr;
+
+      // at root, start traversing down to first node
+      if ( next_addr == hsdir_root_addr )
+      {
+        next_addr = b_relay->left_addr;
+      }
+      else
+      {
+        next_addr = b_relay->parent_addr;
+      }
+    }
+    else if ( *previous_addr == b_relay->left_addr )
+    {
+      *previous_addr = next_addr;
+
+      if ( b_relay->right_addr == -1 )
+      {
+        next_addr = b_relay->parent_addr;
+      }
+      else
+      {
+        next_addr = b_relay->right_addr;
+      }
+    }
+    // if we traversed down or we just started at the root node
+    else if ( *previous_addr == b_relay->parent_addr || ( *previous_addr == hsdir_root_addr && next_addr == hsdir_root_addr ) )
+    {
+      *previous_addr = next_addr;
+
+      if ( b_relay->left_addr == -1 )
+      {
+        if ( b_relay->right_addr == -1 )
+        {
+          next_addr = b_relay->parent_addr;
+        }
+        else
+        {
+          next_addr = b_relay->right_addr;
+        }
+      }
+      else
+      {
+        i--;
+        next_addr = b_relay->left_addr;
+      }
+    }
+  }
+
+  return next_addr;
+}
+
+OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, int offset, DoublyLinkedOnionRelayList* used_relays )
+{
+  int i;
+  int ret;
+  int next_addr;
+  int previous_addr;
+  binary_relay* b_relay;
+  DoublyLinkedOnionRelay* used_relay;
+  OnionRelay* onion_relay;
+
+  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+
+  next_addr = hsdir_root_addr;
+
+  while ( 1 )
+  {
+    ESP_LOGE( MINITOR_TAG, "in px_get_hsdir_relay_by_id_hash loop" );
+
+    if ( d_get_relay_at_address( b_relay, next_addr ) != 0 )
+    {
+      goto fail;
+    }
+
+    if ( next_addr == hsdir_root_addr )
+    {
+      if ( b_relay->parent_addr == 0xffffffff )
+      {
+        goto fail;
+      }
+    }
+
+    ret = memcmp( id_hash, b_relay->relay.id_hash, H_LENGTH );
+
+    if ( ret < 0 )
+    {
+      if ( b_relay->left_addr == -1 )
+      {
+        if ( identity != NULL )
+        {
+          goto fail;
+        }
+
+        previous_addr = next_addr;
+
+        if ( b_relay->right_addr != -1 )
+        {
+          next_addr = b_relay->right_addr;
+        }
+        else
+        {
+          next_addr = b_relay->parent_addr;
         }
 
         break;
       }
+      else
+      {
+        next_addr = b_relay->left_addr;
+      }
+    }
+    else if ( ret > 0 )
+    {
+      // we have stopped at a node that is less than us
+      // we need to traverse to the next node in order
+      // since that will be larger than us or will be the
+      // first node
+      if ( b_relay->right_addr == -1 )
+      {
+        if ( identity != NULL )
+        {
+          goto fail;
+        }
 
-      ESP_LOGE( MINITOR_TAG, "Got row from secondary" );
-      db_onion_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-      db_onion_relay->next = NULL;
-      db_onion_relay->previous = NULL;
-      db_onion_relay->relay = malloc( sizeof( OnionRelay ) );
+        offset++;
+        previous_addr = next_addr;
+        next_addr = b_relay->parent_addr;
 
-      v_parse_onion_relay( statement, db_onion_relay->relay );
+        break;
+      }
+      else
+      {
+        next_addr = b_relay->right_addr;
+      }
+    }
+    else
+    {
+      if ( identity == NULL || memcmp( identity, b_relay->relay.identity, ID_LENGTH ) == 0 )
+      {
+        previous_addr = next_addr;
 
-      v_add_relay_to_list( db_onion_relay, relay_list );
+        if ( b_relay->right_addr == -1 )
+        {
+          next_addr = b_relay->parent_addr;
+        }
+        else
+        {
+          next_addr = b_relay->right_addr;
+        }
+
+        break;
+      }
+      else
+      {
+        if ( b_relay->right_addr == -1 )
+        {
+          goto fail;
+        }
+        else
+        {
+          next_addr = b_relay->right_addr;
+        }
+      }
+    }
+  }
+
+  if ( offset == 0 && used_relays != NULL )
+  {
+    used_relay = used_relays->head;
+
+    for ( i = 0; i < used_relays->length; i++ )
+    {
+      if ( memcmp( b_relay->relay.identity, used_relay->relay->identity, ID_LENGTH ) == 0 )
+      {
+        offset = 1;
+
+        break;
+      }
+
+      used_relay = used_relay->next;
+    }
+  }
+
+  while ( offset != 0 )
+  {
+    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, offset );
+
+    if ( next_addr < 0 )
+    {
+      goto fail;
     }
 
-    sqlite3_finalize( statement );
-  }
+    offset = 0;
 
-  if ( relay_list->length < relay_count ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get OnionRelays by their hash" );
-#endif
+    used_relay = used_relays->head;
 
-    goto cleanup;
-  }
+    for ( i = 0; i < used_relays->length; i++ )
+    {
+      if ( memcmp( b_relay->relay.identity, used_relay->relay->identity, ID_LENGTH ) == 0 )
+      {
+        offset = 1;
 
-  if ( d_close_database() < 0 ) {
-    goto db_fail;
-  }
+        break;
+      }
 
-  free( full_query );
-  free( not_in_optional );
-
-  return relay_list;
-
-cleanup:
-  d_close_database();
-db_fail:
-  free( full_query );
-  free( not_in_optional );
-
-  db_onion_relay = relay_list->head;
-
-  for ( i = 0; i < relay_list->length; i++ ) {
-    free( db_onion_relay->relay );
-
-    if ( i == relay_list->length - 1 ) {
-      free( db_onion_relay );
-    } else {
-      db_onion_relay = db_onion_relay->next;
-      free( db_onion_relay->previous );
+      used_relay = used_relay->next;
     }
   }
 
-  free( relay_list );
+  onion_relay = malloc( sizeof( OnionRelay ) );
+  memcpy( onion_relay, &b_relay->relay, sizeof( OnionRelay ) );
+  free( b_relay );
+
+  return onion_relay;
+
+fail:
+  free( b_relay );
+
   return NULL;
 }
 
-DoublyLinkedOnionRelayList* px_get_relays_by_current_hash( unsigned char* hash, int relay_count, DoublyLinkedOnionRelayList* used_relay_list ) {
-  return px_get_relays_by_hash( hash, relay_count, used_relay_list, 0 );
+OnionRelay* px_get_hsdir_relay_by_id( uint8_t* identity )
+{
+  uint8_t id_hash[H_LENGTH];
+
+  v_get_id_hash( identity, id_hash );
+
+  return px_get_hsdir_relay_by_id_hash( id_hash, identity, 0, NULL );
 }
 
-DoublyLinkedOnionRelayList* px_get_relays_by_previous_hash( unsigned char* hash, int relay_count, DoublyLinkedOnionRelayList* used_relay_list ) {
-  return px_get_relays_by_hash( hash, relay_count, used_relay_list, 1 );
+OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude )
+{
+  int i;
+  int start_addr;
+  int previous_addr;
+  int offset;
+  binary_relay* b_relay;
+  OnionRelay* onion_relay;
+  DoublyLinkedOnionRelay* db_onion_relay;
+
+  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+
+  start_addr = hsdir_root_addr;
+  previous_addr = hsdir_root_addr;
+  //offset = ( esp_random() % hsdir_relay_count ) + 1;
+  offset = random_offset_count;
+  random_offset_count++;
+
+  if ( random_offset_count > hsdir_relay_count )
+  {
+    ESP_LOGE( MINITOR_TAG, "reset random_offset_count: %d, %d", random_offset_count, hsdir_relay_count );
+    random_offset_count = 1;
+  }
+
+  do
+  {
+    start_addr = d_traverse_hsdir_relays_in_order( b_relay, start_addr, &previous_addr, offset );
+
+    if ( start_addr < 0 )
+    {
+      goto fail;
+    }
+
+    offset = 0;
+
+    if ( relay_list != NULL )
+    {
+      db_onion_relay = relay_list->head;
+
+      for ( i = 0; i < relay_list->length; i++ )
+      {
+        if ( memcmp( db_onion_relay->relay->identity, b_relay->relay.identity, ID_LENGTH ) == 0 )
+        {
+          ESP_LOGE( MINITOR_TAG, "Found a duplicate: i:%d, in list:%d, found:%d", i, db_onion_relay->relay->or_port, b_relay->relay.or_port );
+          break;
+        }
+
+        db_onion_relay = db_onion_relay->next;
+      }
+
+      if ( i != relay_list->length )
+      {
+        offset = 1;
+      }
+    }
+
+    if ( want_guard == 1 && ( b_relay->relay.can_guard == 0 || b_relay->relay.is_guard == 1 ) )
+    {
+      offset = 1;
+    }
+
+    if ( exclude != NULL && memcmp( exclude, b_relay->relay.identity, ID_LENGTH ) == 0 )
+    {
+      offset = 1;
+    }
+  } while ( offset != 0 );
+
+  onion_relay = malloc( sizeof( OnionRelay ) );
+  memcpy( onion_relay, &b_relay->relay, sizeof( OnionRelay ) );
+  free( b_relay );
+
+  return onion_relay;
+
+fail:
+  free( b_relay );
+
+  return NULL;
 }
 
-static int d_update_relay_guard( unsigned char* identity, int guard ) {
+int d_get_hsdir_count()
+{
+  return hsdir_relay_count;
+}
+
+static int d_update_relay_guard( uint8_t* identity, uint8_t* id_hash, int guard )
+{
   int ret;
-  sqlite3_stmt* statement;
+  int next_addr;
+  binary_relay* b_relay;
 
-  if ( d_open_database() < 0 ) {
-    return -1;
+  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+
+  next_addr = hsdir_root_addr;
+
+  while ( 1 )
+  {
+    if ( d_get_relay_at_address( b_relay, next_addr ) != 0 )
+    {
+      goto fail;
+    }
+
+    if ( next_addr == hsdir_root_addr )
+    {
+      if ( b_relay->parent_addr == 0xffffffff )
+      {
+        goto fail;
+      }
+    }
+
+    ret = memcmp( id_hash, b_relay->relay.id_hash, H_LENGTH );
+
+    if ( ret < 0 )
+    {
+      if ( b_relay->left_addr == -1 )
+      {
+        goto fail;
+      }
+      else
+      {
+        next_addr = b_relay->left_addr;
+      }
+    }
+    else if ( ret > 0 )
+    {
+      if ( b_relay->right_addr == -1 )
+      {
+        goto fail;
+      }
+      else
+      {
+        next_addr = b_relay->right_addr;
+      }
+    }
+    else
+    {
+      if ( memcmp( identity, b_relay->relay.identity, ID_LENGTH ) == 0 )
+      {
+        b_relay->relay.is_guard = guard;
+
+        if ( d_store_relay_at_address( b_relay, next_addr ) != 0 )
+        {
+          goto fail;
+        }
+
+        break;
+      }
+      else
+      {
+        if ( b_relay->right_addr == -1 )
+        {
+          goto fail;
+        }
+        else
+        {
+          next_addr = b_relay->right_addr;
+        }
+      }
+    }
   }
 
-  ret = sqlite3_prepare_v2( minitor_db, "UPDATE main.OnionRelays SET guard = ?1 WHERE identity = ?2;", -1, &statement, NULL );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to prepare update OnionRelay guard statement, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_bind_int( statement, 1, guard );
-  sqlite3_bind_text( statement, 2, (const char*)identity, ID_LENGTH, SQLITE_STATIC );
-
-  if ( ( ret = sqlite3_step( statement ) ) != SQLITE_DONE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to update OnionRelay guard field, err code: %d", ret );
-#endif
-
-    goto cleanup;
-  }
-
-  sqlite3_finalize( statement );
-
-  if ( d_close_database() < 0 ) {
-    return -1;
-  }
-
-  return sqlite3_changes( minitor_db );
-
-cleanup:
-  d_close_database();
-  return -1;
-}
-
-int d_mark_relay_as_guard( unsigned char* identity ) {
-  return d_update_relay_guard( identity, 1 );
-}
-
-int d_unmark_relay_as_guard( unsigned char* identity ) {
-  return d_update_relay_guard( identity, 0 );
-}
-
-int d_destroy_all_relays() {
-  int ret;
-  char* err;
-
-  if ( d_open_database() < 0 ) {
-    return -1;
-  }
-
-  ret = sqlite3_exec( minitor_db, "DELETE FROM main.OnionRelays;", NULL, NULL, &err );
-
-  if ( ret != SQLITE_OK ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to delete OnionRelays, err msg: %s", err );
-#endif
-
-    sqlite3_free( err );
-
-    goto cleanup;
-  }
-
-  if ( d_close_database() < 0 ) {
-    return -1;
-  }
+  free( b_relay );
 
   return 0;
 
-cleanup:
-  d_close_database();
+fail:
+  free( b_relay );
+
   return -1;
+}
+
+int d_mark_hsdir_relay_as_guard( uint8_t* identity, uint8_t* id_hash )
+{
+  return d_update_relay_guard( identity, id_hash, 1 );
+}
+
+int d_unmark_hsdir_relay_as_guard( uint8_t* identity, uint8_t* id_hash )
+{
+  return d_update_relay_guard( identity, id_hash, 0 );
 }

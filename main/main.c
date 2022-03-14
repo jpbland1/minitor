@@ -20,27 +20,19 @@
 #include "minitor.h"
 
 #include "test/circuit.h"
+#include "test/issi.h"
 
 #include <esp_event.h>
 #include "esp_netif.h"
-/* #include "protocol_examples_common.h" */
 #include <esp_http_server.h>
 
 static const char* TAG = "MAIN";
 
-/*
 #define SPI_DMA_CHAN 1
-#define PIN_NUM_MISO 4
-#define PIN_NUM_MOSI 15
-#define PIN_NUM_CLK  14
-#define PIN_NUM_CS   13
-*/
-
-#define SPI_DMA_CHAN 1
-#define PIN_NUM_MISO 19
-#define PIN_NUM_MOSI 23
-#define PIN_NUM_CLK  18
 #define PIN_NUM_CS   4
+#define PIN_NUM_CLK  18
+#define PIN_NUM_MOSI 23
+#define PIN_NUM_MISO 19
 
 /* An HTTP GET handler */
 static esp_err_t hello_get_handler(httpd_req_t *req)
@@ -146,8 +138,6 @@ void app_main()
     .allocation_unit_size = 16 * 1024
   };
 
-  /* sdmmc_card_t* card; */
-
   // SPI
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
 
@@ -157,7 +147,7 @@ void app_main()
     .sclk_io_num = PIN_NUM_CLK,
     .quadwp_io_num = -1,
     .quadhd_io_num = -1,
-    .max_transfer_sz = 4000,
+    .max_transfer_sz = 4092,
   };
 
   ret = spi_bus_initialize( host.slot, &bus_cfg, SPI_DMA_CHAN );
@@ -171,7 +161,6 @@ void app_main()
   slot_config.gpio_cs = PIN_NUM_CS;
   slot_config.host_id = host.slot;
 
-  /* ret = esp_vfs_fat_sdspi_mount( "/sdcard", &host, &slot_config, &mount_config, &card ); */
   ret = esp_vfs_fat_sdspi_mount( "/sdcard", &host, &slot_config, &mount_config, NULL );
 
   if (ret != ESP_OK) {
@@ -186,8 +175,14 @@ void app_main()
     return;
   }
 
-  /* sdmmc_card_print_info( stdout, card ); */
+  if ( d_issi_INIT() < 0 )
+  {
+    ESP_LOGE( TAG, "Failed to init issi ram" );
 
+    return;
+  }
+
+/*
   static httpd_handle_t server = NULL;
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -200,65 +195,18 @@ void app_main()
   sntp_setoperatingmode( SNTP_OPMODE_POLL );
   sntp_setservername( 0, "pool.ntp.org" );
   sntp_init();
+*/
 
-  do {
-    vTaskDelay( pdMS_TO_TICKS( 1000 ) );
-    time( &now );
-    localtime_r( &now, &time_info );
-  } while ( time_info.tm_year < (2016 - 1900) );
+  //do {
+    //vTaskDelay( pdMS_TO_TICKS( 1000 ) );
+    //time( &now );
+    //localtime_r( &now, &time_info );
+  //} while ( time_info.tm_year < (2016 - 1900) );
 
-  /* int err; */
-  /* int sock_fd; */
-  /* struct sockaddr_in dest_addr; */
+  //v_minitor_INIT();
 
-  /* dest_addr.sin_addr.s_addr = inet_addr( "127.0.0.1" ); */
-  /* dest_addr.sin_family = AF_INET; */
-  /* dest_addr.sin_port = htons( 8080 ); */
+  //OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
 
-  /* sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP ); */
-
-  /* if ( sock_fd < 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( TAG, "couldn't create a socket to the local port" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
-
-  /* err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) ); */
-
-  /* if ( err != 0 ) { */
-/* #ifdef DEBUG_MINITOR */
-    /* ESP_LOGE( TAG, "couldn't connect to the local port" ); */
-/* #endif */
-
-    /* return -1; */
-  /* } */
-
-  v_minitor_INIT();
-
-  OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
-
-  /* int free_before; */
-  /* int free_after; */
-
-  /* free_before = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
-
-  /* d_test_circuit_memory_leak( 30 ); */
-
-  /* free_after = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
-
-  /* ESP_LOGE( TAG, "start mem: %d", free_before ); */
-  /* ESP_LOGE( TAG, "end mem: %d", free_after ); */
-  /* ESP_LOGE( TAG, "total diff mem: %d", free_before - free_after ); */
-
-  /* free_before = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
-
-  /* d_test_circuit_memory_leak_truncate( 30 ); */
-
-  /* free_after = heap_caps_get_free_size( MALLOC_CAP_8BIT ); */
-
-  /* ESP_LOGE( TAG, "start mem: %d", free_before ); */
-  /* ESP_LOGE( TAG, "end mem: %d", free_after ); */
-  /* ESP_LOGE( TAG, "total diff mem: %d", free_before - free_after ); */
+  v_test_setup_issi();
+  v_test_d_traverse_hsdir_relays_in_order();
 }

@@ -3,6 +3,7 @@
 
 #include "../h/structures/onion_service.h"
 #include "../h/structures/circuit.h"
+#include "../h/models/issi.h"
 
 int v_minitor_INIT();
 OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );

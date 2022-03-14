@@ -8,25 +8,14 @@
 #include "wolfssl/wolfcrypt/error-crypt.h"
 
 #include "../include/config.h"
+#include "../h/or_connection.h"
 #include "../h/circuit.h"
 #include "../h/cell.h"
 #include "../h/encoding.h"
 #include "../h/structures/onion_message.h"
 #include "../h/models/relay.h"
 
-extern WOLFSSL_CTX* xMinitorWolfSSL_Context;
-
-static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
-  if ( store->error == ASN_NO_SIGNER_E ) {
-    return SSL_SUCCESS;
-  }
-
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "SSL callback error %d", store->error );
-#endif
-
-  return 0;
-}
+#include "../h/consensus.h"
 
 static unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size ) {
   int i = 0;
@@ -84,17 +73,20 @@ int d_setup_init_rend_circuits( int circuit_count )
   for ( i = 0; i < circuit_count; i++ )
   {
     linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-    linked_circuit->circuit.task_handle = NULL;
+    linked_circuit->circuit = malloc( sizeof( OnionCircuit ) );
+    linked_circuit->circuit->task_handle = NULL;
+    linked_circuit->circuit->forward_queue = NULL;
+    linked_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
     do
     {
-      unique_relay = px_get_random_relay_standalone();
+      unique_relay = px_get_random_hsdir_relay( 0, NULL, NULL );
 
       standby_node = standby_rend_circuits.head;
 
       while ( standby_node != NULL )
       {
-        if ( memcmp( standby_node->circuit.relay_list.tail->relay->identity, unique_relay->identity, ID_LENGTH ) == 0 )
+        if ( memcmp( standby_node->circuit->relay_list.tail->relay->identity, unique_relay->identity, ID_LENGTH ) == 0 )
         {
           free( unique_relay );
           unique_relay = NULL;
@@ -105,27 +97,31 @@ int d_setup_init_rend_circuits( int circuit_count )
       }
     } while ( unique_relay == NULL );
 
-    switch ( d_build_onion_circuit_to( &linked_circuit->circuit, 1, unique_relay ) )
+    switch ( d_build_onion_circuit_to( linked_circuit->circuit, 1, unique_relay ) )
     {
       case -1:
         i--;
+        vQueueDelete( linked_circuit->circuit->rx_queue );
+        free( linked_circuit->circuit );
         free( linked_circuit );
         break;
       case -2:
         i = circuit_count;
+        vQueueDelete( linked_circuit->circuit->rx_queue );
+        free( linked_circuit->circuit );
         free( linked_circuit );
         break;
       case 0:
-        linked_circuit->circuit.status = CIRCUIT_STANDBY;
+        linked_circuit->circuit->status = CIRCUIT_STANDBY;
 
         // spawn a task to block on the tls buffer and put the data into the rx_queue
         xTaskCreatePinnedToCore(
           v_handle_circuit,
           "HANDLE_CIRCUIT",
           4096,
-          (void*)(&linked_circuit->circuit),
+          (void*)(linked_circuit->circuit),
           6,
-          &linked_circuit->circuit.task_handle,
+          &linked_circuit->circuit->task_handle,
           tskNO_AFFINITY
         );
 
@@ -148,7 +144,8 @@ int d_setup_init_rend_circuits( int circuit_count )
 }
 
 // create three hop circuits that can quickly be turned into introduction points
-int d_setup_init_circuits( int circuit_count ) {
+int d_setup_init_circuits( int circuit_count )
+{
   int res = 0;
 
   int i;
@@ -159,17 +156,20 @@ int d_setup_init_circuits( int circuit_count ) {
   for ( i = 0; i < circuit_count; i++ )
   {
     linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-    linked_circuit->circuit.task_handle = NULL;
+    linked_circuit->circuit = malloc( sizeof( OnionCircuit ) );
+    linked_circuit->circuit->task_handle = NULL;
+    linked_circuit->circuit->forward_queue = NULL;
+    linked_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
     do
     {
-      unique_final_relay = px_get_random_relay_standalone();
+      unique_final_relay = px_get_random_hsdir_relay( 0, NULL, NULL );
 
       standby_node = standby_circuits.head;
 
       while ( standby_node != NULL )
       {
-        if ( memcmp( standby_node->circuit.relay_list.tail->relay->identity, unique_final_relay->identity, ID_LENGTH ) == 0 )
+        if ( memcmp( standby_node->circuit->relay_list.tail->relay->identity, unique_final_relay->identity, ID_LENGTH ) == 0 )
         {
           free( unique_final_relay );
           unique_final_relay = NULL;
@@ -180,27 +180,33 @@ int d_setup_init_circuits( int circuit_count ) {
       }
     } while ( unique_final_relay == NULL );
 
-    switch ( d_build_onion_circuit_to( &linked_circuit->circuit, 3, unique_final_relay ) )
+    ESP_LOGE( MINITOR_TAG, "Starting next build" );
+
+    switch ( d_build_onion_circuit_to( linked_circuit->circuit, 3, unique_final_relay ) )
     {
       case -1:
         i--;
+        vQueueDelete( linked_circuit->circuit->rx_queue );
+        free( linked_circuit->circuit );
         free( linked_circuit );
         break;
       case -2:
         i = circuit_count;
+        vQueueDelete( linked_circuit->circuit->rx_queue );
+        free( linked_circuit->circuit );
         free( linked_circuit );
         break;
       case 0:
-        linked_circuit->circuit.status = CIRCUIT_STANDBY;
+        linked_circuit->circuit->status = CIRCUIT_STANDBY;
 
         // spawn a task to block on the tls buffer and put the data into the rx_queue
         xTaskCreatePinnedToCore(
           v_handle_circuit,
           "HANDLE_CIRCUIT",
           4096,
-          (void*)(&linked_circuit->circuit),
+          (void*)(linked_circuit->circuit),
           6,
-          &linked_circuit->circuit.task_handle,
+          &linked_circuit->circuit->task_handle,
           tskNO_AFFINITY
         );
 
@@ -224,8 +230,6 @@ int d_setup_init_circuits( int circuit_count ) {
 
 // create a tor circuit
 int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length ) {
-  int succ;
-
   if ( d_prepare_random_onion_circuit( circuit, circuit_length, NULL ) < 0 ) {
     return -1;
   }
@@ -235,9 +239,9 @@ int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length ) {
 
 int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay )
 {
-  int succ;
   DoublyLinkedOnionRelay* db_relay;
 
+  ESP_LOGE( MINITOR_TAG, "Preparing" );
   if ( d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity ) < 0 )
   {
     return -1;
@@ -248,6 +252,7 @@ int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRe
 
   v_add_relay_to_list( db_relay, &circuit->relay_list );
 
+  ESP_LOGE( MINITOR_TAG, "Building" );
   return d_build_onion_circuit( circuit );
 }
 
@@ -259,6 +264,8 @@ int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionR
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to get suitable relays to extend to" );
 #endif
+
+    return -1;
   }
 
   node = malloc( sizeof( DoublyLinkedOnionRelay ) );
@@ -297,19 +304,21 @@ int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, u
 {
   // find 3 suitable relays from our directory information
   circuit->status = CIRCUIT_BUILDING;
-  circuit->rx_queue = NULL;
 
+  ESP_LOGE( MINITOR_TAG, "Taking circ_id_mutex" );
   // BEGIN mutex for circ_id
   xSemaphoreTake( circ_id_mutex, portMAX_DELAY );
 
   circuit->circ_id = ++circ_id_counter;
 
+  ESP_LOGE( MINITOR_TAG, "Giving circ_id_mutex" );
   xSemaphoreGive( circ_id_mutex );
   // END mutex for circ_id
 
   circuit->relay_list.length = 0;
   circuit->relay_list.built_length = 0;
 
+  ESP_LOGE( MINITOR_TAG, "d_get_suitable_onion_relays" );
   return d_get_suitable_onion_relays( &circuit->relay_list, circuit_length, exclude );
 }
 
@@ -324,7 +333,8 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
 
     if ( i == 0 )
     {
-      db_relay->relay = px_get_random_relay_non_guard( exclude );
+      ESP_LOGE( MINITOR_TAG, "Getting first relay" );
+      db_relay->relay = px_get_random_hsdir_relay( 1, NULL, exclude );
 
       if ( db_relay->relay == NULL )
       {
@@ -337,7 +347,8 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
         return -1;
       }
 
-      if ( d_mark_relay_as_guard( db_relay->relay->identity ) < 0 )
+      ESP_LOGE( MINITOR_TAG, "Marking relay as guard" );
+      if ( d_mark_hsdir_relay_as_guard( db_relay->relay->identity, db_relay->relay->id_hash ) < 0 )
       {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to mark guard relay" );
@@ -351,7 +362,8 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
     }
     else
     {
-      db_relay->relay = px_get_random_relay( relay_list, exclude );
+      ESP_LOGE( MINITOR_TAG, "Getting relay: %d", i + 1 );
+      db_relay->relay = px_get_random_hsdir_relay( 0, relay_list, exclude );
 
       if ( db_relay->relay == NULL )
       {
@@ -382,9 +394,6 @@ cleanup:
 int d_build_onion_circuit( OnionCircuit* circuit )
 {
   int i;
-  int sock_fd;
-  struct sockaddr_in dest_addr;
-  WOLFSSL* ssl;
 
   // get the relay's ntor onion keys
   if ( d_fetch_descriptor_info( circuit ) < 0 )
@@ -396,87 +405,13 @@ int d_build_onion_circuit( OnionCircuit* circuit )
     goto clean_circuit;
   }
 
-  // connect to the relay over ssl
-  dest_addr.sin_addr.s_addr = circuit->relay_list.head->relay->address;
-  dest_addr.sin_family = AF_INET;
-  dest_addr.sin_port = htons( circuit->relay_list.head->relay->or_port );
-
-  sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
-
-  if ( sock_fd < 0 )
+  if ( d_attach_connection( circuit->relay_list.head->relay->address, circuit->relay_list.head->relay->or_port, circuit ) != 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to create socket" );
+    ESP_LOGE( MINITOR_TAG, "Failed to connect to the first relay" );
 #endif
 
     goto clean_circuit;
-  }
-
-  if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to connect socket, errno: %d", errno );
-#endif
-
-    close( sock_fd );
-
-    goto clean_circuit;
-  }
-
-  ESP_LOGE( MINITOR_TAG, "xMinitorWolfSSL_Context: %p", xMinitorWolfSSL_Context );
-
-  ssl = NULL;
-
-  while ( ssl == NULL )
-  {
-    ssl = wolfSSL_new( xMinitorWolfSSL_Context );
-
-    if ( ssl == NULL )
-    {
-  #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
-  #endif
-
-      wolfSSL_CTX_free( xMinitorWolfSSL_Context );
-
-      xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() );
-    }
-  }
-
-  wolfSSL_set_verify( ssl, SSL_VERIFY_PEER, d_ignore_ca_callback );
-  wolfSSL_KeepArrays( ssl );
-
-  if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to set ssl fd" );
-#endif
-
-    shutdown( sock_fd, 0 );
-    close( sock_fd );
-
-    goto clean_ssl;
-  }
-
-  if ( wolfSSL_connect( ssl ) != SSL_SUCCESS )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to wolfssl_connect" );
-#endif
-
-    goto clean_ssl;
-  }
-
-  // attach the ssl object to the circuit
-  circuit->ssl = ssl;
-
-  if ( d_router_handshake( circuit->ssl ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to handshake with first relay" );
-#endif
-
-    goto clean_ssl;
   }
 
   if ( d_router_create2( circuit ) < 0 )
@@ -485,7 +420,7 @@ int d_build_onion_circuit( OnionCircuit* circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to CREATE2 with first relay" );
 #endif
 
-    goto clean_ssl;
+    goto clean_connection;
   }
 
   circuit->relay_list.built_length++;
@@ -508,18 +443,32 @@ int d_build_onion_circuit( OnionCircuit* circuit )
 
   return 0;
 
-clean_ssl:
-  wolfSSL_shutdown( ssl );
-  shutdown( wolfSSL_get_fd( ssl ), 0 );
-  close( wolfSSL_get_fd( ssl ) );
-  wolfSSL_free( ssl );
-clean_circuit:
-  d_unmark_relay_as_guard( circuit->relay_list.head->relay->identity );
+clean_connection:
+  ESP_LOGE( MINITOR_TAG, "Trying to dettach" );
 
+
+  // MUTEX TAKE
+  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+
+  if ( b_verify_or_connection( circuit->or_connection, &or_connections ) == 1 )
+  {
+    v_dettach_connection( circuit );
+  }
+
+  xSemaphoreGive( or_connections_mutex );
+  // MUTEX GIVE
+
+clean_circuit:
+  ESP_LOGE( MINITOR_TAG, "Trying to unmark" );
+  d_unmark_hsdir_relay_as_guard( circuit->relay_list.head->relay->identity, circuit->relay_list.head->relay->id_hash );
+
+  ESP_LOGE( MINITOR_TAG, "Trying pop relays" );
   while ( circuit->relay_list.length )
   {
     v_pop_relay_from_list_back( &circuit->relay_list );
   }
+
+  ESP_LOGE( MINITOR_TAG, "Returning error" );
 
   return -1;
 }
@@ -540,28 +489,29 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   packed_cell = pack_and_free( &unpacked_cell );
 
   // send a destroy cell to the first hop
-  if ( wolfSSL_send( circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+  if ( d_send_packed_cell_and_free( circuit->or_connection, packed_cell ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send DESTROY cell" );
 #endif
-
-    return -1;
   }
-
-  free( packed_cell );
 
   tmp_relay_node = circuit->relay_list.head;
 
-  for ( i = 0; i < circuit->relay_list.length; i++ ) {
-    if ( i == 0 ) {
-      if ( d_unmark_relay_as_guard( tmp_relay_node->relay->identity ) < 0 ) {
+  for ( i = 0; i < circuit->relay_list.length; i++ )
+  {
+    if ( i == 0 )
+    {
+      if ( d_unmark_hsdir_relay_as_guard( tmp_relay_node->relay->identity, tmp_relay_node->relay->id_hash ) < 0 )
+      {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to unmark guard" );
 #endif
       }
     }
 
-    if ( i < circuit->relay_list.built_length ) {
+    if ( i < circuit->relay_list.built_length )
+    {
       wc_ShaFree( &tmp_relay_node->relay_crypto->running_sha_forward );
       wc_ShaFree( &tmp_relay_node->relay_crypto->running_sha_backward );
       wc_AesFree( &tmp_relay_node->relay_crypto->aes_forward );
@@ -571,9 +521,12 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
 
     free( tmp_relay_node->relay );
 
-    if ( i == circuit->relay_list.length - 1 ) {
+    if ( i == circuit->relay_list.length - 1 )
+    {
       free( tmp_relay_node );
-    } else {
+    }
+    else
+    {
       tmp_relay_node = tmp_relay_node->next;
       free( tmp_relay_node->previous );
     }
@@ -584,11 +537,14 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   circuit->relay_list.head = NULL;
   circuit->relay_list.tail = NULL;
 
-  if ( circuit->status == CIRCUIT_INTRO_POINT ) {
+  if ( circuit->status == CIRCUIT_INTRO_POINT )
+  {
     wc_ed25519_free( &circuit->intro_crypto->auth_key );
     wc_curve25519_free( &circuit->intro_crypto->encrypt_key );
     free( circuit->intro_crypto );
-  } else if ( circuit->status == CIRCUIT_RENDEZVOUS ) {
+  }
+  else if ( circuit->status == CIRCUIT_RENDEZVOUS )
+  {
     wc_Sha3_256_Free( &circuit->hs_crypto->hs_running_sha_forward );
     wc_Sha3_256_Free( &circuit->hs_crypto->hs_running_sha_backward );
     wc_AesFree( &circuit->hs_crypto->hs_aes_forward );
@@ -596,11 +552,17 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
     free( circuit->hs_crypto );
   }
 
-  // free the ssl object
-  wolfSSL_shutdown( circuit->ssl );
-  shutdown( wolfSSL_get_fd( circuit->ssl ), 0 );
-  close( wolfSSL_get_fd( circuit->ssl ) );
-  wolfSSL_free( circuit->ssl );
+  // MUTEX TAKE
+  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+
+  if ( b_verify_or_connection( circuit->or_connection, &or_connections ) == 1 )
+  {
+    // detach from the connection
+    v_dettach_connection( circuit );
+  }
+
+  xSemaphoreGive( or_connections_mutex );
+  // MUTEX GIVE
 
   // TODO may need to make a mutex for the handle, not sure if it could be set
   // to NULL by another thread after this NULL check, causing the current task to
@@ -608,6 +570,8 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   if ( circuit->task_handle != NULL ) {
     vTaskDelete( circuit->task_handle );
   }
+
+  vQueueDelete( circuit->rx_queue );
 
   return 0;
 }
@@ -663,7 +627,7 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
   circuit->relay_list.built_length = new_length;
 
   // send a destroy cell to the first hop
-  if ( d_send_packed_relay_cell_and_free( circuit->ssl, packed_cell, &circuit->relay_list, NULL ) < 0 ) {
+  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_TRUNCATE cell" );
 #endif
@@ -671,7 +635,7 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
     return -1;
   }
 
-  if ( d_recv_cell( circuit->ssl, &unpacked_cell, CIRCID_LEN, &circuit->relay_list, NULL, NULL ) < 0 ) {
+  if ( d_recv_cell( circuit, &unpacked_cell, CIRCID_LEN, &circuit->relay_list, NULL, NULL ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_TRUNCATED cell" );
 #endif
@@ -694,9 +658,11 @@ int d_truncate_onion_circuit( OnionCircuit* circuit, int new_length ) {
   return 0;
 }
 
+// we are now in the server read state
 void v_handle_circuit( void* pv_parameters )
 {
   int succ;
+  uint8_t* packed_cell;
   OnionCircuit* onion_circuit = (OnionCircuit*)pv_parameters;
   Cell* unpacked_cell;
   OnionMessage* onion_message;
@@ -705,43 +671,63 @@ void v_handle_circuit( void* pv_parameters )
   {
     unpacked_cell = malloc( sizeof( Cell ) );
 
+    succ = xQueueReceive( onion_circuit->rx_queue, &onion_message, portMAX_DELAY );
+
+    if ( succ == pdFALSE || onion_message == NULL )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "rx_queue was shut down, rebuild connection or tear down circuit" );
+#endif
+
+      vTaskDelete( NULL );
+    }
+
+    packed_cell = onion_message->data;
+
     if ( onion_circuit->status == CIRCUIT_RENDEZVOUS )
     {
-      succ = d_recv_cell( onion_circuit->ssl, unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, onion_circuit );
+      succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &onion_circuit->relay_list, onion_circuit->hs_crypto, &unpacked_cell->recv_index );
     }
     else
     {
-      succ = d_recv_cell( onion_circuit->ssl, unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, NULL );
+      succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, &unpacked_cell->recv_index );
     }
 
-    if ( succ < 0 )
+    if ( succ  < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Circuit %.8x received error code: %d waiting for a cell", onion_circuit->circ_id, succ );
+      ESP_LOGE( MINITOR_TAG, "Failed to decrypt packed cell" );
 #endif
 
+      free( onion_message->data );
+      free( onion_message );
       free( unpacked_cell );
+
       continue;
     }
 
+    // set the unpacked cell and return success
+    unpack_and_free( unpacked_cell, packed_cell, CIRCID_LEN );
+
     // TODO should determine if we need to destroy the circuit on a NULL queue
-    if ( unpacked_cell->command == PADDING || onion_circuit->rx_queue == NULL )
+    if ( unpacked_cell->command == PADDING || onion_circuit->forward_queue == NULL )
     {
       free_cell( unpacked_cell );
       free( unpacked_cell );
+      free( onion_message );
     }
     else
     {
-      onion_message = malloc( sizeof( OnionMessage ) );
       onion_message->type = ONION_CELL;
       onion_message->data = unpacked_cell;
 
-      xQueueSendToBack( onion_circuit->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+      xQueueSendToBack( onion_circuit->forward_queue, (void*)(&onion_message), portMAX_DELAY );
     }
   }
 }
 
-int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
+int d_router_extend2( OnionCircuit* circuit, int node_index )
+{
   int ret = 0;
   int i;
   int wolf_succ;
@@ -772,16 +758,17 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
     goto finish;
   }
 
-  relay = onion_circuit->relay_list.head;
+  relay = circuit->relay_list.head;
 
-  for ( i = 0; i < node_index; i++ ) {
+  for ( i = 0; i < node_index; i++ )
+  {
     relay = relay->next;
   }
 
   target_relay = relay;
 
   // construct link specifiers
-  unpacked_cell.circ_id = onion_circuit->circ_id;
+  unpacked_cell.circ_id = circuit->circ_id;
   unpacked_cell.command = RELAY_EARLY;
   unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
 
@@ -818,7 +805,8 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
   ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length );
 
-  if ( d_ntor_handshake_start( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 ) {
+  if ( d_ntor_handshake_start( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &extend2_handshake_key ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
@@ -832,34 +820,42 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
   packed_cell = pack_and_free( &unpacked_cell );
 
   // send the EXTEND2 cell
-  if ( d_send_packed_relay_cell_and_free( onion_circuit->ssl, packed_cell, &onion_circuit->relay_list, NULL ) < 0 ) {
+  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, NULL ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
 #endif
 
     ret = -1;
+
     goto finish;
   }
 
   // recv EXTENDED2 cell and perform the second half of the handshake
-  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, NULL ) < 0 ) {
+  if ( d_recv_cell( circuit, &unpacked_cell, CIRCID_LEN, &circuit->relay_list, NULL, NULL ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_EXTENDED2 cell" );
 #endif
 
     ret = -1;
+
     goto finish;
   }
 
-  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_EXTENDED2 ) {
+  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_EXTENDED2 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Got something other than RELAY_EXTENDED2: %d", unpacked_cell.command );
 #endif
 
 #ifdef DEBUG_MINITOR
-    if ( unpacked_cell.command == DESTROY ) {
+    if ( unpacked_cell.command == DESTROY )
+    {
       ESP_LOGE( MINITOR_TAG, "DESTROY: %d", ( (PayloadDestroy*)unpacked_cell.payload )->destroy_code );
-    } else if ( ( (PayloadRelay*)unpacked_cell.payload )->command == RELAY_TRUNCATED ) {
+    }
+    else if ( ( (PayloadRelay*)unpacked_cell.payload )->command == RELAY_TRUNCATED )
+    {
       ESP_LOGE( MINITOR_TAG, "RELAY_TRUNCATED: %d", ( (PayloadDestroy*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->destroy_code );
     }
 #endif
@@ -870,7 +866,8 @@ int d_router_extend2( OnionCircuit* onion_circuit, int node_index ) {
     goto finish;
   }
 
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay, &extend2_handshake_key ) < 0 ) {
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay, &extend2_handshake_key ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
@@ -888,7 +885,8 @@ finish:
   return ret;
 }
 
-int d_router_create2( OnionCircuit* onion_circuit ) {
+int d_router_create2( OnionCircuit* circuit )
+{
   int wolf_succ;
   WC_RNG rng;
   Cell unpacked_cell;
@@ -902,7 +900,8 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
 
   wc_FreeRng( &rng );
 
-  if ( wolf_succ != 0 ) {
+  if ( wolf_succ != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to make create2_handshake_key, error code %d", wolf_succ );
 #endif
@@ -911,7 +910,7 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
   }
 
   // make a create2 cell
-  unpacked_cell.circ_id = onion_circuit->circ_id;
+  unpacked_cell.circ_id = circuit->circ_id;
   unpacked_cell.command = CREATE2;
   unpacked_cell.payload = malloc( sizeof( PayloadCreate2 ) );
 
@@ -919,7 +918,8 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
   ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
   ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length );
 
-  if ( d_ntor_handshake_start( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head->relay, &create2_handshake_key ) < 0 ) {
+  if ( d_ntor_handshake_start( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data, circuit->relay_list.head->relay, &create2_handshake_key ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into unpacked_cell" );
 #endif
@@ -931,27 +931,30 @@ int d_router_create2( OnionCircuit* onion_circuit ) {
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  if ( wolfSSL_send( onion_circuit->ssl, packed_cell, CELL_LEN, 0 ) < 0 ) {
+  if ( d_send_packed_cell_and_free( circuit->or_connection, packed_cell ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send CREATE2 cell" );
 #endif
 
-    free( packed_cell );
-
     goto cleanup;
   }
 
-  free( packed_cell );
-
-  if ( d_recv_cell( onion_circuit->ssl, &unpacked_cell, CIRCID_LEN, NULL, NULL, NULL ) < 0 ) {
+  if ( d_recv_cell( circuit, &unpacked_cell, CIRCID_LEN, NULL, NULL, NULL ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv CREATED2 cell" );
 #endif
 
+    {
+      ESP_LOGE( MINITOR_TAG, "or_port: %d", circuit->relay_list.head->relay->or_port );
+    }
+
     goto cleanup;
   }
 
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, onion_circuit->relay_list.head, &create2_handshake_key ) < 0 ) {
+  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, circuit->relay_list.head, &create2_handshake_key ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to finish CREATED2 handshake" );
 #endif
@@ -1224,6 +1227,7 @@ fail:
 int d_router_handshake( WOLFSSL* ssl ) {
   int i;
   int wolf_succ;
+  int succ;
   WOLFSSL_X509* peer_cert;
   Sha256 reusable_sha;
   unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
@@ -1294,7 +1298,9 @@ int d_router_handshake( WOLFSSL* ssl ) {
   wc_Sha256Update( &initiator_sha, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length );
 
   // send the versions cell
-  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+  wolf_succ = wolfSSL_send( ssl, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length, 0 );
+
+  if ( wolf_succ <= 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send versions cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
 #endif
@@ -1305,26 +1311,40 @@ int d_router_handshake( WOLFSSL* ssl ) {
   // reset the packed cell
   free( packed_cell );
 
-  // recv and unpack the versions cell
-  if ( d_recv_cell( ssl, &unpacked_cell, LEGACY_CIRCID_LEN, NULL, &responder_sha, NULL ) < 0 ) {
+  // recv the versions cell
+  succ = d_recv_packed_cell( ssl, &packed_cell, LEGACY_CIRCID_LEN );
+
+  if ( succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv versions cell" );
+    ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
 #endif
 
     return -1;
   }
 
-  // free the unpacked cell
-  free_cell( &unpacked_cell );
+  wc_Sha256Update( &responder_sha, packed_cell, succ );
+
+  // TODO check that our versions are compatable, not neccessary in chutney
+
+  // free the packed cell
+  free( packed_cell );
 
   // recv and unpack the certs cell
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, &responder_sha, NULL ) < 0 ) {
+  succ = d_recv_packed_cell( ssl, &packed_cell, CIRCID_LEN );
+
+  if ( succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv certs cell" );
+    ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
 #endif
 
     return -1;
   }
+
+  wc_Sha256Update( &responder_sha, packed_cell, succ );
+
+  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
 
   // verify certs
   if ( d_verify_certs( &unpacked_cell, peer_cert, &responder_rsa_identity_key_der_size, responder_rsa_identity_key_der ) < 0 ) {
@@ -1337,17 +1357,22 @@ int d_router_handshake( WOLFSSL* ssl ) {
 
   free_cell( &unpacked_cell );
 
-  // recv and unpack the auth challenge cell
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, &responder_sha, NULL ) < 0 ) {
+  // recv the auth challenge cell
+  succ = d_recv_packed_cell( ssl, &packed_cell, CIRCID_LEN );
+
+  if ( succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv auth challenge cell" );
+    ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
 #endif
 
     return -1;
   }
 
-  // free the unpacked cell
-  free_cell( &unpacked_cell );
+  wc_Sha256Update( &responder_sha, packed_cell, succ );
+
+  // free the packed cell
+  free( packed_cell );
 
   // generate certs for certs cell
   if ( d_generate_certs( &initiator_rsa_identity_key_der_size, initiator_rsa_identity_key_der, initiator_rsa_identity_cert_der, &initiator_rsa_identity_cert_der_size, initiator_rsa_auth_cert_der, &initiator_rsa_auth_cert_der_size, &initiator_rsa_auth_key, &rng ) < 0 ) {
@@ -1391,7 +1416,10 @@ int d_router_handshake( WOLFSSL* ssl ) {
   packed_cell = pack_and_free( &unpacked_cell );
   wc_Sha256Update( &initiator_sha, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length );
 
-  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+  wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 );
+
+  if ( wolf_succ <= 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send certs cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
 #endif
@@ -1464,7 +1492,10 @@ int d_router_handshake( WOLFSSL* ssl ) {
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 ) ) <= 0 ) {
+  wolf_succ = wolfSSL_send( ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 );
+
+  if ( wolf_succ <= 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send authenticate cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
 #endif
@@ -1474,13 +1505,16 @@ int d_router_handshake( WOLFSSL* ssl ) {
 
   free( packed_cell );
 
-  if ( d_recv_cell( ssl, &unpacked_cell, CIRCID_LEN, NULL, NULL, NULL ) < 0 ) {
+  if ( d_recv_packed_cell( ssl, &packed_cell, CIRCID_LEN ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to recv netinfo cell" );
 #endif
 
     return -1;
   }
+
+  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
 
   my_address_length = ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->length;
   my_address = malloc( sizeof( unsigned char ) * my_address_length );
@@ -1524,7 +1558,9 @@ int d_router_handshake( WOLFSSL* ssl ) {
   // this will also free my_address and other_address
   packed_cell = pack_and_free( &unpacked_cell );
 
-  if ( ( wolf_succ = wolfSSL_send( ssl, packed_cell, CELL_LEN, 0 ) ) <= 0 ) {
+  wolf_succ = wolfSSL_send( ssl, packed_cell, CELL_LEN, 0 );
+
+  if ( wolf_succ <= 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send NETINFO cell, error code: %d", wolfSSL_get_error( ssl, wolf_succ ) );
 #endif

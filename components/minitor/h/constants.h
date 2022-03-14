@@ -46,4 +46,6 @@
 #define HS_DESC_SIG_PREFIX "Tor onion service descriptor sig v3"
 #define HS_DESC_SIG_PREFIX_LENGTH 35
 
+#define HSDIR_TREE_ROOT 0
+
 #endif

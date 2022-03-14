@@ -301,6 +301,7 @@ static void v_parse_s_tag( OnionRelay* canidate_relay, char* line ) {
 
   canidate_relay->can_exit = exit_found;
   canidate_relay->can_guard = guard_found;
+  canidate_relay->is_guard = 0;
   canidate_relay->hsdir = hsdir_found;
 }
 
@@ -352,12 +353,7 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
   int i = 0;
   int fd;
   int ret;
-  int time_period;
-  unsigned char tmp_64_buffer[8];
   OnionRelay canidate_relay;
-  Sha3 reusable_sha3;
-
-  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
   if ( ( fd = open( "/sdcard/consensus", O_RDONLY ) ) < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -388,9 +384,21 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
     goto finish;
   }
 
-  time_period = ( (*result_network_consensus)->valid_after / 60 - 12 * 60 ) / (*result_network_consensus)->hsdir_interval;
+  // BEGIN mutex for the network consensus
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
-  if ( d_destroy_all_relays() < 0 ) {
+  network_consensus.method = (*result_network_consensus)->method;
+  network_consensus.valid_after = (*result_network_consensus)->valid_after;
+  network_consensus.fresh_until = (*result_network_consensus)->fresh_until;
+  network_consensus.valid_until = (*result_network_consensus)->valid_until;
+
+  memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
+  memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
+
+  xSemaphoreGive( network_consensus_mutex );
+  // END mutex for the network consensus
+
+  if ( d_reset_hsdir_relay_tree() < 0 ) {
     ret = -1;
     goto finish;
   }
@@ -408,66 +416,39 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
     ret = d_parse_single_relay( fd, &canidate_relay );
 
     if ( ret == 0 ) {
-      if ( canidate_relay.suitable || canidate_relay.hsdir ) {
-        if ( canidate_relay.hsdir ) {
-          wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
-          wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
-          wc_Sha3_256_Update( &reusable_sha3, (*result_network_consensus)->previous_shared_rand, 32 );
+      if ( canidate_relay.hsdir ) {
+/*
+        wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
+        wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
+        wc_Sha3_256_Update( &reusable_sha3, (*result_network_consensus)->previous_shared_rand, 32 );
 
-          tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 56 );
-          tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 48 );
-          tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 40 );
-          tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 32 );
-          tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 24 );
-          tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 16 );
-          tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 8 );
-          tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period - 1 ) );
+        tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 56 );
+        tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 48 );
+        tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 40 );
+        tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 32 );
+        tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 24 );
+        tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 16 );
+        tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 8 );
+        tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period - 1 ) );
 
-          wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+        wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
-          tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 56 );
-          tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 48 );
-          tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 40 );
-          tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 32 );
-          tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 24 );
-          tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 16 );
-          tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 8 );
-          tmp_64_buffer[7] = (unsigned char)( (int64_t)( (*result_network_consensus)->hsdir_interval ) );
+        tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 56 );
+        tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 48 );
+        tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 40 );
+        tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 32 );
+        tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 24 );
+        tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 16 );
+        tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 8 );
+        tmp_64_buffer[7] = (unsigned char)( (int64_t)( (*result_network_consensus)->hsdir_interval ) );
 
-          wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+        wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
-          wc_Sha3_256_Final( &reusable_sha3, canidate_relay.previous_hash );
+        wc_Sha3_256_Final( &reusable_sha3, canidate_relay.previous_hash );
+*/
+        v_get_id_hash( canidate_relay.identity, canidate_relay.id_hash );
 
-          wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
-          wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
-          wc_Sha3_256_Update( &reusable_sha3, (*result_network_consensus)->shared_rand, 32 );
-
-          tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period ) ) >> 56 );
-          tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period ) ) >> 48 );
-          tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period ) ) >> 40 );
-          tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period ) ) >> 32 );
-          tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period ) ) >> 24 );
-          tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period ) ) >> 16 );
-          tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period ) ) >> 8 );
-          tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period ) );
-
-          wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
-
-          tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 56 );
-          tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 48 );
-          tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 40 );
-          tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 32 );
-          tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 24 );
-          tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 16 );
-          tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 8 );
-          tmp_64_buffer[7] = (unsigned char)( (int64_t)( (*result_network_consensus)->hsdir_interval ) );
-
-          wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
-
-          wc_Sha3_256_Final( &reusable_sha3, canidate_relay.current_hash );
-        }
-
-        if ( d_create_relay( &canidate_relay ) < 0 ) {
+        if ( d_create_hsdir_relay( &canidate_relay ) < 0 ) {
           ret = -1;
           goto finish;
         }
@@ -499,8 +480,6 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
   ret = 0;
 
 finish:
-  wc_Sha3_256_Free( &reusable_sha3 );
-
   if ( close( fd ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/consensus, errno: %d", errno );
@@ -530,36 +509,22 @@ int d_fetch_consensus_info() {
       ret = -1;
       goto finish;
     }
-
-    if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 ) {
-      ret = -1;
-      goto finish;
-    }
-
-    if ( d_destroy_consensus() < 0 ) {
-      ret = -1;
-      goto finish;
-    }
-
-    if ( d_create_consensus( result_network_consensus ) < 0 ) {
-      ret = -1;
-      goto finish;
-    }
   }
 
-  // BEGIN mutex for the network consensus
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+  if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 ) {
+    ret = -1;
+    goto finish;
+  }
 
-  network_consensus.method = result_network_consensus->method;
-  network_consensus.valid_after = result_network_consensus->valid_after;
-  network_consensus.fresh_until = result_network_consensus->fresh_until;
-  network_consensus.valid_until = result_network_consensus->valid_until;
+  if ( d_destroy_consensus() < 0 ) {
+    ret = -1;
+    goto finish;
+  }
 
-  memcpy( network_consensus.previous_shared_rand, result_network_consensus->previous_shared_rand, 32 );
-  memcpy( network_consensus.shared_rand, result_network_consensus->shared_rand, 32 );
-
-  xSemaphoreGive( network_consensus_mutex );
-  // END mutex for the network consensus
+  if ( d_create_consensus( result_network_consensus ) < 0 ) {
+    ret = -1;
+    goto finish;
+  }
 
 #ifdef DEBUG_MINITOR
   ESP_LOGE( MINITOR_TAG, "finished setting consensus" );
@@ -572,4 +537,51 @@ finish:
 
   // return 0 for no errors
   return ret;
+}
+
+void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
+{
+  int time_period;
+  uint8_t tmp_64_buffer[8];
+  Sha3 reusable_sha3;
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  // BEGIN mutex for the network consensus
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+  time_period = ( network_consensus.valid_after / 60 - 12 * 60 ) / network_consensus.hsdir_interval;
+
+  wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
+  wc_Sha3_256_Update( &reusable_sha3, identity, ID_LENGTH );
+  wc_Sha3_256_Update( &reusable_sha3, network_consensus.shared_rand, 32 );
+
+  tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 56 );
+  tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 48 );
+  tmp_64_buffer[2] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 40 );
+  tmp_64_buffer[3] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 32 );
+  tmp_64_buffer[4] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 24 );
+  tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 16 );
+  tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 8 );
+  tmp_64_buffer[7] = (unsigned char)( (uint64_t)( time_period ) );
+
+  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+  tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 56 );
+  tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 48 );
+  tmp_64_buffer[2] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 40 );
+  tmp_64_buffer[3] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 32 );
+  tmp_64_buffer[4] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 24 );
+  tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 16 );
+  tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 8 );
+  tmp_64_buffer[7] = (unsigned char)( (uint64_t)( network_consensus.hsdir_interval ) );
+
+  wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
+
+  wc_Sha3_256_Final( &reusable_sha3, id_hash );
+
+  wc_Sha3_256_Free( &reusable_sha3 );
+
+  xSemaphoreGive( network_consensus_mutex );
+  // END mutex for the network consensus
 }
