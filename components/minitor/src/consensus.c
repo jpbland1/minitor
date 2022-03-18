@@ -28,6 +28,226 @@ static int d_parse_date_string( char* date_string ) {
   return mktime( &tmp_time );
 }
 
+static int d_fetch_descriptor_info( OnionRelay* relay )
+{
+  const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
+#ifdef MINITOR_CHUTNEY
+      "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
+#else
+      "Host: "MINITOR_DIR_ADDR_STR"\r\n"
+#endif
+      "User-Agent: esp-idf/1.0 esp3266\r\n"
+      "\r\n";
+  char REQUEST[127];
+
+  const char* master_key = "\nmaster-key-ed25519 ";
+  int master_key_found = 0;
+  char master_key_64[43] = { 0 };
+  int master_key_64_length = 0;
+
+  const char* ntor_onion_key = "\nntor-onion-key ";
+  int ntor_onion_key_found = 0;
+  char ntor_onion_key_64[43] = { 0 };
+  int ntor_onion_key_64_length = 0;
+
+  int i;
+  int retries = 0;
+  int rx_length;
+  int sock_fd;
+  int err;
+  char end_header = 0;
+  // buffer thath holds data returned from the socket
+  char rx_buffer[512];
+  struct sockaddr_in dest_addr;
+
+  // copy the string into editable memory
+  strcpy( REQUEST, REQUEST_CONST );
+
+  // set the address of the directory server
+#ifdef MINITOR_CHUTNEY
+  dest_addr.sin_addr.s_addr = MINITOR_CHUTNEY_ADDRESS;
+  dest_addr.sin_port = htons( MINITOR_CHUTNEY_PORT );
+#else
+  dest_addr.sin_addr.s_addr = MINITOR_DIR_ADDR;
+  dest_addr.sin_port = htons( MINITOR_DIR_PORT );
+#endif
+
+  dest_addr.sin_family = AF_INET;
+
+  while ( retries < 3 )
+  {
+    // create a socket to access the descriptor
+    sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
+
+    if ( sock_fd < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
+#endif
+
+      return -1;
+    }
+
+    // connect the socket to the dir server address
+    err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
+
+    if ( err != 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
+#endif
+
+      shutdown( sock_fd, 0 );
+      close( sock_fd );
+
+      if ( retries >= 2 )
+      {
+        return -1;
+      }
+      else
+      {
+        retries++;
+      }
+    }
+    else
+    {
+      retries = 3;
+    }
+  }
+
+  for ( i = 0; i < 20; i++ )
+  {
+    if ( relay->digest[i] >> 4 < 10 )
+    {
+      REQUEST[18 + 2 * i] = 48 + ( relay->digest[i] >> 4 );
+    }
+    else
+    {
+      REQUEST[18 + 2 * i] = 65 + ( ( relay->digest[i] >> 4 ) - 10 );
+    }
+
+    if ( ( relay->digest[i] & 0x0f ) < 10  )
+    {
+      REQUEST[18 + 2 * i + 1] = 48 + ( relay->digest[i] & 0x0f );
+    }
+    else
+    {
+      REQUEST[18 + 2 * i + 1] = 65 + ( ( relay->digest[i] & 0x0f ) - 10 );
+    }
+  }
+
+  // send the http request to the dir server
+  err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
+
+  if ( err < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
+#endif
+
+    return -1;
+  }
+
+  // keep reading forever, we will break inside when the transfer is over
+  while ( 1 )
+  {
+    // recv data from the destination and fill the rx_buffer with the data
+    rx_length = recv( sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
+
+    // if we got less than 0 we encoutered an error
+    if ( rx_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
+#endif
+
+      return -1;
+    // we got 0 bytes back then the connection closed and we're done getting
+    // consensus data
+    }
+    else if ( rx_length == 0 )
+    {
+      break;
+    }
+
+    // iterate over each byte we got back from the socket recv
+    // NOTE that we can't rely on all the data being there, we
+    // have to treat each byte as though we only have that byte
+    for ( i = 0; i < rx_length; i++ )
+    {
+      // skip over the http header, when we get two \r\n s in a row we
+      // know we're at the end
+      if ( end_header < 4 )
+      {
+        // increment end_header whenever we get part of a carrage retrun
+        if ( rx_buffer[i] == '\r' || rx_buffer[i] == '\n' )
+        {
+          end_header++;
+        // otherwise reset the count
+        }
+        else
+        {
+          end_header = 0;
+        }
+      // if we have 4 end_header we're onto the actual data
+      }
+      else
+      {
+        if ( ntor_onion_key_found != -1 )
+        {
+          if ( ntor_onion_key_found == strlen( ntor_onion_key ) )
+          {
+            ntor_onion_key_64[ntor_onion_key_64_length] = rx_buffer[i];
+            ntor_onion_key_64_length++;
+
+            if ( ntor_onion_key_64_length == 43 )
+            {
+              v_base_64_decode( relay->ntor_onion_key, ntor_onion_key_64, 43 );
+              ntor_onion_key_found = -1;
+            }
+          }
+          else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] )
+          {
+            ntor_onion_key_found++;
+          }
+          else
+          {
+            ntor_onion_key_found = 0;
+          }
+        }
+
+        if ( master_key_found != -1 )
+        {
+          if ( master_key_found == strlen( master_key ) )
+          {
+            master_key_64[master_key_64_length] = rx_buffer[i];
+            master_key_64_length++;
+
+            if ( master_key_64_length == 43 )
+            {
+              v_base_64_decode( relay->master_key, master_key_64, 43 );
+              master_key_found = -1;
+            }
+          }
+          else if ( rx_buffer[i] == master_key[master_key_found] )
+          {
+            master_key_found++;
+          }
+          else
+          {
+            master_key_found = 0;
+          }
+        }
+      }
+    }
+  }
+
+  shutdown( sock_fd, 0 );
+  close( sock_fd );
+
+  return 0;
+}
+
 // TODO handle http errors
 static int d_download_consensus() {
   const char* REQUEST = "GET /tor/status-vote/current/consensus HTTP/1.0\r\n"
@@ -446,12 +666,20 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
 
         wc_Sha3_256_Final( &reusable_sha3, canidate_relay.previous_hash );
 */
-        v_get_id_hash( canidate_relay.identity, canidate_relay.id_hash );
+        if ( d_fetch_descriptor_info( &canidate_relay ) < 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash );
 
         if ( d_create_hsdir_relay( &canidate_relay ) < 0 ) {
           ret = -1;
           goto finish;
         }
+
+        ESP_LOGE( MINITOR_TAG, "TEMPORARY finish create--------------------------" );
       }
 
       i = ( i + 1 ) % 10;
@@ -502,13 +730,15 @@ int d_fetch_consensus_info() {
   result_network_consensus = px_get_network_consensus();
   time( &now );
 
+  ESP_LOGE( MINITOR_TAG, "got consensus from file" );
+
   if ( result_network_consensus == NULL || result_network_consensus->fresh_until <= now ) {
-    /* ESP_LOGE( MINITOR_TAG, "now: %ld, fresh_until: %ld", now, result_network_consensus->fresh_until ); */
-    /* ESP_LOGE( MINITOR_TAG, "result_network_consensus->fresh_until <= now: %d", result_network_consensus->fresh_until <= now ); */
     if ( d_download_consensus() < 0 ) {
       ret = -1;
       goto finish;
     }
+
+    ESP_LOGE( MINITOR_TAG, "got consensus from network" );
   }
 
   if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 ) {
@@ -516,15 +746,21 @@ int d_fetch_consensus_info() {
     goto finish;
   }
 
+  ESP_LOGE( MINITOR_TAG, "parsed consensus" );
+
   if ( d_destroy_consensus() < 0 ) {
     ret = -1;
     goto finish;
   }
 
+  ESP_LOGE( MINITOR_TAG, "destroyed consensus" );
+
   if ( d_create_consensus( result_network_consensus ) < 0 ) {
     ret = -1;
     goto finish;
   }
+
+  ESP_LOGE( MINITOR_TAG, "created consensus" );
 
 #ifdef DEBUG_MINITOR
   ESP_LOGE( MINITOR_TAG, "finished setting consensus" );
@@ -550,10 +786,21 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
   // BEGIN mutex for the network consensus
   xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
-  time_period = ( network_consensus.valid_after / 60 - 12 * 60 ) / network_consensus.hsdir_interval;
+  //time_period = ( network_consensus.valid_after / 60 - 12 * 60 ) / network_consensus.hsdir_interval;
+  // TODO this is based on chutney settings, need to change it for real tor
+  time_period = ( network_consensus.valid_after / 60 - (4) ) / network_consensus.hsdir_interval;
+
+  {
+    ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
+    ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
+    ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
+    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", network_consensus.shared_rand[0], network_consensus.shared_rand[1], network_consensus.shared_rand[2], network_consensus.shared_rand[3] );
+    ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
+    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", network_consensus.hsdir_interval );
+  }
 
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
-  wc_Sha3_256_Update( &reusable_sha3, identity, ID_LENGTH );
+  wc_Sha3_256_Update( &reusable_sha3, identity, H_LENGTH );
   wc_Sha3_256_Update( &reusable_sha3, network_consensus.shared_rand, 32 );
 
   tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 56 );
@@ -579,6 +826,10 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
   wc_Sha3_256_Final( &reusable_sha3, id_hash );
+
+  {
+    ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
+  }
 
   wc_Sha3_256_Free( &reusable_sha3 );
 

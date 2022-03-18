@@ -123,12 +123,14 @@ int v_minitor_INIT()
     return -1;
   }
 
+  ESP_LOGE( MINITOR_TAG, "Starting fetch" );
   // fetch network consensus
   if ( d_fetch_consensus_info() < 0 )
   {
     return -1;
   }
 
+  ESP_LOGE( MINITOR_TAG, "Starting keepalive" );
   xTaskCreatePinnedToCore(
     v_circuit_keepalive,
     "CIRCUIT_KEEPALIVE",
@@ -262,7 +264,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     (void*)(onion_service),
     7,
     NULL,
-    tskNO_AFFINITY
+    1
   );
 
   // return the onion service

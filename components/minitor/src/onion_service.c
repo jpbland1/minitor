@@ -346,7 +346,8 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
     (void*)(db_local_stream),
     6,
     &db_local_stream->task_handle,
-    tskNO_AFFINITY
+    //tskNO_AFFINITY
+    0
   );
 
   v_add_local_stream_to_list( db_local_stream, &onion_service->local_streams );
@@ -777,6 +778,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   hs_crypto = malloc( sizeof( HsCrypto ) );
 
+  ESP_LOGE( MINITOR_TAG, "Finishing ntor handshake" );
+
   if ( d_hs_ntor_handshake_finish( unpacked_cell, db_intro_circuit->circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -815,8 +818,12 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     }
   }
 
+  ESP_LOGE( MINITOR_TAG, "Taking rend circuits" );
+
   // BEGIN mutex for standby circuits
   xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+  ESP_LOGE( MINITOR_TAG, "Got rend circuits" );
 
   db_rend_circuit = standby_rend_circuits.head;
 
@@ -858,6 +865,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   {
     db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
 
+    ESP_LOGE( MINITOR_TAG, "Building new rend circuit" );
     if ( d_build_onion_circuit_to( db_rend_circuit->circuit, 2, rend_relay ) < 0 )
     {
 #ifdef DEBUG_MINITOR
@@ -872,9 +880,11 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   }
   else
   {
+    ESP_LOGE( MINITOR_TAG, "Deleteing task handle" );
     // stop the handle task so we can use the rx_queue it's attached to
     vTaskDelete( db_rend_circuit->circuit->task_handle );
 
+    ESP_LOGE( MINITOR_TAG, "Extending to rend relay" );
     if ( d_extend_onion_circuit_to( db_rend_circuit->circuit, 2, rend_relay ) < 0 )
     {
 #ifdef DEBUG_MINITOR
@@ -890,8 +900,9 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   db_rend_circuit->circuit->hs_crypto = hs_crypto;
   db_rend_circuit->circuit->status = CIRCUIT_RENDEZVOUS;
-  db_rend_circuit->circuit->rx_queue = onion_service->rx_queue;
+  db_rend_circuit->circuit->forward_queue = onion_service->rx_queue;
 
+  ESP_LOGE( MINITOR_TAG, "Joining rend" );
   if ( d_router_join_rendezvous( db_rend_circuit->circuit, unpacked_introduce_data.rendezvous_cookie, hs_handshake_key.p.point, auth_input_mac ) < 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -1105,7 +1116,8 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
   return 0;
 }
 
-int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, HsCrypto* hs_crypto, unsigned char* auth_input_mac ) {
+int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, HsCrypto* hs_crypto, unsigned char* auth_input_mac )
+{
   unsigned int idx;
   int wolf_succ;
   unsigned char* rend_secret_hs_input = malloc( sizeof( unsigned char ) * ( CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + ED25519_PUB_KEY_SIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + HS_PROTOID_LENGTH ) );
@@ -1119,8 +1131,12 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   int64_t reusable_length;
   unsigned char reusable_length_buffer[8];
 
+  ESP_LOGE( MINITOR_TAG, "Init" );
+
   wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
+
+  ESP_LOGE( MINITOR_TAG, "Shared secret" );
 
   // compute rend_secret_hs_input
   idx = 32;
@@ -1135,6 +1151,8 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   }
 
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
+
+  ESP_LOGE( MINITOR_TAG, "Shared secret" );
 
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( &intro_circuit->intro_crypto->encrypt_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
@@ -1179,11 +1197,15 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID_KEY, HS_PROTOID_KEY_LENGTH );
   wc_Sha3_256_Final( &reusable_sha3, hs_key_seed );
 
+  ESP_LOGE( MINITOR_TAG, "Sha final" );
+
   // compute verify
   wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 8 );
   wc_Sha3_256_Update( &reusable_sha3, rend_secret_hs_input, CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + ED25519_PUB_KEY_SIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + HS_PROTOID_LENGTH );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID_VERIFY, HS_PROTOID_VERIFY_LENGTH );
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+
+  ESP_LOGE( MINITOR_TAG, "Sha final" );
 
   // compute AUTH_INPUT_MAC
   reusable_length = WC_SHA3_256_DIGEST_SIZE + ED25519_PUB_KEY_SIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + HS_PROTOID_LENGTH + strlen( "Server" );
@@ -1207,10 +1229,14 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID_MAC, HS_PROTOID_MAC_LENGTH );
   wc_Sha3_256_Final( &reusable_sha3, auth_input_mac );
 
+  ESP_LOGE( MINITOR_TAG, "Sha final" );
+
   // derive the encryption and digest seeds
   wc_Shake256_Update( &reusable_shake, hs_key_seed, WC_SHA3_256_DIGEST_SIZE );
   wc_Shake256_Update( &reusable_shake, (unsigned char*)HS_PROTOID_EXPAND, HS_PROTOID_EXPAND_LENGTH );
   wc_Shake256_Final( &reusable_shake, expanded_keys,  WC_SHA3_256_DIGEST_SIZE * 2 + AES_256_KEY_SIZE * 2  );
+
+  ESP_LOGE( MINITOR_TAG, "Sha final" );
 
   wc_InitSha3_256( &hs_crypto->hs_running_sha_forward, NULL, INVALID_DEVID );
   wc_InitSha3_256( &hs_crypto->hs_running_sha_backward, NULL, INVALID_DEVID );
@@ -1270,31 +1296,11 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int 
   relay_list->head = NULL;
   relay_list->tail = NULL;
 
-  //{
-    //ESP_LOGE( MINITOR_TAG, "id_hash:" );
-
-    //for ( i = 0; i < H_LENGTH; i++ )
-    //{
-      //ESP_LOGE( MINITOR_TAG, "0x%.2x", id_hash[i] );
-    //}
-  //}
-
   for ( i = 0; i < desired_count; i++ )
   {
     db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
 
     db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, NULL, i, used_relays );
-
-    //{
-      //int j;
-
-      //ESP_LOGE( MINITOR_TAG, "result id_hash:" );
-
-      //for ( j = 0; j < H_LENGTH; j++ )
-      //{
-        //ESP_LOGE( MINITOR_TAG, "0x%.2x", db_tmp_relay->relay->id_hash[j] );
-      //}
-    //}
 
     if ( db_tmp_relay->relay == NULL )
     {
@@ -1395,6 +1401,18 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     wc_Sha3_256_Final( &reusable_sha3, hs_index );
 
+    {
+      ESP_LOGE( MINITOR_TAG, "" );
+      ESP_LOGE( MINITOR_TAG, "hs_index:" );
+
+      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
+      {
+        ESP_LOGE( MINITOR_TAG, "%.2x", hs_index[j] );
+      }
+
+      ESP_LOGE( MINITOR_TAG, "" );
+    }
+
     to_store = hsdir_spread_store;
 
     hsdir_index_list = px_get_relays_by_hash( hs_index, hsdir_spread_store, &used_relays, previous );
@@ -1429,6 +1447,9 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
       next_hsdir_relay_node = hsdir_relay_node->next;
 
       v_add_relay_to_list( hsdir_relay_node, target_relays );
+
+      ESP_LOGE( MINITOR_TAG, "Target or_port: %d", hsdir_relay_node->relay->or_port );
+      ESP_LOGE( MINITOR_TAG, "Target id_hash: %.2x %.2x %.2x %.2x", hsdir_relay_node->relay->id_hash[0], hsdir_relay_node->relay->id_hash[1], hsdir_relay_node->relay->id_hash[2], hsdir_relay_node->relay->id_hash[3] );
 
       hsdir_relay_node = next_hsdir_relay_node;
 
@@ -1508,7 +1529,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
             }
 
             publish_circuit->or_connection = NULL;
-            publish_circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
           }
           else
           {
@@ -1544,7 +1564,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
               }
 
               publish_circuit->or_connection = NULL;
-              publish_circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
             }
           }
 
@@ -1586,7 +1605,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
           }
 
           publish_circuit->or_connection = NULL;
-          publish_circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
         }
 
         start_node = NULL;
@@ -1631,6 +1649,9 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
     return -1;
   }
 
+  vQueueDelete( publish_circuit->rx_queue );
+  free( publish_circuit );
+
   ESP_LOGE( MINITOR_TAG, "Done sending descriptors" );
 
   return 0;
@@ -1668,7 +1689,8 @@ static char* pc_ipv4_to_string( unsigned int address ) {
   return result;
 }
 
-int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit ) {
+int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit )
+{
   char* REQUEST;
   char* ipv4_string;
   const char* REQUEST_CONST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
@@ -1823,21 +1845,21 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
 
   free_cell( &unpacked_cell );
 
-  ESP_LOGE( MINITOR_TAG, "Trying to recv RELAY_END cell" );
+  //ESP_LOGE( MINITOR_TAG, "Trying to recv RELAY_END cell" );
 
-  if ( d_recv_cell( publish_circuit, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL, NULL ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_END cell" );
-#endif
+  //if ( d_recv_cell( publish_circuit, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL, NULL ) < 0 )
+  //{
+//#ifdef DEBUG_MINITOR
+    //ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_END cell" );
+//#endif
 
-    return -1;
-  }
+    //return -1;
+  //}
 
-  ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
-  ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
+  //ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
+  //ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
 
-  free_cell( &unpacked_cell );
+  //free_cell( &unpacked_cell );
 
   return 0;
 }

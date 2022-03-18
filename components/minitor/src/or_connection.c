@@ -91,7 +91,13 @@ void v_handle_or_connection( void* pv_parameters )
       ESP_LOGE( MINITOR_TAG, "access_mutex is null, shutting down" );
 #endif
 
+      // MUTEX TAKE
+      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+
       free( or_connection );
+
+      xSemaphoreGive( or_connections_mutex );
+      // MUTEX GIVE
 
       vTaskDelete( NULL );
 
@@ -385,9 +391,9 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
     "HANDLE_OR_CONNECTION",
     4096,
     (void*)or_connection,
-    6,
+    5,
     &or_connection->task_handle,
-    tskNO_AFFINITY
+    0
   );
 
   return or_connection;

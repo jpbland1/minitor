@@ -69,6 +69,7 @@ int d_setup_init_rend_circuits( int circuit_count )
   DoublyLinkedOnionCircuit* linked_circuit;
   DoublyLinkedOnionCircuit* standby_node;
   OnionRelay* unique_relay;
+  OrConnection* working_or_connection;
 
   for ( i = 0; i < circuit_count; i++ )
   {
@@ -95,6 +96,26 @@ int d_setup_init_rend_circuits( int circuit_count )
 
         standby_node = standby_node->next;
       }
+
+      // MUTEX TAKE
+      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+
+      working_or_connection = or_connections.head;
+
+      for ( i = 0; i < or_connections.length; i++ )
+      {
+        if ( working_or_connection->address == unique_relay->address && working_or_connection->port == unique_relay->or_port )
+        {
+          free( unique_relay );
+          unique_relay = NULL;
+          break;
+        }
+
+        working_or_connection = working_or_connection->next;
+      }
+
+      xSemaphoreGive( or_connections_mutex );
+      // MUTEX TAKE
     } while ( unique_relay == NULL );
 
     switch ( d_build_onion_circuit_to( linked_circuit->circuit, 1, unique_relay ) )
@@ -147,11 +168,12 @@ int d_setup_init_rend_circuits( int circuit_count )
 int d_setup_init_circuits( int circuit_count )
 {
   int res = 0;
-
   int i;
+  int want_guard = 1;
   DoublyLinkedOnionCircuit* linked_circuit;
   DoublyLinkedOnionCircuit* standby_node;
   OnionRelay* unique_final_relay;
+  OnionRelay* guard_relay;
 
   for ( i = 0; i < circuit_count; i++ )
   {
@@ -161,9 +183,15 @@ int d_setup_init_circuits( int circuit_count )
     linked_circuit->circuit->forward_queue = NULL;
     linked_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
+    if ( want_guard == 1 )
+    {
+      guard_relay = px_get_random_hsdir_relay( 1, NULL, NULL );
+      want_guard = 0;
+    }
+
     do
     {
-      unique_final_relay = px_get_random_hsdir_relay( 0, NULL, NULL );
+      unique_final_relay = px_get_random_hsdir_relay( 0, NULL, guard_relay->identity );
 
       standby_node = standby_circuits.head;
 
@@ -180,49 +208,50 @@ int d_setup_init_circuits( int circuit_count )
       }
     } while ( unique_final_relay == NULL );
 
-    ESP_LOGE( MINITOR_TAG, "Starting next build" );
-
-    switch ( d_build_onion_circuit_to( linked_circuit->circuit, 3, unique_final_relay ) )
+    // build the circuits from the same guard relay
+    if ( d_build_onion_circuit_to( linked_circuit->circuit, 1, guard_relay ) < 0 )
     {
-      case -1:
-        i--;
-        vQueueDelete( linked_circuit->circuit->rx_queue );
-        free( linked_circuit->circuit );
-        free( linked_circuit );
-        break;
-      case -2:
-        i = circuit_count;
-        vQueueDelete( linked_circuit->circuit->rx_queue );
-        free( linked_circuit->circuit );
-        free( linked_circuit );
-        break;
-      case 0:
-        linked_circuit->circuit->status = CIRCUIT_STANDBY;
-
-        // spawn a task to block on the tls buffer and put the data into the rx_queue
-        xTaskCreatePinnedToCore(
-          v_handle_circuit,
-          "HANDLE_CIRCUIT",
-          4096,
-          (void*)(linked_circuit->circuit),
-          6,
-          &linked_circuit->circuit->task_handle,
-          tskNO_AFFINITY
-        );
-
-        // BEGIN mutex for standby circuits
-        xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-
-        v_add_circuit_to_list( linked_circuit, &standby_circuits );
-
-        xSemaphoreGive( standby_circuits_mutex );
-        // END mutex for standby circuits
-
-        res++;
-        break;
-      default:
-        break;
+      goto fail;
     }
+    // extend to the target relay
+    else if ( d_extend_onion_circuit_to( linked_circuit->circuit, 3, unique_final_relay ) < 0 )
+    {
+      goto fail;
+    }
+    // if nothing went wrong, start the handle task
+    else
+    {
+      linked_circuit->circuit->status = CIRCUIT_STANDBY;
+
+      // spawn a task to block on the tls buffer and put the data into the rx_queue
+      xTaskCreatePinnedToCore(
+        v_handle_circuit,
+        "HANDLE_CIRCUIT",
+        4096,
+        (void*)(linked_circuit->circuit),
+        6,
+        &linked_circuit->circuit->task_handle,
+        tskNO_AFFINITY
+      );
+
+      // BEGIN mutex for standby circuits
+      xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+
+      v_add_circuit_to_list( linked_circuit, &standby_circuits );
+
+      xSemaphoreGive( standby_circuits_mutex );
+      // END mutex for standby circuits
+
+      res++;
+    }
+
+continue;
+fail:
+    i--;
+    want_guard = 1;
+    vQueueDelete( linked_circuit->circuit->rx_queue );
+    free( linked_circuit->circuit );
+    free( linked_circuit );
   }
 
   return res;
@@ -244,6 +273,8 @@ int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRe
   ESP_LOGE( MINITOR_TAG, "Preparing" );
   if ( d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity ) < 0 )
   {
+    free( destination_relay );
+
     return -1;
   }
 
@@ -273,13 +304,13 @@ int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionR
 
   v_add_relay_to_list( node, &circuit->relay_list );
 
-  if ( d_fetch_descriptor_info( circuit ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
-#endif
+  //if ( d_fetch_descriptor_info( circuit ) < 0 ) {
+//#ifdef DEBUG_MINITOR
+    //ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
+//#endif
 
-    return -1;
-  }
+    //return -1;
+  //}
 
   node = circuit->relay_list.head;
 
@@ -396,14 +427,17 @@ int d_build_onion_circuit( OnionCircuit* circuit )
   int i;
 
   // get the relay's ntor onion keys
-  if ( d_fetch_descriptor_info( circuit ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
-#endif
+  //if ( d_fetch_descriptor_info( circuit ) < 0 )
+  //{
+//#ifdef DEBUG_MINITOR
+    //ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
+//#endif
 
-    goto clean_circuit;
-  }
+    //goto clean_circuit;
+  //}
+
+  ESP_LOGE( MINITOR_TAG, "TEMPORARY-------------------------------------" );
+  ESP_LOGE( MINITOR_TAG, "ntor onion key: %.2x %.2x %.2x %.2x", circuit->relay_list.head->relay->ntor_onion_key[0], circuit->relay_list.head->relay->ntor_onion_key[1], circuit->relay_list.head->relay->ntor_onion_key[2], circuit->relay_list.head->relay->ntor_onion_key[3] );
 
   if ( d_attach_connection( circuit->relay_list.head->relay->address, circuit->relay_list.head->relay->or_port, circuit ) != 0 )
   {
@@ -437,6 +471,8 @@ int d_build_onion_circuit( OnionCircuit* circuit )
 
       return -1;
     }
+
+    ESP_LOGE( MINITOR_TAG, "Finished extend" );
 
     circuit->relay_list.built_length++;
   }
@@ -570,8 +606,6 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   if ( circuit->task_handle != NULL ) {
     vTaskDelete( circuit->task_handle );
   }
-
-  vQueueDelete( circuit->rx_queue );
 
   return 0;
 }
@@ -866,6 +900,8 @@ int d_router_extend2( OnionCircuit* circuit, int node_index )
     goto finish;
   }
 
+  ESP_LOGE( MINITOR_TAG, "Finishing handshake" );
+
   if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay, &extend2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -881,6 +917,8 @@ finish:
   wc_curve25519_free( &extend2_handshake_key );
   wc_curve25519_free( &extended2_handshake_public_key );
   wc_curve25519_free( &ntor_onion_key );
+
+  ESP_LOGE( MINITOR_TAG, "Finished handshake" );
 
   return ret;
 }
@@ -995,7 +1033,8 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
   return 0;
 }
 
-int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key ) {
+int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key )
+{
   int ret = 0;
   int wolf_succ;
   unsigned int idx;
@@ -2023,174 +2062,6 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   *initiator_rsa_auth_cert_der_size = wolf_succ;
 
   wc_FreeRsaKey( &initiator_rsa_identity_key );
-
-  return 0;
-}
-
-// fetch the descriptor info for the list of relays
-int d_fetch_descriptor_info( OnionCircuit* circuit ) {
-  const char* REQUEST_CONST = "GET /tor/server/d/**************************************** HTTP/1.0\r\n"
-#ifdef MINITOR_CHUTNEY
-      "Host: "MINITOR_CHUTNEY_ADDRESS_STR"\r\n"
-#else
-      "Host: "MINITOR_DIR_ADDR_STR"\r\n"
-#endif
-      "User-Agent: esp-idf/1.0 esp3266\r\n"
-      "\r\n";
-  char REQUEST[127];
-
-  const char* ntor_onion_key = "\nntor-onion-key ";
-  int ntor_onion_key_found = 0;
-  char ntor_onion_key_64[43] = { 0 };
-  int ntor_onion_key_64_length = 0;
-
-  int i;
-  int retries;
-  int rx_length;
-  int sock_fd;
-  int err;
-  char end_header = 0;
-  // buffer thath holds data returned from the socket
-  char rx_buffer[512];
-  struct sockaddr_in dest_addr;
-
-  // copy the string into editable memory
-  strcpy( REQUEST, REQUEST_CONST );
-
-  // set the address of the directory server
-#ifdef MINITOR_CHUTNEY
-  dest_addr.sin_addr.s_addr = MINITOR_CHUTNEY_ADDRESS;
-  dest_addr.sin_port = htons( MINITOR_CHUTNEY_PORT );
-#else
-  dest_addr.sin_addr.s_addr = MINITOR_DIR_ADDR;
-  dest_addr.sin_port = htons( MINITOR_DIR_PORT );
-#endif
-
-  dest_addr.sin_family = AF_INET;
-
-  DoublyLinkedOnionRelay* node = circuit->relay_list.head;
-
-  while ( node != NULL ) {
-    retries = 0;
-    end_header = 0;
-    ntor_onion_key_found = 0;
-    ntor_onion_key_64_length = 0;
-
-    while ( retries < 3 ) {
-      // create a socket to access the descriptor
-      sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
-
-      if ( sock_fd < 0 ) {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
-#endif
-
-        return -1;
-      }
-
-      // connect the socket to the dir server address
-      err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
-
-      if ( err != 0 ) {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
-#endif
-
-        shutdown( sock_fd, 0 );
-        close( sock_fd );
-
-        if ( retries >= 2 ) {
-          return -1;
-        } else {
-          retries++;
-        }
-      } else {
-        retries = 3;
-      }
-    }
-
-    for ( i = 0; i < 20; i++ ) {
-      if ( node->relay->digest[i] >> 4 < 10 ) {
-        REQUEST[18 + 2 * i] = 48 + ( node->relay->digest[i] >> 4 );
-      } else {
-        REQUEST[18 + 2 * i] = 65 + ( ( node->relay->digest[i] >> 4 ) - 10 );
-      }
-
-      if ( ( node->relay->digest[i] & 0x0f ) < 10  ) {
-        REQUEST[18 + 2 * i + 1] = 48 + ( node->relay->digest[i] & 0x0f );
-      } else {
-        REQUEST[18 + 2 * i + 1] = 65 + ( ( node->relay->digest[i] & 0x0f ) - 10 );
-      }
-    }
-
-    // send the http request to the dir server
-    err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
-
-    if ( err < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
-#endif
-
-      return -1;
-    }
-
-    // keep reading forever, we will break inside when the transfer is over
-    while ( 1 ) {
-      // recv data from the destination and fill the rx_buffer with the data
-      rx_length = recv( sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
-
-      // if we got less than 0 we encoutered an error
-      if ( rx_length < 0 ) {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
-#endif
-
-        return -1;
-      // we got 0 bytes back then the connection closed and we're done getting
-      // consensus data
-      } else if ( rx_length == 0 ) {
-        break;
-      }
-
-      // iterate over each byte we got back from the socket recv
-      // NOTE that we can't rely on all the data being there, we
-      // have to treat each byte as though we only have that byte
-      for ( i = 0; i < rx_length; i++ ) {
-        // skip over the http header, when we get two \r\n s in a row we
-        // know we're at the end
-        if ( end_header < 4 ) {
-          // increment end_header whenever we get part of a carrage retrun
-          if ( rx_buffer[i] == '\r' || rx_buffer[i] == '\n' ) {
-            end_header++;
-          // otherwise reset the count
-          } else {
-            end_header = 0;
-          }
-        // if we have 4 end_header we're onto the actual data
-        } else {
-          if ( ntor_onion_key_found != -1 ) {
-            if ( ntor_onion_key_found == strlen( ntor_onion_key ) ) {
-              ntor_onion_key_64[ntor_onion_key_64_length] = rx_buffer[i];
-              ntor_onion_key_64_length++;
-
-              if ( ntor_onion_key_64_length == 43 ) {
-                v_base_64_decode( node->relay->ntor_onion_key, ntor_onion_key_64, 43 );
-                ntor_onion_key_found = -1;
-              }
-            } else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] ) {
-              ntor_onion_key_found++;
-            } else {
-              ntor_onion_key_found = 0;
-            }
-          }
-        }
-      }
-    }
-
-    node = node->next;
-    shutdown( sock_fd, 0 );
-    close( sock_fd );
-  }
 
   return 0;
 }

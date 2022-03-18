@@ -154,8 +154,6 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
         // rotate left
         if ( child_relay->balance > 0 )
         {
-          ESP_LOGE( MINITOR_TAG, "Rotate left: %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0] );
-
           if ( parent_addr == hsdir_root_addr )
           {
             hsdir_root_addr = child_addr;
@@ -247,8 +245,6 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             ret = -1;
             goto finish;
           }
-
-          ESP_LOGE( MINITOR_TAG, "Rotate right left: %d %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0], tmp_relay->relay.id_hash[0] );
 
           tmp_relay->parent_addr = parent_relay->parent_addr;
           parent_relay->right_addr = tmp_relay->left_addr;
@@ -348,8 +344,6 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
         // rotate right
         if ( child_relay->balance < 0 )
         {
-          ESP_LOGE( MINITOR_TAG, "Rotate right: %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0] );
-
           if ( parent_addr == hsdir_root_addr )
           {
             hsdir_root_addr = child_addr;
@@ -441,8 +435,6 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             ret = -1;
             goto finish;
           }
-
-          ESP_LOGE( MINITOR_TAG, "Rotate left right: %d %d %d", parent_relay->relay.id_hash[0], child_relay->relay.id_hash[0], tmp_relay->relay.id_hash[0] );
 
           tmp_relay->parent_addr = parent_relay->parent_addr;
           parent_relay->left_addr = tmp_relay->right_addr;
@@ -936,14 +928,16 @@ fail:
   return NULL;
 }
 
-OnionRelay* px_get_hsdir_relay_by_id( uint8_t* identity )
+/*
+OnionRelay* px_get_hsdir_relay_by_id( uint8_t* identity, uint8_t* master_key )
 {
   uint8_t id_hash[H_LENGTH];
 
-  v_get_id_hash( identity, id_hash );
+  v_get_id_hash( master_key, id_hash );
 
   return px_get_hsdir_relay_by_id_hash( id_hash, identity, 0, NULL );
 }
+*/
 
 OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude )
 {

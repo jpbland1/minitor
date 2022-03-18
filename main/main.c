@@ -175,14 +175,6 @@ void app_main()
     return;
   }
 
-  if ( d_issi_INIT() < 0 )
-  {
-    ESP_LOGE( TAG, "Failed to init issi ram" );
-
-    return;
-  }
-
-/*
   static httpd_handle_t server = NULL;
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -195,18 +187,26 @@ void app_main()
   sntp_setoperatingmode( SNTP_OPMODE_POLL );
   sntp_setservername( 0, "pool.ntp.org" );
   sntp_init();
-*/
 
-  //do {
-    //vTaskDelay( pdMS_TO_TICKS( 1000 ) );
-    //time( &now );
-    //localtime_r( &now, &time_info );
-  //} while ( time_info.tm_year < (2016 - 1900) );
+  do {
+    vTaskDelay( pdMS_TO_TICKS( 1000 ) );
+    time( &now );
+    localtime_r( &now, &time_info );
+  } while ( time_info.tm_year < (2016 - 1900) );
 
-  //v_minitor_INIT();
+  if ( d_issi_INIT() < 0 )
+  {
+    ESP_LOGE( TAG, "Failed to init issi ram" );
 
-  //OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
+    return;
+  }
 
-  v_test_setup_issi();
-  v_test_d_traverse_hsdir_relays_in_order();
+  ESP_LOGE( TAG, "Starting init" );
+  v_minitor_INIT();
+
+  ESP_LOGE( TAG, "Starting service" );
+  OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
+
+  //v_test_setup_issi();
+  //v_test_d_traverse_hsdir_relays_in_order();
 }

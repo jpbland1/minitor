@@ -24,6 +24,7 @@ typedef struct NetworkConsensus {
 typedef struct OnionRelay {
   unsigned char identity[ID_LENGTH];
   unsigned char digest[ID_LENGTH];
+  unsigned char master_key[H_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
   unsigned int address;
   short or_port;

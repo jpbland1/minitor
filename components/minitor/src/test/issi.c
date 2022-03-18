@@ -9,7 +9,7 @@
 #include "../../h/consensus.h"
 #include "../../h/models/relay.h"
 
-#define NODE_COUNT 50
+#define NODE_COUNT 10
 
 void v_test_setup_issi()
 {
@@ -37,12 +37,11 @@ void v_test_d_traverse_hsdir_relays_in_order()
 
   memset( &relay, 0, sizeof( OnionRelay ) );
 
-  ESP_LOGE( MINITOR_TAG, "start test" );
+  ESP_LOGE( MINITOR_TAG, "start insert" );
+  uint64_t start = esp_timer_get_time();
 
   for ( i = 0; i < NODE_COUNT; i++ )
   {
-    ESP_LOGE( MINITOR_TAG, "i: %d", i );
-
     for ( j = 0; j < H_LENGTH; j++ )
     {
       relay.id_hash[j] = esp_random() % 256;
@@ -50,6 +49,7 @@ void v_test_d_traverse_hsdir_relays_in_order()
 
     d_create_hsdir_relay( &relay );
   }
+  ESP_LOGE( MINITOR_TAG, "Insert time: %lld", esp_timer_get_time() - start );
 
   next_addr = hsdir_root_addr;
   previous_addr = hsdir_root_addr;
