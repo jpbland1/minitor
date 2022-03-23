@@ -3,10 +3,11 @@
 
 #include "driver/spi_master.h"
 
+#define ISSI_DMA 2
 #define ISSI_CS 22
-#define ISSI_CLK 18
-#define ISSI_MOSI 23
-#define ISSI_MISO 19
+#define ISSI_CLK 16
+#define ISSI_MOSI 21
+#define ISSI_MISO 17
 
 #define ISSI_READ 0x03
 #define ISSI_WRITE 0x02

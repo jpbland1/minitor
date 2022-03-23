@@ -81,7 +81,7 @@ int d_setup_init_rend_circuits( int circuit_count )
 
     do
     {
-      unique_relay = px_get_random_hsdir_relay( 0, NULL, NULL );
+      unique_relay = px_get_random_hsdir_relay( 1, NULL, NULL );
 
       standby_node = standby_rend_circuits.head;
 
@@ -191,7 +191,9 @@ int d_setup_init_circuits( int circuit_count )
 
     do
     {
+      ESP_LOGE( MINITOR_TAG, "in unique loop" );
       unique_final_relay = px_get_random_hsdir_relay( 0, NULL, guard_relay->identity );
+      ESP_LOGE( MINITOR_TAG, "%p", unique_final_relay );
 
       standby_node = standby_circuits.head;
 

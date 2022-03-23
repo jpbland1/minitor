@@ -13,9 +13,10 @@
 
 uint32_t hsdir_relay_count = 0;
 uint32_t random_offset_count = 1;
-int hsdir_root_addr = HSDIR_TREE_ROOT;
+int current_root_addr = HSDIR_TREE_ROOT;
+int previous_root_addr = HSDIR_TREE_ROOT;
 
-static int d_get_relay_at_address( binary_relay* b_relay, int addr )
+static int d_get_relay_at_address( BinaryRelay* b_relay, int addr )
 {
   int err;
 
@@ -33,7 +34,7 @@ static int d_get_relay_at_address( binary_relay* b_relay, int addr )
   t.base.addr = ( addr & 0xffffff );
   t.base.length = 0;
   t.base.tx_buffer = NULL;
-  t.base.rxlength = 8 * sizeof( binary_relay );
+  t.base.rxlength = 8 * sizeof( BinaryRelay );
   t.base.rx_buffer = b_relay;
   t.base.flags = SPI_TRANS_VARIABLE_DUMMY;
   t.dummy_bits = 9;
@@ -51,13 +52,10 @@ static int d_get_relay_at_address( binary_relay* b_relay, int addr )
   // ensure dma memory is stable, sort of a hack
   vTaskDelay( 1 );
 
-  //ESP_LOGE( MINITOR_TAG, "GET address check: %x", b_relay->relay.address );
-  //ESP_LOGE( MINITOR_TAG, "GET Port check: %d", b_relay->relay.or_port );
-
   return err;
 }
 
-static int d_store_relay_at_address( binary_relay* b_relay, int addr )
+static int d_store_relay_at_address( BinaryRelay* b_relay, int addr )
 {
   int err;
 
@@ -73,7 +71,7 @@ static int d_store_relay_at_address( binary_relay* b_relay, int addr )
 
   t.base.cmd = ISSI_WRITE;
   t.base.addr = ( addr & 0xffffff );
-  t.base.length = 8 * sizeof( binary_relay );
+  t.base.length = 8 * sizeof( BinaryRelay );
   t.base.tx_buffer = b_relay;
   t.base.rxlength = 0;
   t.base.rx_buffer = NULL;
@@ -92,46 +90,55 @@ static int d_store_relay_at_address( binary_relay* b_relay, int addr )
   // ensure dma memory is stable, sort of a hack
   vTaskDelay( 1 );
 
-  //ESP_LOGE( MINITOR_TAG, "STORE address check: %x", b_relay->relay.address );
-  //ESP_LOGE( MINITOR_TAG, "STORE Port check: %d", b_relay->relay.or_port );
-
   return err;
 }
 
 int d_reset_hsdir_relay_tree()
 {
-  binary_relay* b_relay;
+  BinaryRelay* b_relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  current_root_addr = HSDIR_TREE_ROOT;
+  previous_root_addr = HSDIR_TREE_ROOT;
 
-  memset( b_relay, 0xff, sizeof( binary_relay ) );
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  memset( b_relay, 0xff, sizeof( BinaryRelay ) );
+
+  if ( d_store_relay_at_address( b_relay, current_root_addr ) != 0 )
   {
     return -1;
   }
 
   hsdir_relay_count = 0;
-  ESP_LOGE( MINITOR_TAG, "d_reset_hsdir_relay_tree" );
 
   free( b_relay );
 
   return 0;
 }
 
-static int d_rebalance_relays( int parent_addr, int child_addr )
+static int d_rebalance_relays( int parent_addr, int child_addr, int current )
 {
   int ret = 0;
   int tmp_addr;
-  binary_relay* parent_relay;
-  binary_relay* child_relay;
-  binary_relay* tmp_relay;
+  int root_addr;
+  BinaryRelay* parent_relay;
+  BinaryRelay* child_relay;
+  BinaryRelay* tmp_relay;
 
-  parent_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
-  child_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
-  tmp_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  parent_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
+  child_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
+  tmp_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  while ( child_addr != hsdir_root_addr )
+  if ( current == 1 )
+  {
+    root_addr = current_root_addr;
+  }
+  else
+  {
+    root_addr = previous_root_addr;
+  }
+
+  while ( child_addr != root_addr )
   {
     if ( d_get_relay_at_address( parent_relay, parent_addr ) != 0 )
     {
@@ -139,11 +146,11 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
       goto finish;
     }
 
-    if ( parent_relay->right_addr == child_addr )
+    if ( parent_relay->avl_blocks[current].right_addr == child_addr )
     {
-      parent_relay->balance++;
+      parent_relay->avl_blocks[current].balance++;
 
-      if ( parent_relay->balance > 1 )
+      if ( parent_relay->avl_blocks[current].balance > 1 )
       {
         if ( d_get_relay_at_address( child_relay, child_addr ) != 0 )
         {
@@ -152,88 +159,102 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
         }
 
         // rotate left
-        if ( child_relay->balance > 0 )
+        if ( child_relay->avl_blocks[current].balance > 0 )
         {
-          if ( parent_addr == hsdir_root_addr )
+          if ( parent_addr == root_addr )
           {
-            hsdir_root_addr = child_addr;
-          }
-          else
-          {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( current == 1 )
             {
-              ret = -1;
-              goto finish;
-            }
-
-            if ( tmp_relay->right_addr == parent_addr )
-            {
-              tmp_relay->right_addr = child_addr;
+              current_root_addr = child_addr;
             }
             else
             {
-              tmp_relay->left_addr = child_addr;
-            }
-
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
-            {
-              ret = -1;
-              goto finish;
+              previous_root_addr = child_addr;
             }
           }
-
-          child_relay->parent_addr = parent_relay->parent_addr;
-          parent_relay->parent_addr = child_addr;
-          parent_relay->right_addr = child_relay->left_addr;
-          child_relay->left_addr = parent_addr;
-
-          if ( parent_relay->right_addr != -1 )
+          else
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = parent_addr;
+            if ( tmp_relay->avl_blocks[current].right_addr == parent_addr )
+            {
+              tmp_relay->avl_blocks[current].right_addr = child_addr;
+            }
+            else
+            {
+              tmp_relay->avl_blocks[current].left_addr = child_addr;
+            }
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
           }
 
-          parent_relay->balance = 0;
-          child_relay->balance = 0;
+          child_relay->avl_blocks[current].parent_addr = parent_relay->avl_blocks[current].parent_addr;
+          parent_relay->avl_blocks[current].parent_addr = child_addr;
+          parent_relay->avl_blocks[current].right_addr = child_relay->avl_blocks[current].left_addr;
+          child_relay->avl_blocks[current].left_addr = parent_addr;
+
+          if ( parent_relay->avl_blocks[current].right_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->avl_blocks[current].parent_addr = parent_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].right_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          parent_relay->avl_blocks[current].balance = 0;
+          child_relay->avl_blocks[current].balance = 0;
         }
         // rotate right left
-        else if ( child_relay->balance < 0 )
+        else if ( child_relay->avl_blocks[current].balance < 0 )
         {
-          tmp_addr = child_relay->left_addr;
+          tmp_addr = child_relay->avl_blocks[current].left_addr;
 
-          if ( parent_addr == hsdir_root_addr )
+          if ( parent_addr == root_addr )
           {
-            hsdir_root_addr = tmp_addr;
+            if ( current == 1 )
+            {
+              current_root_addr = tmp_addr;
+            }
+            else
+            {
+              previous_root_addr = tmp_addr;
+            }
           }
           else
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            if ( tmp_relay->right_addr == parent_addr )
+            if ( tmp_relay->avl_blocks[current].right_addr == parent_addr )
             {
-              tmp_relay->right_addr = tmp_addr;
+              tmp_relay->avl_blocks[current].right_addr = tmp_addr;
             }
             else
             {
-              tmp_relay->left_addr = tmp_addr;
+              tmp_relay->avl_blocks[current].left_addr = tmp_addr;
             }
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
@@ -246,31 +267,31 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             goto finish;
           }
 
-          tmp_relay->parent_addr = parent_relay->parent_addr;
-          parent_relay->right_addr = tmp_relay->left_addr;
-          tmp_relay->left_addr = parent_addr;
-          child_relay->left_addr = tmp_relay->right_addr;
-          tmp_relay->right_addr = child_addr;
-          child_relay->parent_addr = tmp_addr;
-          parent_relay->parent_addr = tmp_addr;
+          tmp_relay->avl_blocks[current].parent_addr = parent_relay->avl_blocks[current].parent_addr;
+          parent_relay->avl_blocks[current].right_addr = tmp_relay->avl_blocks[current].left_addr;
+          tmp_relay->avl_blocks[current].left_addr = parent_addr;
+          child_relay->avl_blocks[current].left_addr = tmp_relay->avl_blocks[current].right_addr;
+          tmp_relay->avl_blocks[current].right_addr = child_addr;
+          child_relay->avl_blocks[current].parent_addr = tmp_addr;
+          parent_relay->avl_blocks[current].parent_addr = tmp_addr;
 
-          if ( tmp_relay->balance > 0 )
+          if ( tmp_relay->avl_blocks[current].balance > 0 )
           {
-            parent_relay->balance = -1;
-            child_relay->balance = 0;
+            parent_relay->avl_blocks[current].balance = -1;
+            child_relay->avl_blocks[current].balance = 0;
           }
-          else if ( tmp_relay->balance < 0 )
+          else if ( tmp_relay->avl_blocks[current].balance < 0 )
           {
-            parent_relay->balance = 0;
-            child_relay->balance = 1;
+            parent_relay->avl_blocks[current].balance = 0;
+            child_relay->avl_blocks[current].balance = 1;
           }
           else
           {
-            parent_relay->balance = 0;
-            child_relay->balance = 0;
+            parent_relay->avl_blocks[current].balance = 0;
+            child_relay->avl_blocks[current].balance = 0;
           }
 
-          tmp_relay->balance = 0;
+          tmp_relay->avl_blocks[current].balance = 0;
 
           if ( d_store_relay_at_address( tmp_relay, tmp_addr ) != 0 )
           {
@@ -278,34 +299,34 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             goto finish;
           }
 
-          if ( parent_relay->right_addr != -1 )
+          if ( parent_relay->avl_blocks[current].right_addr != -1 )
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].right_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = parent_addr;
+            tmp_relay->avl_blocks[current].parent_addr = parent_addr;
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->right_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].right_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
           }
 
-          if ( child_relay->left_addr != -1 )
+          if ( child_relay->avl_blocks[current].left_addr != -1 )
           {
-            if ( d_get_relay_at_address( tmp_relay, child_relay->left_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, child_relay->avl_blocks[current].left_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = child_addr;
+            tmp_relay->avl_blocks[current].parent_addr = child_addr;
 
-            if ( d_store_relay_at_address( tmp_relay, child_relay->left_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, child_relay->avl_blocks[current].left_addr ) != 0 )
             {
               ret = -1;
               goto finish;
@@ -329,11 +350,11 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
         break;
       }
     }
-    else if ( parent_relay->left_addr == child_addr )
+    else if ( parent_relay->avl_blocks[current].left_addr == child_addr )
     {
-      parent_relay->balance--;
+      parent_relay->avl_blocks[current].balance--;
 
-      if ( parent_relay->balance < -1 )
+      if ( parent_relay->avl_blocks[current].balance < -1 )
       {
         if ( d_get_relay_at_address( child_relay, child_addr ) != 0 )
         {
@@ -342,88 +363,102 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
         }
 
         // rotate right
-        if ( child_relay->balance < 0 )
+        if ( child_relay->avl_blocks[current].balance < 0 )
         {
-          if ( parent_addr == hsdir_root_addr )
+          if ( parent_addr == root_addr )
           {
-            hsdir_root_addr = child_addr;
-          }
-          else
-          {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( current == 1 )
             {
-              ret = -1;
-              goto finish;
-            }
-
-            if ( tmp_relay->right_addr == parent_addr )
-            {
-              tmp_relay->right_addr = child_addr;
+              current_root_addr = child_addr;
             }
             else
             {
-              tmp_relay->left_addr = child_addr;
-            }
-
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
-            {
-              ret = -1;
-              goto finish;
+              previous_root_addr = child_addr;
             }
           }
-
-          child_relay->parent_addr = parent_relay->parent_addr;
-          parent_relay->parent_addr = child_addr;
-          parent_relay->left_addr = child_relay->right_addr;
-          child_relay->right_addr = parent_addr;
-
-          if ( parent_relay->left_addr != -1 )
+          else
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = parent_addr;
+            if ( tmp_relay->avl_blocks[current].right_addr == parent_addr )
+            {
+              tmp_relay->avl_blocks[current].right_addr = child_addr;
+            }
+            else
+            {
+              tmp_relay->avl_blocks[current].left_addr = child_addr;
+            }
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
           }
 
-          parent_relay->balance = 0;
-          child_relay->balance = 0;
+          child_relay->avl_blocks[current].parent_addr = parent_relay->avl_blocks[current].parent_addr;
+          parent_relay->avl_blocks[current].parent_addr = child_addr;
+          parent_relay->avl_blocks[current].left_addr = child_relay->avl_blocks[current].right_addr;
+          child_relay->avl_blocks[current].right_addr = parent_addr;
+
+          if ( parent_relay->avl_blocks[current].left_addr != -1 )
+          {
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+
+            tmp_relay->avl_blocks[current].parent_addr = parent_addr;
+
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].left_addr ) != 0 )
+            {
+              ret = -1;
+              goto finish;
+            }
+          }
+
+          parent_relay->avl_blocks[current].balance = 0;
+          child_relay->avl_blocks[current].balance = 0;
         }
         // rotate left right
-        else if ( child_relay->balance > 0 )
+        else if ( child_relay->avl_blocks[current].balance > 0 )
         {
-          tmp_addr = child_relay->right_addr;
+          tmp_addr = child_relay->avl_blocks[current].right_addr;
 
-          if ( parent_addr == hsdir_root_addr )
+          if ( parent_addr == root_addr )
           {
-            hsdir_root_addr = tmp_addr;
+            if ( current == 1 )
+            {
+              current_root_addr = tmp_addr;
+            }
+            else
+            {
+              previous_root_addr = tmp_addr;
+            }
           }
           else
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            if ( tmp_relay->right_addr == parent_addr )
+            if ( tmp_relay->avl_blocks[current].right_addr == parent_addr )
             {
-              tmp_relay->right_addr = tmp_addr;
+              tmp_relay->avl_blocks[current].right_addr = tmp_addr;
             }
             else
             {
-              tmp_relay->left_addr = tmp_addr;
+              tmp_relay->avl_blocks[current].left_addr = tmp_addr;
             }
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->parent_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].parent_addr ) != 0 )
             {
               ret = -1;
               goto finish;
@@ -436,31 +471,31 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             goto finish;
           }
 
-          tmp_relay->parent_addr = parent_relay->parent_addr;
-          parent_relay->left_addr = tmp_relay->right_addr;
-          tmp_relay->right_addr = parent_addr;
-          child_relay->right_addr = tmp_relay->left_addr;
-          tmp_relay->left_addr = child_addr;
-          child_relay->parent_addr = tmp_addr;
-          parent_relay->parent_addr = tmp_addr;
+          tmp_relay->avl_blocks[current].parent_addr = parent_relay->avl_blocks[current].parent_addr;
+          parent_relay->avl_blocks[current].left_addr = tmp_relay->avl_blocks[current].right_addr;
+          tmp_relay->avl_blocks[current].right_addr = parent_addr;
+          child_relay->avl_blocks[current].right_addr = tmp_relay->avl_blocks[current].left_addr;
+          tmp_relay->avl_blocks[current].left_addr = child_addr;
+          child_relay->avl_blocks[current].parent_addr = tmp_addr;
+          parent_relay->avl_blocks[current].parent_addr = tmp_addr;
 
-          if ( tmp_relay->balance > 0 )
+          if ( tmp_relay->avl_blocks[current].balance > 0 )
           {
-            child_relay->balance = -1;
-            parent_relay->balance = 0;
+            child_relay->avl_blocks[current].balance = -1;
+            parent_relay->avl_blocks[current].balance = 0;
           }
-          else if ( tmp_relay->balance < 0 )
+          else if ( tmp_relay->avl_blocks[current].balance < 0 )
           {
-            parent_relay->balance = 1;
-            child_relay->balance = 0;
+            parent_relay->avl_blocks[current].balance = 1;
+            child_relay->avl_blocks[current].balance = 0;
           }
           else
           {
-            parent_relay->balance = 0;
-            child_relay->balance = 0;
+            parent_relay->avl_blocks[current].balance = 0;
+            child_relay->avl_blocks[current].balance = 0;
           }
 
-          tmp_relay->balance = 0;
+          tmp_relay->avl_blocks[current].balance = 0;
 
           if ( d_store_relay_at_address( tmp_relay, tmp_addr ) != 0 )
           {
@@ -468,34 +503,34 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
             goto finish;
           }
 
-          if ( parent_relay->left_addr != -1 )
+          if ( parent_relay->avl_blocks[current].left_addr != -1 )
           {
-            if ( d_get_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].left_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = parent_addr;
+            tmp_relay->avl_blocks[current].parent_addr = parent_addr;
 
-            if ( d_store_relay_at_address( tmp_relay, parent_relay->left_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, parent_relay->avl_blocks[current].left_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
           }
 
-          if ( child_relay->right_addr != -1 )
+          if ( child_relay->avl_blocks[current].right_addr != -1 )
           {
-            if ( d_get_relay_at_address( tmp_relay, child_relay->right_addr ) != 0 )
+            if ( d_get_relay_at_address( tmp_relay, child_relay->avl_blocks[current].right_addr ) != 0 )
             {
               ret = -1;
               goto finish;
             }
 
-            tmp_relay->parent_addr = child_addr;
+            tmp_relay->avl_blocks[current].parent_addr = child_addr;
 
-            if ( d_store_relay_at_address( tmp_relay, child_relay->right_addr ) != 0 )
+            if ( d_store_relay_at_address( tmp_relay, child_relay->avl_blocks[current].right_addr ) != 0 )
             {
               ret = -1;
               goto finish;
@@ -527,13 +562,13 @@ static int d_rebalance_relays( int parent_addr, int child_addr )
     }
 
     // our addition balanced the subtree, no need to continue up
-    if ( parent_relay->balance == 0 )
+    if ( parent_relay->avl_blocks[current].balance == 0 )
     {
       break;
     }
 
     child_addr = parent_addr;
-    parent_addr = parent_relay->parent_addr;
+    parent_addr = parent_relay->avl_blocks[current].parent_addr;
   }
 
 finish:
@@ -544,17 +579,25 @@ finish:
   return ret;
 }
 
-int d_create_hsdir_relay( OnionRelay* onion_relay )
+static int d_create_hsdir_relay_by_srv( OnionRelay* onion_relay, int current, int write_addr )
 {
   int ret;
   int next_addr;
-  int write_addr;
-  binary_relay* b_relay;
+  int root_addr;
+  BinaryRelay* b_relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  next_addr = hsdir_root_addr;
-  write_addr = hsdir_root_addr;
+  if ( current == 1 )
+  {
+    root_addr = current_root_addr;
+  }
+  else
+  {
+    root_addr = previous_root_addr;
+  }
+
+  next_addr = root_addr;
 
   while ( 1 )
   {
@@ -563,57 +606,71 @@ int d_create_hsdir_relay( OnionRelay* onion_relay )
       goto fail;
     }
 
-    if ( next_addr == hsdir_root_addr )
+    if ( next_addr == root_addr )
     {
-      if ( b_relay->parent_addr == 0xffffffff )
+      if ( b_relay->avl_blocks[current].parent_addr == 0xffffffff )
       {
-        b_relay->parent_addr = hsdir_root_addr + sizeof( binary_relay );
-        b_relay->left_addr = -1;
-        b_relay->right_addr = -1;
-        b_relay->balance = 0;
+        b_relay->avl_blocks[current].parent_addr = root_addr + sizeof( BinaryRelay );
+        b_relay->avl_blocks[current].left_addr = -1;
+        b_relay->avl_blocks[current].right_addr = -1;
+        b_relay->avl_blocks[current].balance = 0;
 
         memcpy( &b_relay->relay, onion_relay, sizeof( OnionRelay ) );
 
-        if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+        if ( d_store_relay_at_address( b_relay, root_addr ) != 0 )
         {
           goto fail;
         }
 
-        hsdir_relay_count++;
+        if ( current == 1 )
+        {
+          hsdir_relay_count++;
+        }
+
         free( b_relay );
 
-        return 0;
+        return root_addr;
       }
 
-      write_addr = b_relay->parent_addr;
+      if ( current == 1 )
+      {
+        write_addr = b_relay->avl_blocks[current].parent_addr;
+      }
     }
 
-    ret = memcmp( onion_relay->id_hash, b_relay->relay.id_hash, H_LENGTH );
+    if ( current == 1 )
+    {
+      ret = memcmp( onion_relay->id_hash, b_relay->relay.id_hash, H_LENGTH );
+    }
+    else
+    {
+      ret = memcmp( onion_relay->id_hash_previous, b_relay->relay.id_hash_previous, H_LENGTH );
+    }
 
     if ( ret < 0 )
     {
-      if ( b_relay->left_addr == -1 )
+      if ( b_relay->avl_blocks[current].left_addr == -1 )
       {
-        b_relay->left_addr = write_addr;
+        b_relay->avl_blocks[current].left_addr = write_addr;
 
         break;
       }
       else
       {
-        next_addr = b_relay->left_addr;
+        next_addr = b_relay->avl_blocks[current].left_addr;
       }
     }
     else
     {
-      if ( b_relay->right_addr == -1 )
+      if ( b_relay->avl_blocks[current].right_addr == -1 )
       {
-        b_relay->right_addr = write_addr;
+        b_relay->avl_blocks[current].right_addr = write_addr;
 
         break;
       }
       else
       {
-        next_addr = b_relay->right_addr;
+        next_addr = b_relay->avl_blocks[current].right_addr;
       }
     }
   }
@@ -623,43 +680,58 @@ int d_create_hsdir_relay( OnionRelay* onion_relay )
     goto fail;
   }
 
-  b_relay->parent_addr = next_addr;
-  b_relay->left_addr = -1;
-  b_relay->right_addr = -1;
-  b_relay->balance = 0;
+  if ( current == 1 )
+  {
+    memset( b_relay, 0xff, sizeof( BinaryRelay ) );
 
-  memcpy( &b_relay->relay, onion_relay, sizeof( OnionRelay ) );
+    memcpy( &b_relay->relay, onion_relay, sizeof( OnionRelay ) );
+  }
+  else
+  {
+    if ( d_get_relay_at_address( b_relay, write_addr ) != 0 )
+    {
+      goto fail;
+    }
+  }
+
+  b_relay->avl_blocks[current].parent_addr = next_addr;
+  b_relay->avl_blocks[current].left_addr = -1;
+  b_relay->avl_blocks[current].right_addr = -1;
+  b_relay->avl_blocks[current].balance = 0;
 
   if ( d_store_relay_at_address( b_relay, write_addr ) != 0 )
   {
     goto fail;
   }
 
-  if ( d_get_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  if ( current == 1 )
+  {
+    if ( d_get_relay_at_address( b_relay, root_addr ) != 0 )
+    {
+      goto fail;
+    }
+
+    b_relay->avl_blocks[current].parent_addr = write_addr + sizeof( BinaryRelay );
+
+    if ( d_store_relay_at_address( b_relay, root_addr ) != 0 )
+    {
+      goto fail;
+    }
+  }
+
+  if ( d_rebalance_relays( next_addr, write_addr, current ) != 0 )
   {
     goto fail;
   }
 
-  b_relay->parent_addr = write_addr + sizeof( binary_relay );
-
-  if ( d_store_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+  if ( current == 1 )
   {
-    goto fail;
+    hsdir_relay_count++;
   }
 
-  //ESP_LOGE( MINITOR_TAG, "Start rebalance" );
-
-  if ( d_rebalance_relays( next_addr, write_addr ) != 0 )
-  {
-    goto fail;
-  }
-
-  //ESP_LOGE( MINITOR_TAG, "End rebalance" );
-
-  hsdir_relay_count++;
   free( b_relay );
 
-  return 0;
+  return write_addr;
 
 fail:
   free( b_relay );
@@ -667,19 +739,40 @@ fail:
   return -1;
 }
 
-int d_traverse_hsdir_relays_in_order( binary_relay* b_relay, int next_addr, int* previous_addr, int offset )
+int d_create_hsdir_relay( OnionRelay* onion_relay )
+{
+  int write_addr;
+
+  write_addr = d_create_hsdir_relay_by_srv( onion_relay, 1, -1 );
+
+  if ( write_addr < 0 )
+  {
+    return -1;
+  }
+
+  return d_create_hsdir_relay_by_srv( onion_relay, 0, write_addr );
+}
+
+int d_traverse_hsdir_relays_in_order( BinaryRelay* b_relay, int next_addr, int* previous_addr, int offset, int current )
 {
   int i;
+  int root_addr;
+
+  if ( current == 1 )
+  {
+    root_addr = current_root_addr;
+  }
+  else
+  {
+    root_addr = previous_root_addr;
+  }
 
   // traverse to the next node offset times
   for ( i = 0; i < offset; i++ )
   {
-    //ESP_LOGE( MINITOR_TAG, "next_addr: %d", next_addr );
-    //ESP_LOGE( MINITOR_TAG, "previous_addr: %d", *previous_addr );
-
     if ( hsdir_relay_count == 1 )
     {
-      if ( d_get_relay_at_address( b_relay, hsdir_root_addr ) != 0 )
+      if ( d_get_relay_at_address( b_relay, root_addr ) != 0 )
       {
         return -1;
       }
@@ -692,65 +785,60 @@ int d_traverse_hsdir_relays_in_order( binary_relay* b_relay, int next_addr, int*
       return -1;
     }
 
-    //ESP_LOGE( MINITOR_TAG, "parent_addr: %d", b_relay->parent_addr );
-    //ESP_LOGE( MINITOR_TAG, "left_addr: %d", b_relay->left_addr );
-    //ESP_LOGE( MINITOR_TAG, "right_addr: %d", b_relay->right_addr );
-    //ESP_LOGE( MINITOR_TAG, "" );
-
-    if ( next_addr == hsdir_root_addr && b_relay->parent_addr == 0xffffffff )
+    if ( next_addr == root_addr && b_relay->avl_blocks[current].parent_addr == 0xffffffff )
     {
       return -1;
     }
 
     // if we moved up and left, don't count it as next
-    if ( *previous_addr == b_relay->right_addr )
+    if ( *previous_addr == b_relay->avl_blocks[current].right_addr )
     {
       i--;
       *previous_addr = next_addr;
 
       // at root, start traversing down to first node
-      if ( next_addr == hsdir_root_addr )
+      if ( next_addr == root_addr )
       {
-        next_addr = b_relay->left_addr;
+        next_addr = b_relay->avl_blocks[current].left_addr;
       }
       else
       {
-        next_addr = b_relay->parent_addr;
+        next_addr = b_relay->avl_blocks[current].parent_addr;
       }
     }
-    else if ( *previous_addr == b_relay->left_addr )
+    else if ( *previous_addr == b_relay->avl_blocks[current].left_addr )
     {
       *previous_addr = next_addr;
 
-      if ( b_relay->right_addr == -1 )
+      if ( b_relay->avl_blocks[current].right_addr == -1 )
       {
-        next_addr = b_relay->parent_addr;
+        next_addr = b_relay->avl_blocks[current].parent_addr;
       }
       else
       {
-        next_addr = b_relay->right_addr;
+        next_addr = b_relay->avl_blocks[current].right_addr;
       }
     }
     // if we traversed down or we just started at the root node
-    else if ( *previous_addr == b_relay->parent_addr || ( *previous_addr == hsdir_root_addr && next_addr == hsdir_root_addr ) )
+    else if ( *previous_addr == b_relay->avl_blocks[current].parent_addr || ( *previous_addr == root_addr && next_addr == root_addr ) )
     {
       *previous_addr = next_addr;
 
-      if ( b_relay->left_addr == -1 )
+      if ( b_relay->avl_blocks[current].left_addr == -1 )
       {
-        if ( b_relay->right_addr == -1 )
+        if ( b_relay->avl_blocks[current].right_addr == -1 )
         {
-          next_addr = b_relay->parent_addr;
+          next_addr = b_relay->avl_blocks[current].parent_addr;
         }
         else
         {
-          next_addr = b_relay->right_addr;
+          next_addr = b_relay->avl_blocks[current].right_addr;
         }
       }
       else
       {
         i--;
-        next_addr = b_relay->left_addr;
+        next_addr = b_relay->avl_blocks[current].left_addr;
       }
     }
   }
@@ -758,42 +846,57 @@ int d_traverse_hsdir_relays_in_order( binary_relay* b_relay, int next_addr, int*
   return next_addr;
 }
 
-OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, int offset, DoublyLinkedOnionRelayList* used_relays )
+OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, int offset, DoublyLinkedOnionRelayList* used_relays, int current )
 {
   int i;
   int ret;
   int next_addr;
   int previous_addr;
-  binary_relay* b_relay;
+  int root_addr;
+  BinaryRelay* b_relay;
   DoublyLinkedOnionRelay* used_relay;
   OnionRelay* onion_relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  if ( current == 1 )
+  {
+    root_addr = current_root_addr;
+  }
+  else
+  {
+    root_addr = previous_root_addr;
+  }
 
-  next_addr = hsdir_root_addr;
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
+
+  next_addr = root_addr;
 
   while ( 1 )
   {
-    ESP_LOGE( MINITOR_TAG, "in px_get_hsdir_relay_by_id_hash loop" );
-
     if ( d_get_relay_at_address( b_relay, next_addr ) != 0 )
     {
       goto fail;
     }
 
-    if ( next_addr == hsdir_root_addr )
+    if ( next_addr == root_addr )
     {
-      if ( b_relay->parent_addr == 0xffffffff )
+      if ( b_relay->avl_blocks[current].parent_addr == 0xffffffff )
       {
         goto fail;
       }
     }
 
-    ret = memcmp( id_hash, b_relay->relay.id_hash, H_LENGTH );
+    if ( current == 1 )
+    {
+      ret = memcmp( id_hash, b_relay->relay.id_hash, H_LENGTH );
+    }
+    else
+    {
+      ret = memcmp( id_hash, b_relay->relay.id_hash_previous, H_LENGTH );
+    }
 
     if ( ret < 0 )
     {
-      if ( b_relay->left_addr == -1 )
+      if ( b_relay->avl_blocks[current].left_addr == -1 )
       {
         if ( identity != NULL )
         {
@@ -802,20 +905,20 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, 
 
         previous_addr = next_addr;
 
-        if ( b_relay->right_addr != -1 )
+        if ( b_relay->avl_blocks[current].right_addr != -1 )
         {
-          next_addr = b_relay->right_addr;
+          next_addr = b_relay->avl_blocks[current].right_addr;
         }
         else
         {
-          next_addr = b_relay->parent_addr;
+          next_addr = b_relay->avl_blocks[current].parent_addr;
         }
 
         break;
       }
       else
       {
-        next_addr = b_relay->left_addr;
+        next_addr = b_relay->avl_blocks[current].left_addr;
       }
     }
     else if ( ret > 0 )
@@ -824,7 +927,7 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, 
       // we need to traverse to the next node in order
       // since that will be larger than us or will be the
       // first node
-      if ( b_relay->right_addr == -1 )
+      if ( b_relay->avl_blocks[current].right_addr == -1 )
       {
         if ( identity != NULL )
         {
@@ -833,13 +936,13 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, 
 
         offset++;
         previous_addr = next_addr;
-        next_addr = b_relay->parent_addr;
+        next_addr = b_relay->avl_blocks[current].parent_addr;
 
         break;
       }
       else
       {
-        next_addr = b_relay->right_addr;
+        next_addr = b_relay->avl_blocks[current].right_addr;
       }
     }
     else
@@ -848,26 +951,26 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, 
       {
         previous_addr = next_addr;
 
-        if ( b_relay->right_addr == -1 )
+        if ( b_relay->avl_blocks[current].right_addr == -1 )
         {
-          next_addr = b_relay->parent_addr;
+          next_addr = b_relay->avl_blocks[current].parent_addr;
         }
         else
         {
-          next_addr = b_relay->right_addr;
+          next_addr = b_relay->avl_blocks[current].right_addr;
         }
 
         break;
       }
       else
       {
-        if ( b_relay->right_addr == -1 )
+        if ( b_relay->avl_blocks[current].right_addr == -1 )
         {
           goto fail;
         }
         else
         {
-          next_addr = b_relay->right_addr;
+          next_addr = b_relay->avl_blocks[current].right_addr;
         }
       }
     }
@@ -892,7 +995,7 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, uint8_t* identity, 
 
   while ( offset != 0 )
   {
-    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, offset );
+    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, offset, current );
 
     if ( next_addr < 0 )
     {
@@ -928,31 +1031,20 @@ fail:
   return NULL;
 }
 
-/*
-OnionRelay* px_get_hsdir_relay_by_id( uint8_t* identity, uint8_t* master_key )
-{
-  uint8_t id_hash[H_LENGTH];
-
-  v_get_id_hash( master_key, id_hash );
-
-  return px_get_hsdir_relay_by_id_hash( id_hash, identity, 0, NULL );
-}
-*/
-
 OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude )
 {
   int i;
   int start_addr;
   int previous_addr;
   int offset;
-  binary_relay* b_relay;
+  BinaryRelay* b_relay;
   OnionRelay* onion_relay;
   DoublyLinkedOnionRelay* db_onion_relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  start_addr = hsdir_root_addr;
-  previous_addr = hsdir_root_addr;
+  start_addr = current_root_addr;
+  previous_addr = current_root_addr;
   //offset = ( esp_random() % hsdir_relay_count ) + 1;
   offset = random_offset_count;
   random_offset_count++;
@@ -965,7 +1057,7 @@ OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayLis
 
   do
   {
-    start_addr = d_traverse_hsdir_relays_in_order( b_relay, start_addr, &previous_addr, offset );
+    start_addr = d_traverse_hsdir_relays_in_order( b_relay, start_addr, &previous_addr, offset, 1 );
 
     if ( start_addr < 0 )
     {
@@ -982,7 +1074,6 @@ OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayLis
       {
         if ( memcmp( db_onion_relay->relay->identity, b_relay->relay.identity, ID_LENGTH ) == 0 )
         {
-          ESP_LOGE( MINITOR_TAG, "Found a duplicate: i:%d, in list:%d, found:%d", i, db_onion_relay->relay->or_port, b_relay->relay.or_port );
           break;
         }
 
@@ -1027,11 +1118,11 @@ static int d_update_relay_guard( uint8_t* identity, uint8_t* id_hash, int guard 
 {
   int ret;
   int next_addr;
-  binary_relay* b_relay;
+  BinaryRelay* b_relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  next_addr = hsdir_root_addr;
+  next_addr = current_root_addr;
 
   while ( 1 )
   {
@@ -1040,9 +1131,9 @@ static int d_update_relay_guard( uint8_t* identity, uint8_t* id_hash, int guard 
       goto fail;
     }
 
-    if ( next_addr == hsdir_root_addr )
+    if ( next_addr == current_root_addr )
     {
-      if ( b_relay->parent_addr == 0xffffffff )
+      if ( b_relay->avl_blocks[1].parent_addr == 0xffffffff )
       {
         goto fail;
       }
@@ -1052,24 +1143,24 @@ static int d_update_relay_guard( uint8_t* identity, uint8_t* id_hash, int guard 
 
     if ( ret < 0 )
     {
-      if ( b_relay->left_addr == -1 )
+      if ( b_relay->avl_blocks[1].left_addr == -1 )
       {
         goto fail;
       }
       else
       {
-        next_addr = b_relay->left_addr;
+        next_addr = b_relay->avl_blocks[1].left_addr;
       }
     }
     else if ( ret > 0 )
     {
-      if ( b_relay->right_addr == -1 )
+      if ( b_relay->avl_blocks[1].right_addr == -1 )
       {
         goto fail;
       }
       else
       {
-        next_addr = b_relay->right_addr;
+        next_addr = b_relay->avl_blocks[1].right_addr;
       }
     }
     else
@@ -1087,13 +1178,13 @@ static int d_update_relay_guard( uint8_t* identity, uint8_t* id_hash, int guard 
       }
       else
       {
-        if ( b_relay->right_addr == -1 )
+        if ( b_relay->avl_blocks[1].right_addr == -1 )
         {
           goto fail;
         }
         else
         {
-          next_addr = b_relay->right_addr;
+          next_addr = b_relay->avl_blocks[1].right_addr;
         }
       }
     }

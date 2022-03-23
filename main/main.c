@@ -175,6 +175,13 @@ void app_main()
     return;
   }
 
+  if ( d_issi_INIT() < 0 )
+  {
+    ESP_LOGE( TAG, "Failed to init issi ram" );
+
+    return;
+  }
+
   static httpd_handle_t server = NULL;
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -193,13 +200,6 @@ void app_main()
     time( &now );
     localtime_r( &now, &time_info );
   } while ( time_info.tm_year < (2016 - 1900) );
-
-  if ( d_issi_INIT() < 0 )
-  {
-    ESP_LOGE( TAG, "Failed to init issi ram" );
-
-    return;
-  }
 
   ESP_LOGE( TAG, "Starting init" );
   v_minitor_INIT();

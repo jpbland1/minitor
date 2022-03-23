@@ -1,5 +1,6 @@
 #include <stddef.h>
 
+#include "../../include/config.h"
 #include "../../h/structures/consensus.h"
 
 // shared state must be protected by mutex
@@ -9,12 +10,16 @@ NetworkConsensus network_consensus = {
   .fresh_until = 0,
   .valid_until = 0,
 #ifdef MINITOR_CHUTNEY
-  .hsdir_interval = 8;
+  .hsdir_interval = 8,
 #else
   .hsdir_interval = HSDIR_INTERVAL_DEFAULT,
 #endif
   .hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT,
+#ifdef MINITOR_CHUTNEY
+  .hsdir_spread_store = 3,
+#else
   .hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT,
+#endif
 };
 SemaphoreHandle_t network_consensus_mutex;
 

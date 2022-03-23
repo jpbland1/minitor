@@ -32,6 +32,7 @@ typedef struct OnionRelay {
   unsigned char hsdir;
   unsigned char suitable;
   unsigned char id_hash[H_LENGTH];
+  unsigned char id_hash_previous[H_LENGTH];
   unsigned char can_guard;
   unsigned char is_guard;
   unsigned char can_exit;

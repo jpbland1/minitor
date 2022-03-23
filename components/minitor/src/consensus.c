@@ -672,7 +672,8 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
           goto finish;
         }
 
-        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash );
+        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash_previous, 0 );
+        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash, 1 );
 
         if ( d_create_hsdir_relay( &canidate_relay ) < 0 ) {
           ret = -1;
@@ -775,7 +776,7 @@ finish:
   return ret;
 }
 
-void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
+void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int current )
 {
   int time_period;
   uint8_t tmp_64_buffer[8];
@@ -794,14 +795,30 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
     ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
     ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
     ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
-    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", network_consensus.shared_rand[0], network_consensus.shared_rand[1], network_consensus.shared_rand[2], network_consensus.shared_rand[3] );
-    ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
+
+    if ( current == 1 )
+    {
+      ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", network_consensus.shared_rand[0], network_consensus.shared_rand[1], network_consensus.shared_rand[2], network_consensus.shared_rand[3] );
+    }
+    else
+    {
+      ESP_LOGE( MINITOR_TAG, "previous_srv: %.2x %.2x %.2x %.2x", network_consensus.previous_shared_rand[0], network_consensus.previous_shared_rand[1], network_consensus.previous_shared_rand[2], network_consensus.previous_shared_rand[3] );
+    }
+
     ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", network_consensus.hsdir_interval );
   }
 
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
   wc_Sha3_256_Update( &reusable_sha3, identity, H_LENGTH );
-  wc_Sha3_256_Update( &reusable_sha3, network_consensus.shared_rand, 32 );
+
+  if ( current == 1 )
+  {
+    wc_Sha3_256_Update( &reusable_sha3, network_consensus.shared_rand, 32 );
+  }
+  else
+  {
+    wc_Sha3_256_Update( &reusable_sha3, network_consensus.previous_shared_rand, 32 );
+  }
 
   tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 56 );
   tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 48 );
@@ -811,6 +828,10 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
   tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 16 );
   tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 8 );
   tmp_64_buffer[7] = (unsigned char)( (uint64_t)( time_period ) );
+
+  {
+    ESP_LOGE( MINITOR_TAG, "time_period: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x", tmp_64_buffer[0], tmp_64_buffer[1], tmp_64_buffer[2], tmp_64_buffer[3], tmp_64_buffer[4], tmp_64_buffer[5], tmp_64_buffer[6], tmp_64_buffer[7]  );
+  }
 
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
@@ -822,6 +843,10 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash )
   tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 16 );
   tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 8 );
   tmp_64_buffer[7] = (unsigned char)( (uint64_t)( network_consensus.hsdir_interval ) );
+
+  {
+    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x", tmp_64_buffer[0], tmp_64_buffer[1], tmp_64_buffer[2], tmp_64_buffer[3], tmp_64_buffer[4], tmp_64_buffer[5], tmp_64_buffer[6], tmp_64_buffer[7]  );
+  }
 
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 

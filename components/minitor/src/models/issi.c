@@ -12,6 +12,28 @@ int d_issi_INIT()
 {
   int err;
 
+  gpio_config_t io_cfg = {
+    .intr_type = GPIO_INTR_DISABLE,
+    .mode = GPIO_MODE_OUTPUT,
+    .pin_bit_mask = 1 << ISSI_CS,
+  };
+  gpio_config( &io_cfg );
+
+  // write high to the cs pin
+  gpio_set_level( ISSI_CS, 1 );
+
+  // initialize the spi bus
+  spi_bus_config_t bus_cfg = {
+    .miso_io_num = ISSI_MISO,
+    .mosi_io_num = ISSI_MOSI,
+    .sclk_io_num = ISSI_CLK,
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+    .max_transfer_sz = 4092,
+  };
+
+  err = spi_bus_initialize( VSPI_HOST, &bus_cfg, ISSI_DMA );
+
   // register the spi device
   spi_device_interface_config_t dev_cfg = {
     .command_bits = 8,
@@ -24,7 +46,7 @@ int d_issi_INIT()
     .flags = SPI_DEVICE_HALFDUPLEX,
   };
 
-  err = spi_bus_add_device( SDSPI_DEFAULT_HOST, &dev_cfg, &issi_spi );
+  err = spi_bus_add_device( VSPI_HOST, &dev_cfg, &issi_spi );
 
   if ( err != 0 )
   {

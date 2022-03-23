@@ -880,7 +880,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   }
   else
   {
-    ESP_LOGE( MINITOR_TAG, "Deleteing task handle" );
+    ESP_LOGE( MINITOR_TAG, "Deleteing task handle: %p", db_rend_circuit->circuit->task_handle );
     // stop the handle task so we can use the rx_queue it's attached to
     vTaskDelete( db_rend_circuit->circuit->task_handle );
 
@@ -1287,7 +1287,7 @@ int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_arr
   return mid;
 }
 
-static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int desired_count, DoublyLinkedOnionRelayList* used_relays, int previous )
+static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int desired_count, DoublyLinkedOnionRelayList* used_relays, int next )
 {
   int i;
   DoublyLinkedOnionRelay* db_tmp_relay;
@@ -1300,7 +1300,8 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int 
   {
     db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
 
-    db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, NULL, i, used_relays );
+    db_tmp_relay->relay = NULL;
+    db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, NULL, i, used_relays, next );
 
     if ( db_tmp_relay->relay == NULL )
     {
@@ -1311,6 +1312,13 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int 
     }
 
     v_add_relay_to_list( db_tmp_relay, relay_list );
+
+    db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    db_tmp_relay->relay = malloc( sizeof( OnionRelay ) );
+
+    memcpy( db_tmp_relay->relay->identity, relay_list->tail->relay->identity, ID_LENGTH );
+
+    v_add_relay_to_list( db_tmp_relay, used_relays );
   }
 
   return relay_list;
@@ -1338,7 +1346,7 @@ cleanup:
   return NULL;
 }
 
-static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int previous )
+static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
 {
   int i;
   int j;
@@ -1415,7 +1423,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     to_store = hsdir_spread_store;
 
-    hsdir_index_list = px_get_relays_by_hash( hs_index, hsdir_spread_store, &used_relays, previous );
+    hsdir_index_list = px_get_relays_by_hash( hs_index, hsdir_spread_store, &used_relays, next );
 
     if ( hsdir_index_list == NULL )
     {
@@ -1437,13 +1445,6 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     for ( j = 0; j < hsdir_index_list->length && to_store > 0; j++ )
     {
-      tmp_relay_node = malloc( sizeof( DoublyLinkedOnionRelay ) );
-      tmp_relay_node->relay = malloc( sizeof( OnionRelay ) );
-
-      memcpy( tmp_relay_node->relay->identity, hsdir_relay_node->relay->identity, ID_LENGTH );
-
-      v_add_relay_to_list( tmp_relay_node, &used_relays );
-
       next_hsdir_relay_node = hsdir_relay_node->next;
 
       v_add_relay_to_list( hsdir_relay_node, target_relays );
@@ -1477,7 +1478,7 @@ cleanup:
   return target_relays;
 }
 
-int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned char* shared_rand, unsigned int hsdir_spread_store, int previous )
+int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
 {
   int i;
   int j;
@@ -1496,10 +1497,7 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
   target_relays = NULL;
 
-  while ( target_relays == NULL )
-  {
-    target_relays = px_get_target_relays( hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, hsdir_spread_store, previous );
-  }
+  target_relays = px_get_target_relays( hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, hsdir_spread_store, next );
 
   start_node = px_get_random_hsdir_relay( 0, target_relays, NULL );
 
@@ -2839,14 +2837,16 @@ int d_push_hsdir( OnionService* onion_service )
   int wolf_succ;
   int mini_succ;
   unsigned int idx;
-  time_t now;
+  int voting_interval;
+  time_t srv_start_time;
+  time_t tp_start_time;
   long int valid_after;
   unsigned int hsdir_interval;
   unsigned int hsdir_n_replicas;
   unsigned int hsdir_spread_store;
   unsigned char previous_shared_rand[32];
   unsigned char shared_rand[32];
-  int time_period = 0;
+  int time_period;
   int revision_counter;
   WC_RNG rng;
   ed25519_key blinded_key;
@@ -2877,15 +2877,28 @@ int d_push_hsdir( OnionService* onion_service )
   hsdir_interval = network_consensus.hsdir_interval;
   hsdir_n_replicas = network_consensus.hsdir_n_replicas;
   hsdir_spread_store = network_consensus.hsdir_spread_store;
+
+  voting_interval = network_consensus.fresh_until - valid_after;
+
+  // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
+  srv_start_time = valid_after - ( ( ( ( valid_after / voting_interval ) ) % 24 ) * voting_interval );
+  tp_start_time = srv_start_time + hsdir_interval * 60;
+
+  // TODO 4 is the rotation offset used by chutney, need to make this adjustable based on the build
+  if ( valid_after >= srv_start_time && valid_after < tp_start_time )
+  {
+    time_period = ( valid_after / 60 - (4) ) / hsdir_interval;
+  }
+  else
+  {
+    time_period = ( ( valid_after / 60 - (4) ) / hsdir_interval ) - 1;
+  }
+
   memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
   memcpy( shared_rand, network_consensus.shared_rand, 32 );
 
   xSemaphoreGive( network_consensus_mutex );
   // END mutex
-
-  time( &now );
-  // TODO this is based on chutney settings, need to change it for real tor
-  time_period = ( now / 60 - (4) ) / hsdir_interval;
 
   revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
 
@@ -2898,9 +2911,10 @@ int d_push_hsdir( OnionService* onion_service )
     return -1;
   }
 
-  for ( i = 0; i < 1; i++ )
+  // i = 0 is first descriptor, 1 is second as per the spec
+  for ( i = 0; i < 2; i++ )
   {
-    mini_succ = d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period - i, hsdir_interval, NULL, 0 );
+    mini_succ = d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period + i, hsdir_interval, NULL, 0 );
 
     if ( mini_succ < 0 )
     {
@@ -3046,7 +3060,7 @@ int d_push_hsdir( OnionService* onion_service )
     }
 
     // send outer descriptor wrapper to the correct HSDIR nodes
-    mini_succ = d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period - i, hsdir_interval, previous_shared_rand, hsdir_spread_store, i );
+    mini_succ = d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period + i, hsdir_interval, hsdir_spread_store, i );
 
     if ( mini_succ < 0 )
     {
@@ -3058,8 +3072,6 @@ int d_push_hsdir( OnionService* onion_service )
     }
 
     free( reusable_plaintext );
-
-    memcpy( shared_rand, previous_shared_rand, 32 );
   }
 
   onion_service->last_hsdir_update = time_period;

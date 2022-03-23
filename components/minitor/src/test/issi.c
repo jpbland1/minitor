@@ -30,10 +30,10 @@ void v_test_d_traverse_hsdir_relays_in_order()
   int next_addr;
   int previous_addr;
   uint8_t last_id_hash[H_LENGTH];
-  binary_relay* b_relay;
+  BinaryRelay* b_relay;
   OnionRelay relay;
 
-  b_relay = heap_caps_malloc( sizeof( binary_relay ), MALLOC_CAP_DMA );
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
   memset( &relay, 0, sizeof( OnionRelay ) );
 
@@ -44,22 +44,25 @@ void v_test_d_traverse_hsdir_relays_in_order()
   {
     for ( j = 0; j < H_LENGTH; j++ )
     {
-      relay.id_hash[j] = esp_random() % 256;
+      //relay.id_hash[j] = esp_random() % 256;
+      //relay.id_hash_previous[j] = esp_random() % 256;
+      relay.id_hash[j] = i;
+      relay.id_hash_previous[j] = i;
     }
 
     d_create_hsdir_relay( &relay );
   }
   ESP_LOGE( MINITOR_TAG, "Insert time: %lld", esp_timer_get_time() - start );
 
-  next_addr = hsdir_root_addr;
-  previous_addr = hsdir_root_addr;
+  next_addr = current_root_addr;
+  previous_addr = current_root_addr;
 
   ESP_LOGE( MINITOR_TAG, "Iterate 1 at a time" );
 
   // test 1 item at a time
   for ( i = 0; i < NODE_COUNT; i++ )
   {
-    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, 1 );
+    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, 1, 1 );
 
     if ( next_addr < 0 )
     {
@@ -82,6 +85,11 @@ void v_test_d_traverse_hsdir_relays_in_order()
       }
     }
 
+    if ( b_relay->relay.id_hash[0] != i )
+    {
+      ESP_LOGE( MINITOR_TAG, "Id hash at %d not what we set, got %d", i, b_relay->relay.id_hash[0] );
+    }
+
     memcpy( last_id_hash, b_relay->relay.id_hash, H_LENGTH );
   }
 
@@ -92,10 +100,10 @@ void v_test_d_traverse_hsdir_relays_in_order()
   {
     ESP_LOGE( MINITOR_TAG, "%d", i );
 
-    next_addr = hsdir_root_addr;
-    previous_addr = hsdir_root_addr;
+    next_addr = current_root_addr;
+    previous_addr = current_root_addr;
 
-    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, i + 1 );
+    next_addr = d_traverse_hsdir_relays_in_order( b_relay, next_addr, &previous_addr, i + 1, 1 );
 
     if ( next_addr < 0 )
     {
@@ -116,6 +124,11 @@ void v_test_d_traverse_hsdir_relays_in_order()
         {
         }
       }
+    }
+
+    if ( b_relay->relay.id_hash[0] != i )
+    {
+      ESP_LOGE( MINITOR_TAG, "Id hash at %d not what we set, got %d", i, b_relay->relay.id_hash[0] );
     }
 
     memcpy( last_id_hash, b_relay->relay.id_hash, H_LENGTH );
