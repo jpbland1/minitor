@@ -566,6 +566,7 @@ int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* u
 
   db_rend_circuit->circuit->status = CIRCUIT_STANDBY;
 
+  ESP_LOGE( MINITOR_TAG, "\nd_onion_service_handle_relay_truncated taking rend mutex" );
   // BEGIN mutex for standby circuits
   xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
 
@@ -573,6 +574,7 @@ int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* u
 
   xSemaphoreGive( standby_rend_circuits_mutex );
   // END mutex for standby circuits
+  ESP_LOGE( MINITOR_TAG, "\nd_onion_service_handle_relay_truncated gave rend mutex" );
 
   return 0;
 }
@@ -818,7 +820,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
     }
   }
 
-  ESP_LOGE( MINITOR_TAG, "Taking rend circuits" );
+  ESP_LOGE( MINITOR_TAG, "\nd_onion_service_handle_introduce_2 taking rend mutex" );
 
   // BEGIN mutex for standby circuits
   xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
@@ -860,6 +862,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   xSemaphoreGive( standby_rend_circuits_mutex );
   // END mutex for standby circuits
+
+  ESP_LOGE( MINITOR_TAG, "\nd_onion_service_handle_introduce_2 gave rend mutex" );
 
   if ( db_rend_circuit == NULL )
   {

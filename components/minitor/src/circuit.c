@@ -146,6 +146,7 @@ int d_setup_init_rend_circuits( int circuit_count )
           tskNO_AFFINITY
         );
 
+        ESP_LOGE( MINITOR_TAG, "\nd_setup_init_rend_circuits taking rend mutex" );
         // BEGIN mutex for standby circuits
         xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
 
@@ -153,6 +154,7 @@ int d_setup_init_rend_circuits( int circuit_count )
 
         xSemaphoreGive( standby_rend_circuits_mutex );
         // END mutex for standby circuits
+        ESP_LOGE( MINITOR_TAG, "\nd_setup_init_rend_circuits gave rend mutex" );
 
         res++;
         break;
@@ -428,19 +430,6 @@ int d_build_onion_circuit( OnionCircuit* circuit )
 {
   int i;
 
-  // get the relay's ntor onion keys
-  //if ( d_fetch_descriptor_info( circuit ) < 0 )
-  //{
-//#ifdef DEBUG_MINITOR
-    //ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
-//#endif
-
-    //goto clean_circuit;
-  //}
-
-  ESP_LOGE( MINITOR_TAG, "TEMPORARY-------------------------------------" );
-  ESP_LOGE( MINITOR_TAG, "ntor onion key: %.2x %.2x %.2x %.2x", circuit->relay_list.head->relay->ntor_onion_key[0], circuit->relay_list.head->relay->ntor_onion_key[1], circuit->relay_list.head->relay->ntor_onion_key[2], circuit->relay_list.head->relay->ntor_onion_key[3] );
-
   if ( d_attach_connection( circuit->relay_list.head->relay->address, circuit->relay_list.head->relay->or_port, circuit ) != 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -474,17 +463,12 @@ int d_build_onion_circuit( OnionCircuit* circuit )
       return -1;
     }
 
-    ESP_LOGE( MINITOR_TAG, "Finished extend" );
-
     circuit->relay_list.built_length++;
   }
 
   return 0;
 
 clean_connection:
-  ESP_LOGE( MINITOR_TAG, "Trying to dettach" );
-
-
   // MUTEX TAKE
   xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
 
@@ -497,16 +481,12 @@ clean_connection:
   // MUTEX GIVE
 
 clean_circuit:
-  ESP_LOGE( MINITOR_TAG, "Trying to unmark" );
   d_unmark_hsdir_relay_as_guard( circuit->relay_list.head->relay->identity, circuit->relay_list.head->relay->id_hash );
 
-  ESP_LOGE( MINITOR_TAG, "Trying pop relays" );
   while ( circuit->relay_list.length )
   {
     v_pop_relay_from_list_back( &circuit->relay_list );
   }
-
-  ESP_LOGE( MINITOR_TAG, "Returning error" );
 
   return -1;
 }

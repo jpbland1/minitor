@@ -18,6 +18,12 @@
 #include "../h/or_connection.h"
 #include "../h/consensus.h"
 
+TaskHandle_t handle_or_connections_task_handle;
+SemaphoreHandle_t poll_mutex;
+
+struct pollfd connections_poll[16];
+int free_poll_indices[16];
+
 static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
   if ( store->error == ASN_NO_SIGNER_E ) {
     return SSL_SUCCESS;
@@ -40,6 +46,12 @@ void v_cleanup_or_connection( OrConnection* or_connection )
   or_connection->access_mutex = NULL;
 
   v_remove_or_connection_from_list( or_connection, &or_connections );
+
+  if ( or_connections.length == 0 )
+  {
+    vTaskDelete( handle_or_connections_task_handle );
+    handle_or_connections_task_handle = NULL;
+  }
 
   db_circuit = or_connection->circuits.head;
 
@@ -64,133 +76,113 @@ void v_cleanup_or_connection( OrConnection* or_connection )
   shutdown( wolfSSL_get_fd( or_connection->ssl ), 0 );
   close( wolfSSL_get_fd( or_connection->ssl ) );
   wolfSSL_free( or_connection->ssl );
+
+  connections_poll[or_connection->poll_index].fd = -1;
+  free_poll_indices[or_connection->poll_index] = 0;
+
+  free( or_connection );
 }
 
-void v_handle_or_connection( void* pv_parameters )
+void v_handle_or_connections( void* pv_parameters )
 {
-  int i;
   int succ;
   uint32_t circ_id;
   uint8_t* packed_cell;
-  struct pollfd pollme[1];
-  OrConnection* or_connection = (OnionCircuit*)pv_parameters;
+  OrConnection* or_connection;
+  OrConnection* tmp_or_connection;
   DoublyLinkedOnionCircuit* db_circuit;
   OnionMessage* onion_message;
 
-  pollme[0].fd = wolfSSL_get_fd( or_connection->ssl );
-  pollme[0].events = POLLIN;
-
   while ( 1 )
   {
-    ESP_LOGE( MINITOR_TAG, "Starting poll" );
-    succ = poll( pollme, 1, -1 );
+    // at most we will have to wait 3 seconds for a connection to become readable
+    // hopefully execution time to the continue statement is neglegable
+    succ = poll( connections_poll, 16, 1000 * 3 );
 
-    if ( or_connection->access_mutex == NULL )
+    if ( succ == 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "access_mutex is null, shutting down" );
-#endif
-
-      // MUTEX TAKE
-      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-      free( or_connection );
-
-      xSemaphoreGive( or_connections_mutex );
-      // MUTEX GIVE
-
-      vTaskDelete( NULL );
-
-      return;
+      continue;
     }
-
-    if ( succ < 0 )
+    else if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to wait for read" );
+      ESP_LOGE( MINITOR_TAG, "Failed to poll" );
 #endif
 
-      // MUTEX TAKE
-      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-      v_cleanup_or_connection( or_connection );
-
-      xSemaphoreGive( or_connections_mutex );
-      // MUTEX GIVE
-
-      free( or_connection );
-
-      vTaskDelete( NULL );
-
-      return;
+      continue;
     }
 
     // MUTEX TAKE
-    ESP_LOGE( MINITOR_TAG, "Trying to take mutex for read" );
-    xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-    ESP_LOGE( MINITOR_TAG, "Took mutex for read" );
+    xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
 
-    succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
+    or_connection = or_connections.head;
 
-    ESP_LOGE( MINITOR_TAG, "Gave mutex from read" );
-    xSemaphoreGive( or_connection->access_mutex );
-    // MUTEX GIVE
-
-    if ( succ < 0 )
+    while ( or_connection != NULL )
     {
+      if ( ( connections_poll[or_connection->poll_index].revents & connections_poll[or_connection->poll_index].events ) != 0 )
+      {
+        // MUTEX TAKE
+        xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+
+        succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
+
+        xSemaphoreGive( or_connection->access_mutex );
+        // MUTEX GIVE
+
+        if ( succ < 0 )
+        {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to recv cell on connection" );
+          ESP_LOGE( MINITOR_TAG, "Failed to recv cell on connection" );
 #endif
 
-      // MUTEX TAKE
-      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+          // next could be null so we can't just call cleanup with previous
+          tmp_or_connection = or_connection->next;
+          v_cleanup_or_connection( or_connection );
+          or_connection = tmp_or_connection;
+        }
+        else
+        {
+          db_circuit = or_connection->circuits.head;
 
-      v_cleanup_or_connection( or_connection );
+          circ_id = ((uint32_t)packed_cell[0]) << 24;
+          circ_id |= ((uint32_t)packed_cell[1]) << 16;
+          circ_id |= ((uint32_t)packed_cell[2]) << 8;
+          circ_id |= (packed_cell[3]);
 
-      xSemaphoreGive( or_connections_mutex );
-      // MUTEX GIVE
+          while ( db_circuit != NULL )
+          {
+            if ( db_circuit->circuit->circ_id == circ_id )
+            {
+              break;
+            }
 
-      free( or_connection );
+            db_circuit = db_circuit->next;
+          }
 
-      vTaskDelete( NULL );
+          if ( db_circuit != NULL )
+          {
+            onion_message = malloc( sizeof( OnionMessage ) );
+            onion_message->type = PACKED_CELL;
+            onion_message->data = packed_cell;
+            onion_message->length = succ;
 
-      return;
-      //continue;
-    }
-
-    db_circuit = or_connection->circuits.head;
-
-    for ( i = 0; i < or_connection->circuits.length; i++ )
-    {
-      circ_id = ((uint32_t)packed_cell[0]) << 24;
-      circ_id |= ((uint32_t)packed_cell[1]) << 16;
-      circ_id |= ((uint32_t)packed_cell[2]) << 8;
-      circ_id |= (packed_cell[3]);
-
-      if ( db_circuit->circuit->circ_id == circ_id )
-      {
-        break;
+            xQueueSendToBack( db_circuit->circuit->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+          }
+          else
+          {
+#ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell" );
+#endif
+            free( packed_cell );
+          }
+        }
       }
 
-      db_circuit = db_circuit->next;
+      or_connection = or_connection->next;
     }
 
-    if ( db_circuit != NULL )
-    {
-      onion_message = malloc( sizeof( OnionMessage ) );
-      onion_message->type = PACKED_CELL;
-      onion_message->data = packed_cell;
-      onion_message->length = succ;
-
-      xQueueSendToBack( db_circuit->circuit->rx_queue, (void*)(&onion_message), portMAX_DELAY );
-    }
-    else
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell" );
-#endif
-      free( packed_cell );
-    }
+    xSemaphoreGive( or_connections_mutex );
+    // MUTEX GIVE
   }
 }
 
@@ -229,7 +221,6 @@ void v_dettach_connection( OnionCircuit* circuit )
 
       if ( circuit->or_connection->circuits.length == 0 )
       {
-        // this will trigger the connection to delete and free itself
         v_cleanup_or_connection( circuit->or_connection );
       }
 
@@ -290,6 +281,7 @@ int d_attach_connection( uint32_t address, uint16_t port, OnionCircuit* circuit 
 
 OrConnection* px_create_connection( uint32_t address, uint16_t port )
 {
+  int i;
   int sock_fd;
   struct sockaddr_in dest_addr;
   WOLFSSL* ssl;
@@ -386,15 +378,38 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
 
   v_add_or_connection_to_list( or_connection, &or_connections );
 
-  xTaskCreatePinnedToCore(
-    v_handle_or_connection,
-    "HANDLE_OR_CONNECTION",
-    4096,
-    (void*)or_connection,
-    5,
-    &or_connection->task_handle,
-    0
-  );
+  if ( handle_or_connections_task_handle == NULL )
+  {
+    for ( i = 0; i < 16; i++ )
+    {
+      connections_poll[i].fd = -1;
+    }
+  }
+
+  for ( i = 0; i < 16; i++ )
+  {
+    if ( free_poll_indices[i] == 0 )
+    {
+      free_poll_indices[i] = 1;
+      or_connection->poll_index = i;
+      connections_poll[i].fd = wolfSSL_get_fd( or_connection->ssl );
+      connections_poll[i].events = POLLIN;
+      break;
+    }
+  }
+
+  if ( handle_or_connections_task_handle == NULL )
+  {
+    xTaskCreatePinnedToCore(
+      v_handle_or_connections,
+      "HANDLE_OR_CONNECTIONS",
+      4096,
+      (void*)or_connection,
+      5,
+      &handle_or_connections_task_handle,
+      0
+    );
+  }
 
   return or_connection;
 

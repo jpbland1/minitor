@@ -15,6 +15,7 @@ WOLFSSL_CTX* xMinitorWolfSSL_Context;
 static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
 {
   int i;
+  int succ;
   Cell padding_cell;
   DoublyLinkedOnionCircuit* node;
   unsigned char* packed_cell;
@@ -29,19 +30,21 @@ static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
     packed_cell = pack_and_free( &padding_cell );
 
     // MUTEX TAKE
-    xSemaphoreTake( node->circuit->or_connection->access_mutex, portMAX_DELAY );
+    succ = xSemaphoreTake( node->circuit->or_connection->access_mutex, 500 / portTICK_PERIOD_MS );
 
-    if ( d_send_packed_cell_and_free( node->circuit->or_connection, packed_cell ) < 0 )
+    if ( succ == pdFALSE || d_send_packed_cell_and_free( node->circuit->or_connection, packed_cell ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to send padding cell on circ_id: %d", node->circuit->circ_id );
 #endif
     }
 
-    xSemaphoreGive( node->circuit->or_connection->access_mutex );
-    // MUTEX GIVE
+    if ( succ == pdTRUE )
+    {
+      xSemaphoreGive( node->circuit->or_connection->access_mutex );
+      // MUTEX GIVE
+    }
 
-    free( packed_cell );
     node = node->next;
   }
 }
@@ -60,11 +63,15 @@ static void v_circuit_keepalive( void* pv_parameters )
 
     xSemaphoreGive( standby_circuits_mutex );
 
+    ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive taking rend mutex" );
+
     xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
 
     v_keep_circuitlist_alive( &standby_rend_circuits );
 
     xSemaphoreGive( standby_rend_circuits_mutex );
+
+    ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive gave rend mutex" );
 
     xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 

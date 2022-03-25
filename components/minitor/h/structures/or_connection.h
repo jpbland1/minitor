@@ -15,7 +15,7 @@ typedef struct OrConnection
   WOLFSSL* ssl;
   SemaphoreHandle_t access_mutex;
   DoublyLinkedOnionCircuitList circuits;
-  TaskHandle_t task_handle;
+  int poll_index;
 } OrConnection;
 
 typedef struct OrConnectionList
