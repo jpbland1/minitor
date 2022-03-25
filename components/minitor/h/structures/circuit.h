@@ -60,9 +60,6 @@ typedef struct DoublyLinkedOnionCircuitList {
 extern unsigned int circ_id_counter;
 extern SemaphoreHandle_t circ_id_mutex;
 
-extern DoublyLinkedOnionRelayList used_guards;
-extern SemaphoreHandle_t used_guards_mutex;
-
 extern DoublyLinkedOnionCircuitList standby_circuits;
 extern SemaphoreHandle_t standby_circuits_mutex;
 

@@ -3,13 +3,6 @@
 unsigned int circ_id_counter = 0x80000000;
 SemaphoreHandle_t circ_id_mutex;
 
-DoublyLinkedOnionRelayList used_guards = {
-  .length = 0,
-  .head = NULL,
-  .tail = NULL,
-};
-SemaphoreHandle_t used_guards_mutex;
-
 DoublyLinkedOnionCircuitList standby_circuits = {
   .length = 0,
   .head = NULL,

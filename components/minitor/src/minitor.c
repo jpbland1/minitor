@@ -102,9 +102,6 @@ int v_minitor_INIT()
 {
   circ_id_mutex = xSemaphoreCreateMutex();
   network_consensus_mutex = xSemaphoreCreateMutex();
-  suitable_relays_mutex = xSemaphoreCreateMutex();
-  used_guards_mutex = xSemaphoreCreateMutex();
-  hsdir_relays_mutex = xSemaphoreCreateMutex();
   standby_circuits_mutex = xSemaphoreCreateMutex();
   standby_rend_circuits_mutex = xSemaphoreCreateMutex();
   or_connections_mutex = xSemaphoreCreateMutex();

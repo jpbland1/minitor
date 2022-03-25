@@ -66,9 +66,5 @@ void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;
 extern SemaphoreHandle_t network_consensus_mutex;
-extern DoublyLinkedOnionRelayList suitable_relays;
-extern SemaphoreHandle_t suitable_relays_mutex;
-extern DoublyLinkedOnionRelayList hsdir_relays;
-extern SemaphoreHandle_t hsdir_relays_mutex;
 
 #endif

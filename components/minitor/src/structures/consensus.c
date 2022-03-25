@@ -23,20 +23,6 @@ NetworkConsensus network_consensus = {
 };
 SemaphoreHandle_t network_consensus_mutex;
 
-DoublyLinkedOnionRelayList suitable_relays = {
-  .length = 0,
-  .head = NULL,
-  .tail = NULL,
-};
-SemaphoreHandle_t suitable_relays_mutex;
-
-DoublyLinkedOnionRelayList hsdir_relays = {
-  .length = 0,
-  .head = NULL,
-  .tail = NULL,
-};
-SemaphoreHandle_t hsdir_relays_mutex;
-
 // add a linked onion relay to a doubly linked list of onion relays
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list )
 {
