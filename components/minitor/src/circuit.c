@@ -383,7 +383,7 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
       }
 
       ESP_LOGE( MINITOR_TAG, "Marking relay as guard" );
-      if ( d_mark_hsdir_relay_as_guard( db_relay->relay->identity, db_relay->relay->id_hash ) < 0 )
+      if ( d_mark_hsdir_relay_as_guard( db_relay->relay->identity ) < 0 )
       {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to mark guard relay" );
@@ -481,7 +481,7 @@ clean_connection:
   // MUTEX GIVE
 
 clean_circuit:
-  d_unmark_hsdir_relay_as_guard( circuit->relay_list.head->relay->identity, circuit->relay_list.head->relay->id_hash );
+  d_unmark_hsdir_relay_as_guard( circuit->relay_list.head->relay->identity );
 
   while ( circuit->relay_list.length )
   {
@@ -520,7 +520,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
   {
     if ( i == 0 )
     {
-      if ( d_unmark_hsdir_relay_as_guard( tmp_relay_node->relay->identity, tmp_relay_node->relay->id_hash ) < 0 )
+      if ( d_unmark_hsdir_relay_as_guard( tmp_relay_node->relay->identity ) < 0 )
       {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to unmark guard" );

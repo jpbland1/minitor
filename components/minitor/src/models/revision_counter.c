@@ -14,7 +14,6 @@ int d_create_revision_counter_table() {
   ret = sqlite3_exec( minitor_db,
 "CREATE TABLE IF NOT EXISTS main.RevisionCounters ("
   "onion_pub_key CHAR(32) NOT NULL,"
-  "time_period INT4 NOT NULL,"
   "revision_counter INT4 NOT NULL"
 ");",
   NULL, NULL, &err);
@@ -32,7 +31,8 @@ int d_create_revision_counter_table() {
   return 0;
 }
 
-int d_roll_revision_counter( unsigned char* onion_pub_key, int time_period ) {
+int d_roll_revision_counter( unsigned char* onion_pub_key )
+{
   int ret;
   int revision_counter = 0;
   sqlite3_stmt* statement;
@@ -41,7 +41,7 @@ int d_roll_revision_counter( unsigned char* onion_pub_key, int time_period ) {
     return -1;
   }
 
-  ret = sqlite3_prepare_v2( minitor_db, "SELECT revision_counter FROM main.RevisionCounters WHERE onion_pub_key = ?1 AND time_period = ?2;", -1, &statement, NULL );
+  ret = sqlite3_prepare_v2( minitor_db, "SELECT revision_counter FROM main.RevisionCounters WHERE onion_pub_key = ?1;", -1, &statement, NULL );
 
   if ( ret != SQLITE_OK ) {
 #ifdef DEBUG_MINITOR
@@ -52,7 +52,6 @@ int d_roll_revision_counter( unsigned char* onion_pub_key, int time_period ) {
   }
 
   sqlite3_bind_text( statement, 1, (const char*)onion_pub_key, 32, SQLITE_STATIC );
-  sqlite3_bind_int( statement, 2, time_period );
 
   if ( ( ret = sqlite3_step( statement ) ) != SQLITE_DONE && ret != SQLITE_ROW ) {
 #ifdef DEBUG_MINITOR
@@ -96,8 +95,8 @@ int d_roll_revision_counter( unsigned char* onion_pub_key, int time_period ) {
 
   ret = sqlite3_prepare_v2( minitor_db,
 "INSERT INTO main.RevisionCounters"
-  " ( onion_pub_key, time_period, revision_counter )"
-  " VALUES ( ?1, ?2, ?3 );",
+  " ( onion_pub_key, revision_counter )"
+  " VALUES ( ?1, ?2 );",
     -1, &statement, NULL );
 
   if ( ret != SQLITE_OK ) {
@@ -109,8 +108,7 @@ int d_roll_revision_counter( unsigned char* onion_pub_key, int time_period ) {
   }
 
   sqlite3_bind_text( statement, 1, (const char*)onion_pub_key, 32, SQLITE_STATIC );
-  sqlite3_bind_int( statement, 2, time_period );
-  sqlite3_bind_int( statement, 3, revision_counter );
+  sqlite3_bind_int( statement, 2, revision_counter );
 
   if ( ( ret = sqlite3_step( statement ) ) != SQLITE_DONE ) {
 #ifdef DEBUG_MINITOR

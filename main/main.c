@@ -21,6 +21,7 @@
 
 #include "test/circuit.h"
 #include "test/issi.h"
+#include "test/fd_tree.h"
 
 #include <esp_event.h>
 #include "esp_netif.h"
@@ -207,6 +208,11 @@ void app_main()
   ESP_LOGE( TAG, "Starting service" );
   OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
 
-  //v_test_setup_issi();
-  //v_test_d_traverse_hsdir_relays_in_order();
+/*
+  v_test_setup_issi();
+  v_test_d_traverse_hsdir_relays_in_order();
+
+  v_test_setup_fd_tree();
+  v_test_d_traverse_hsdir_relays_from_fd_in_order();
+*/
 }

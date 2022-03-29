@@ -15,6 +15,9 @@
 #include "../h/models/relay.h"
 #include "../h/models/network_consensus.h"
 
+int hsdir_tree_occupied;
+NetworkConsensus* next_network_consensus;
+
 static int d_parse_date_string( char* date_string ) {
   struct tm tmp_time;
 
@@ -569,256 +572,25 @@ static int d_parse_single_relay( int fd, OnionRelay* canidate_relay ) {
   return 0;
 }
 
-static int d_parse_downloaded_consensus( NetworkConsensus** result_network_consensus ) {
-  int i = 0;
-  int fd;
-  int ret;
-  OnionRelay canidate_relay;
-
-  if ( ( fd = open( "/sdcard/consensus", O_RDONLY ) ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
-#endif
-
-    return -1;
-  }
-
-  if ( *result_network_consensus == NULL ) {
-    *result_network_consensus = malloc( sizeof( NetworkConsensus ) );
-  }
-
-  (*result_network_consensus)->method = 0;
-  (*result_network_consensus)->valid_after = 0;
-  (*result_network_consensus)->fresh_until = 0;
-  (*result_network_consensus)->valid_until = 0;
-  (*result_network_consensus)->hsdir_interval = HSDIR_INTERVAL_DEFAULT;
-  (*result_network_consensus)->hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
-  (*result_network_consensus)->hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
-
-  if ( d_parse_network_consensus( fd, *result_network_consensus ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to parse network consensus from file" );
-#endif
-
-    ret = -1;
-    goto finish;
-  }
-
-  // BEGIN mutex for the network consensus
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-  network_consensus.method = (*result_network_consensus)->method;
-  network_consensus.valid_after = (*result_network_consensus)->valid_after;
-  network_consensus.fresh_until = (*result_network_consensus)->fresh_until;
-  network_consensus.valid_until = (*result_network_consensus)->valid_until;
-
-  memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
-  memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
-
-  xSemaphoreGive( network_consensus_mutex );
-  // END mutex for the network consensus
-
-  if ( d_reset_hsdir_relay_tree() < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  if ( d_open_database() < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  ret = 0;
-
-  do {
-    memset( &canidate_relay, 0, sizeof( canidate_relay ) );
-
-    ret = d_parse_single_relay( fd, &canidate_relay );
-
-    if ( ret == 0 ) {
-      if ( canidate_relay.hsdir ) {
-/*
-        wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
-        wc_Sha3_256_Update( &reusable_sha3, canidate_relay.identity, ID_LENGTH );
-        wc_Sha3_256_Update( &reusable_sha3, (*result_network_consensus)->previous_shared_rand, 32 );
-
-        tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 56 );
-        tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 48 );
-        tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 40 );
-        tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 32 );
-        tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 24 );
-        tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 16 );
-        tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( time_period - 1 ) ) >> 8 );
-        tmp_64_buffer[7] = (unsigned char)( (int64_t)( time_period - 1 ) );
-
-        wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
-
-        tmp_64_buffer[0] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 56 );
-        tmp_64_buffer[1] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 48 );
-        tmp_64_buffer[2] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 40 );
-        tmp_64_buffer[3] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 32 );
-        tmp_64_buffer[4] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 24 );
-        tmp_64_buffer[5] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 16 );
-        tmp_64_buffer[6] = (unsigned char)( ( (int64_t)( (*result_network_consensus)->hsdir_interval ) ) >> 8 );
-        tmp_64_buffer[7] = (unsigned char)( (int64_t)( (*result_network_consensus)->hsdir_interval ) );
-
-        wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
-
-        wc_Sha3_256_Final( &reusable_sha3, canidate_relay.previous_hash );
-*/
-        if ( d_fetch_descriptor_info( &canidate_relay ) < 0 )
-        {
-          ret = -1;
-          goto finish;
-        }
-
-        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash_previous, 0 );
-        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash, 1 );
-
-        if ( d_create_hsdir_relay( &canidate_relay ) < 0 ) {
-          ret = -1;
-          goto finish;
-        }
-
-        ESP_LOGE( MINITOR_TAG, "TEMPORARY finish create--------------------------" );
-      }
-
-      i = ( i + 1 ) % 10;
-
-      if ( i == 0 ) {
-        if ( d_close_database() < 0 ) {
-          ret = -1;
-          goto finish;
-        }
-
-        if ( d_open_database() < 0 ) {
-          ret = -1;
-          goto finish;
-        }
-      }
-    } else if ( ret < 0 ) {
-      goto finish;
-    }
-  } while ( ret == 0 );
-
-  if ( d_close_database() < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  ret = 0;
-
-finish:
-  if ( close( fd ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/consensus, errno: %d", errno );
-#endif
-
-    return -1;
-  }
-
-  return ret;
-}
-
-// fetch the network consensus so we can correctly create circuits
-int d_fetch_consensus_info() {
-  int ret = 0;
-  NetworkConsensus* result_network_consensus;
-  time_t now = 0;
-
-  // TODO the return value of null is ambigious, it could be null because there isn't a row or
-  // it could be because the database is messed up, we need to be able to distinguish
-  result_network_consensus = px_get_network_consensus();
-  time( &now );
-
-  ESP_LOGE( MINITOR_TAG, "got consensus from file" );
-
-  if ( result_network_consensus == NULL || result_network_consensus->fresh_until <= now ) {
-    if ( d_download_consensus() < 0 ) {
-      ret = -1;
-      goto finish;
-    }
-
-    ESP_LOGE( MINITOR_TAG, "got consensus from network" );
-  }
-
-  if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  ESP_LOGE( MINITOR_TAG, "parsed consensus" );
-
-  if ( d_destroy_consensus() < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  ESP_LOGE( MINITOR_TAG, "destroyed consensus" );
-
-  if ( d_create_consensus( result_network_consensus ) < 0 ) {
-    ret = -1;
-    goto finish;
-  }
-
-  ESP_LOGE( MINITOR_TAG, "created consensus" );
-
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "finished setting consensus" );
-#endif
-
-finish:
-  if ( result_network_consensus != NULL ) {
-    free( result_network_consensus );
-  }
-
-  // return 0 for no errors
-  return ret;
-}
-
-void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int current )
+static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period, int hsdir_interval, uint8_t* srv )
 {
-  int time_period;
   uint8_t tmp_64_buffer[8];
   Sha3 reusable_sha3;
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
-  // BEGIN mutex for the network consensus
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-  //time_period = ( network_consensus.valid_after / 60 - 12 * 60 ) / network_consensus.hsdir_interval;
-  // TODO this is based on chutney settings, need to change it for real tor
-  time_period = ( network_consensus.valid_after / 60 - (4) ) / network_consensus.hsdir_interval;
-
   {
     ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
     ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
     ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
-
-    if ( current == 1 )
-    {
-      ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", network_consensus.shared_rand[0], network_consensus.shared_rand[1], network_consensus.shared_rand[2], network_consensus.shared_rand[3] );
-    }
-    else
-    {
-      ESP_LOGE( MINITOR_TAG, "previous_srv: %.2x %.2x %.2x %.2x", network_consensus.previous_shared_rand[0], network_consensus.previous_shared_rand[1], network_consensus.previous_shared_rand[2], network_consensus.previous_shared_rand[3] );
-    }
-
-    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", network_consensus.hsdir_interval );
+    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
+    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
   }
 
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
   wc_Sha3_256_Update( &reusable_sha3, identity, H_LENGTH );
 
-  if ( current == 1 )
-  {
-    wc_Sha3_256_Update( &reusable_sha3, network_consensus.shared_rand, 32 );
-  }
-  else
-  {
-    wc_Sha3_256_Update( &reusable_sha3, network_consensus.previous_shared_rand, 32 );
-  }
+  wc_Sha3_256_Update( &reusable_sha3, srv, 32 );
 
   tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 56 );
   tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 48 );
@@ -835,14 +607,14 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int current )
 
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
-  tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 56 );
-  tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 48 );
-  tmp_64_buffer[2] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 40 );
-  tmp_64_buffer[3] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 32 );
-  tmp_64_buffer[4] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 24 );
-  tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 16 );
-  tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( network_consensus.hsdir_interval ) ) >> 8 );
-  tmp_64_buffer[7] = (unsigned char)( (uint64_t)( network_consensus.hsdir_interval ) );
+  tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 56 );
+  tmp_64_buffer[1] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 48 );
+  tmp_64_buffer[2] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 40 );
+  tmp_64_buffer[3] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 32 );
+  tmp_64_buffer[4] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 24 );
+  tmp_64_buffer[5] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 16 );
+  tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 8 );
+  tmp_64_buffer[7] = (unsigned char)( (uint64_t)( hsdir_interval ) );
 
   {
     ESP_LOGE( MINITOR_TAG, "hsdir_interval: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x", tmp_64_buffer[0], tmp_64_buffer[1], tmp_64_buffer[2], tmp_64_buffer[3], tmp_64_buffer[4], tmp_64_buffer[5], tmp_64_buffer[6], tmp_64_buffer[7]  );
@@ -857,7 +629,305 @@ void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int current )
   }
 
   wc_Sha3_256_Free( &reusable_sha3 );
+}
+
+static int d_parse_downloaded_consensus( NetworkConsensus** result_network_consensus )
+{
+  time_t now;
+  time_t srv_start_time;
+  time_t tp_start_time;
+  int valid_delay;
+  int i = 0;
+  int fd;
+  int ret;
+  int voting_interval;
+  int time_period;
+  OnionRelay canidate_relay;
+
+  if ( ( fd = open( "/sdcard/consensus", O_RDONLY ) ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  if ( *result_network_consensus == NULL )
+  {
+    *result_network_consensus = malloc( sizeof( NetworkConsensus ) );
+  }
+
+  (*result_network_consensus)->method = 0;
+  (*result_network_consensus)->valid_after = 0;
+  (*result_network_consensus)->fresh_until = 0;
+  (*result_network_consensus)->valid_until = 0;
+
+#ifdef MINITOR_CHUTNEY
+  (*result_network_consensus)->hsdir_interval = 8;
+#else
+  (*result_network_consensus)->hsdir_interval = HSDIR_INTERVAL_DEFAULT;
+#endif
+
+  (*result_network_consensus)->hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
+  (*result_network_consensus)->hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
+
+  if ( d_parse_network_consensus( fd, *result_network_consensus ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to parse network consensus from file" );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  if ( hsdir_tree_occupied == 0 )
+  {
+    if ( d_reset_hsdir_relay_tree() < 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
+  }
+  else
+  {
+    if ( d_reset_hsdir_relay_tree_file() < 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
+  }
+
+  voting_interval = (*result_network_consensus)->fresh_until - (*result_network_consensus)->valid_after;
+
+  // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
+  srv_start_time = (*result_network_consensus)->valid_after - ( ( ( ( (*result_network_consensus)->valid_after / voting_interval ) ) % 24 ) * voting_interval );
+  tp_start_time = srv_start_time + (*result_network_consensus)->hsdir_interval * 60;
+
+  // TODO 4 is the rotation offset used by chutney, need to make this adjustable based on the build
+  if ( (*result_network_consensus)->valid_after >= srv_start_time && (*result_network_consensus)->valid_after < tp_start_time )
+  {
+    time_period = ( (*result_network_consensus)->valid_after / 60 - (4) ) / (*result_network_consensus)->hsdir_interval;
+  }
+  else
+  {
+    time_period = ( ( (*result_network_consensus)->valid_after / 60 - (4) ) / (*result_network_consensus)->hsdir_interval ) - 1;
+  }
+
+  do
+  {
+    memset( &canidate_relay, 0, sizeof( canidate_relay ) );
+
+    ret = d_parse_single_relay( fd, &canidate_relay );
+
+    if ( ret == 0 )
+    {
+      if ( canidate_relay.hsdir == 1 )
+      {
+        if ( d_fetch_descriptor_info( &canidate_relay ) < 0 )
+        {
+          ret = -1;
+          goto finish;
+        }
+
+        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash_previous, time_period, (*result_network_consensus)->hsdir_interval, (*result_network_consensus)->previous_shared_rand );
+        v_get_id_hash( canidate_relay.master_key, canidate_relay.id_hash, time_period + 1, (*result_network_consensus)->hsdir_interval, (*result_network_consensus)->shared_rand );
+
+        if ( hsdir_tree_occupied == 0 )
+        {
+          if ( d_create_hsdir_relay( &canidate_relay ) < 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+        }
+        else
+        {
+          if ( d_create_hsdir_relay_in_file( &canidate_relay ) < 0 )
+          {
+            ret = -1;
+            goto finish;
+          }
+        }
+      }
+    }
+    else if ( ret < 0 )
+    {
+      goto finish;
+    }
+  } while ( ret == 0 );
+
+  ret = 0;
+  valid_delay = 0;
+
+  if ( hsdir_tree_occupied == 1 )
+  {
+    if ( d_finalize_hsdir_relays_file() < 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
+
+    time( &now );
+
+    if ( (*result_network_consensus)->valid_after > now )
+    {
+      valid_delay = 1000 * ( (*result_network_consensus)->valid_after - now ) / portTICK_PERIOD_MS;
+    }
+
+    if ( valid_delay != 0 )
+    {
+      ESP_LOGE( MINITOR_TAG, "Triggering consensus switch in %lu seconds", ( (*result_network_consensus)->valid_after - now ) );
+      next_network_consensus = *result_network_consensus;
+
+      xTimerChangePeriod( consensus_valid_timer, valid_delay, portMAX_DELAY );
+      xTimerStart( consensus_valid_timer, portMAX_DELAY );
+    }
+  }
+
+  if ( valid_delay == 0 || hsdir_tree_occupied == 0 )
+  {
+    // BEGIN mutex for the network consensus
+    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+    network_consensus.method = (*result_network_consensus)->method;
+    network_consensus.valid_after = (*result_network_consensus)->valid_after;
+    network_consensus.fresh_until = (*result_network_consensus)->fresh_until;
+    network_consensus.valid_until = (*result_network_consensus)->valid_until;
+
+    memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
+    memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
+
+    if ( hsdir_tree_occupied == 1 )
+    {
+      ret = d_load_hsdir_relays_from_file();
+    }
+
+    xSemaphoreGive( network_consensus_mutex );
+    // END mutex for the network consensus
+
+    hsdir_tree_occupied = 1;
+    next_network_consensus = NULL;
+  }
+
+finish:
+  if ( close( fd ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/consensus, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  return ret;
+}
+
+int d_set_next_consenus()
+{
+  int succ = 0;
+
+  // BEGIN mutex for the network consensus
+  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+
+  network_consensus.method = next_network_consensus->method;
+  network_consensus.valid_after = next_network_consensus->valid_after;
+  network_consensus.fresh_until = next_network_consensus->fresh_until;
+  network_consensus.valid_until = next_network_consensus->valid_until;
+
+  ESP_LOGE( MINITOR_TAG, "consensus change" );
+  ESP_LOGE( MINITOR_TAG, "shared_rand_cmp %d", memcmp( network_consensus.shared_rand, next_network_consensus->shared_rand, 32 ) );
+  ESP_LOGE( MINITOR_TAG, "previous_shared_rand_cmp %d", memcmp( network_consensus.previous_shared_rand, next_network_consensus->previous_shared_rand, 32 ) );
+
+  memcpy( network_consensus.previous_shared_rand, next_network_consensus->previous_shared_rand, 32 );
+  memcpy( network_consensus.shared_rand, next_network_consensus->shared_rand, 32 );
+
+  succ = d_load_hsdir_relays_from_file();
 
   xSemaphoreGive( network_consensus_mutex );
   // END mutex for the network consensus
+
+  free( next_network_consensus );
+
+  return succ;
+}
+
+// fetch the network consensus so we can correctly create circuits
+int d_fetch_consensus_info()
+{
+  int ret = 0;
+  NetworkConsensus* result_network_consensus;
+  time_t now = 0;
+  int voting_interval;
+  time_t next_srv_time;
+
+  // TODO the return value of null is ambigious, it could be null because there isn't a row or
+  // it could be because the database is messed up, we need to be able to distinguish
+  result_network_consensus = px_get_network_consensus();
+  time( &now );
+
+  if ( result_network_consensus == NULL || result_network_consensus->fresh_until <= now )
+  {
+    if ( d_download_consensus() < 0 )
+    {
+      ret = -1;
+      goto finish;
+    }
+  }
+
+  if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 )
+  {
+    ret = -1;
+    goto finish;
+  }
+
+  if ( d_destroy_consensus() < 0 )
+  {
+    ret = -1;
+    goto finish;
+  }
+
+  if ( d_create_consensus( result_network_consensus ) < 0 )
+  {
+    ret = -1;
+    goto finish;
+  }
+
+  time( &now );
+
+#ifdef MINITOR_CHUTNEY
+  // in chutney we want to update when a new shared rand is expected, not when we lose freshness
+  voting_interval = result_network_consensus->fresh_until - result_network_consensus->valid_after;
+
+  ESP_LOGE( MINITOR_TAG, "FU: %lu", result_network_consensus->fresh_until );
+  ESP_LOGE( MINITOR_TAG, "VA: %lu", result_network_consensus->valid_after );
+  ESP_LOGE( MINITOR_TAG, "voting_interval: %d", voting_interval );
+
+  // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
+  // get it on voting interval after, just to be careful
+  next_srv_time = result_network_consensus->valid_after + ( ( 24 - ( ( ( result_network_consensus->valid_after / voting_interval ) ) % 24 ) + 1 ) * voting_interval );
+
+  ESP_LOGE( MINITOR_TAG, "now %lu", now );
+  ESP_LOGE( MINITOR_TAG, "next_srv_time %lu",next_srv_time );
+  ESP_LOGE( MINITOR_TAG, "Next update in %lu seconds", next_srv_time - now );
+  xTimerChangePeriod( consensus_timer, 1000 * ( next_srv_time - now ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  xTimerStart( consensus_timer, portMAX_DELAY );
+#else
+  xTimerChangePeriod( consensus_timer, 1000 * ( result_network_consensus->fresh_until - now ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  xTimerStart( consensus_timer, portMAX_DELAY );
+#endif
+
+#ifdef DEBUG_MINITOR
+  ESP_LOGE( MINITOR_TAG, "finished fetching consensus" );
+#endif
+
+finish:
+  if ( result_network_consensus != next_network_consensus )
+  {
+    free( result_network_consensus );
+  }
+
+  // return 0 for no errors
+  return ret;
 }

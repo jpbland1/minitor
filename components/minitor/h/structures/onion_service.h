@@ -1,6 +1,9 @@
 #ifndef MINITOR_STRUCTURES_ONION_SERVICE_H
 #define MINITOR_STRUCTURES_ONION_SERVICE_H
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
@@ -45,7 +48,8 @@ typedef struct DoublyLinkedLocalStreamList {
   DoublyLinkedLocalStream* tail;
 } DoublyLinkedLocalStreamList;
 
-typedef struct OnionService {
+typedef struct OnionService
+{
   unsigned short exit_port;
   unsigned short local_port;
   char* onion_service_directory;
@@ -59,6 +63,7 @@ typedef struct OnionService {
   DoublyLinkedLocalStreamList local_streams;
   unsigned int last_hsdir_update;
   time_t rend_timestamp;
+  TimerHandle_t hsdir_timer;
 } OnionService;
 
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );

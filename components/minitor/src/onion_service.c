@@ -1,4 +1,6 @@
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/hash.h"
 
@@ -20,21 +22,6 @@ void v_handle_onion_service( void* pv_parameters )
 
   while ( 1 )
   {
-    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-    hsdir_interval = network_consensus.hsdir_interval;
-
-    xSemaphoreGive( network_consensus_mutex );
-
-    time( &now );
-
-    // TODO this is based on chutney settings, need to change it for real tor
-    if ( ( now / 60 - (4) ) / hsdir_interval > onion_service->last_hsdir_update )
-    {
-      d_push_hsdir( onion_service );
-      ESP_LOGE( MINITOR_TAG, "heap check: %d", xPortGetFreeHeapSize() );
-    }
-
     if ( xQueueReceive( onion_service->rx_queue, &onion_message, 1000 * 60 / portTICK_PERIOD_MS ) == pdTRUE )
     {
       switch ( onion_message->type ) {
@@ -868,6 +855,8 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   if ( db_rend_circuit == NULL )
   {
     db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
+    db_rend_circuit->circuit = malloc( sizeof( OnionCircuit ) );
+    db_rend_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
     ESP_LOGE( MINITOR_TAG, "Building new rend circuit" );
     if ( d_build_onion_circuit_to( db_rend_circuit->circuit, 2, rend_relay ) < 0 )
@@ -1305,7 +1294,7 @@ static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int 
     db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
 
     db_tmp_relay->relay = NULL;
-    db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, NULL, i, used_relays, next );
+    db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, i, used_relays, next );
 
     if ( db_tmp_relay->relay == NULL )
     {
@@ -1482,11 +1471,11 @@ cleanup:
   return target_relays;
 }
 
-int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
+int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, DoublyLinkedOnionRelayList* target_relays )
 {
+  int ret = 0;
   int i;
   int j;
-  DoublyLinkedOnionRelayList* target_relays;
   OnionRelay* target_relay;
   OnionRelay* start_node;
   DoublyLinkedOnionRelay* db_target_relay;
@@ -1499,11 +1488,7 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 
   publish_circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
-  target_relays = NULL;
-
-  target_relays = px_get_target_relays( hsdir_n_replicas, blinded_pub_key, time_period, hsdir_interval, hsdir_spread_store, next );
-
-  start_node = px_get_random_hsdir_relay( 0, target_relays, NULL );
+  start_node = px_get_random_hsdir_relay( 1, target_relays, NULL );
 
   db_target_relay = target_relays->head;
 
@@ -1526,8 +1511,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 #ifdef DEBUG_MINITOR
               ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
-
-              return -1;
             }
 
             publish_circuit->or_connection = NULL;
@@ -1542,7 +1525,16 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
               ESP_LOGE( MINITOR_TAG, "Failed to truncate publish circuit" );
 #endif
 
-              return -1;
+              if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
+              {
+#ifdef DEBUG_MINITOR
+                ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
+#endif
+              }
+
+              publish_circuit->or_connection = NULL;
+
+              break;
             }
 
             ESP_LOGE( MINITOR_TAG, "Trying to extend to %d", db_target_relay->relay->or_port );
@@ -1561,8 +1553,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 #ifdef DEBUG_MINITOR
                 ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
-
-                return -1;
               }
 
               publish_circuit->or_connection = NULL;
@@ -1602,8 +1592,6 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
-
-            return -1;
           }
 
           publish_circuit->or_connection = NULL;
@@ -1627,36 +1615,29 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, u
       ESP_LOGE( MINITOR_TAG, "Failed to post descriptor" );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     db_target_relay = db_target_relay->next;
   }
-
-  free( start_node );
-
-  while ( target_relays->length > 0 )
-  {
-    v_pop_relay_from_list_back( target_relays );
-  }
-
-  free( target_relays );
 
   if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
 #endif
-
-    return -1;
   }
+
+finish:
+  free( start_node );
 
   vQueueDelete( publish_circuit->rx_queue );
   free( publish_circuit );
 
   ESP_LOGE( MINITOR_TAG, "Done sending descriptors" );
 
-  return 0;
+  return ret;
 }
 
 static char* pc_ipv4_to_string( unsigned int address ) {
@@ -2844,6 +2825,7 @@ int d_push_hsdir( OnionService* onion_service )
   int voting_interval;
   time_t srv_start_time;
   time_t tp_start_time;
+  time_t now;
   long int valid_after;
   unsigned int hsdir_interval;
   unsigned int hsdir_n_replicas;
@@ -2853,19 +2835,22 @@ int d_push_hsdir( OnionService* onion_service )
   int time_period;
   int revision_counter;
   WC_RNG rng;
-  ed25519_key blinded_key;
+  ed25519_key blinded_keys[2];
   ed25519_key descriptor_signing_key;
   Sha3 reusable_sha3;
   int reusable_text_length;
   unsigned char* reusable_plaintext;
   unsigned char* reusable_ciphertext;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
-  unsigned char blinded_pub_key[ED25519_PUB_KEY_SIZE];
+  unsigned char blinded_pub_keys[2][ED25519_PUB_KEY_SIZE];
+  DoublyLinkedOnionRelayList* target_relays[2];
 
   wc_InitRng( &rng );
 
-  wc_ed25519_init( &blinded_key );
-  blinded_key.expanded = 1;
+  wc_ed25519_init( &blinded_keys[0] );
+  wc_ed25519_init( &blinded_keys[1] );
+  blinded_keys[0].expanded = 1;
+  blinded_keys[1].expanded = 1;
 
   wc_ed25519_init( &descriptor_signing_key );
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
@@ -2901,10 +2886,50 @@ int d_push_hsdir( OnionService* onion_service )
   memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
   memcpy( shared_rand, network_consensus.shared_rand, 32 );
 
+  // my stragety is to get all the target relays within a single mutex lock so that we
+  // can garentee that we use the same consensus in case it tries to update during the
+  // long upload process
+  for ( i = 0; i < 2; i++ )
+  {
+    mini_succ = d_derive_blinded_key( &blinded_keys[i], &onion_service->master_key, time_period + i, hsdir_interval, NULL, 0 );
+
+    if ( mini_succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
+#endif
+
+      return -1;
+    }
+
+    idx = ED25519_PUB_KEY_SIZE;
+    wolf_succ = wc_ed25519_export_public( &blinded_keys[i], blinded_pub_keys[i], &idx );
+
+    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
+#endif
+
+      return -1;
+    }
+
+    target_relays[i] = px_get_target_relays( hsdir_n_replicas, blinded_pub_keys[i], time_period + i, hsdir_interval, hsdir_spread_store, i );
+
+    if ( target_relays[i] == NULL )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to get target_relays" );
+#endif
+
+      return -1;
+    }
+  }
+
   xSemaphoreGive( network_consensus_mutex );
   // END mutex
 
-  revision_counter = d_roll_revision_counter( onion_service->master_key.p, time_period );
+  revision_counter = d_roll_revision_counter( onion_service->master_key.p );
 
   if ( revision_counter < 0 )
   {
@@ -2918,29 +2943,6 @@ int d_push_hsdir( OnionService* onion_service )
   // i = 0 is first descriptor, 1 is second as per the spec
   for ( i = 0; i < 2; i++ )
   {
-    mini_succ = d_derive_blinded_key( &blinded_key, &onion_service->master_key, time_period + i, hsdir_interval, NULL, 0 );
-
-    if ( mini_succ < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
-#endif
-
-      return -1;
-    }
-
-    idx = ED25519_PUB_KEY_SIZE;
-    wolf_succ = wc_ed25519_export_public( &blinded_key, blinded_pub_key, &idx );
-
-    if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
-#endif
-
-      return -1;
-    }
-
     ESP_LOGE( MINITOR_TAG, "Generating second plaintext" );
 
     // generate second layer plaintext
@@ -2963,7 +2965,7 @@ int d_push_hsdir( OnionService* onion_service )
 
     wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"subcredential", strlen( "subcredential" ) );
     wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_key, ED25519_PUB_KEY_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, blinded_pub_keys[i], ED25519_PUB_KEY_SIZE );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
 
     if ( i == 0 )
@@ -2985,7 +2987,7 @@ int d_push_hsdir( OnionService* onion_service )
       &reusable_ciphertext,
       reusable_plaintext,
       reusable_text_length,
-      blinded_pub_key,
+      blinded_pub_keys[i],
       ED25519_PUB_KEY_SIZE,
       "hsdir-encrypted-data",
       strlen( "hsdir-encrypted-data" ),
@@ -3022,7 +3024,7 @@ int d_push_hsdir( OnionService* onion_service )
       &reusable_ciphertext,
       reusable_plaintext,
       reusable_text_length,
-      blinded_pub_key,
+      blinded_pub_keys[i],
       ED25519_PUB_KEY_SIZE,
       "hsdir-superencrypted-data",
       strlen( "hsdir-superencrypted-data" ),
@@ -3048,7 +3050,7 @@ int d_push_hsdir( OnionService* onion_service )
       reusable_text_length,
       &descriptor_signing_key,
       valid_after,
-      &blinded_key,
+      &blinded_keys[i],
       revision_counter
     );
 
@@ -3064,7 +3066,7 @@ int d_push_hsdir( OnionService* onion_service )
     }
 
     // send outer descriptor wrapper to the correct HSDIR nodes
-    mini_succ = d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, hsdir_n_replicas, blinded_pub_key, time_period + i, hsdir_interval, hsdir_spread_store, i );
+    mini_succ = d_send_descriptors( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, target_relays[i] );
 
     if ( mini_succ < 0 )
     {
@@ -3080,9 +3082,38 @@ int d_push_hsdir( OnionService* onion_service )
 
   onion_service->last_hsdir_update = time_period;
 
+  while ( target_relays[0]->length > 0 )
+  {
+    v_pop_relay_from_list_back( target_relays[0] );
+  }
+
+  while ( target_relays[1]->length > 0 )
+  {
+    v_pop_relay_from_list_back( target_relays[1] );
+  }
+
+  free( target_relays[0] );
+  free( target_relays[1] );
+
   wc_Sha3_256_Free( &reusable_sha3 );
-  wc_ed25519_free( &blinded_key );
+  wc_ed25519_free( &blinded_keys[0] );
+  wc_ed25519_free( &blinded_keys[1] );
   wc_ed25519_free( &descriptor_signing_key );
+
+#ifdef MINITOR_CHUTNEY
+  time( &now );
+
+  // start the update timer a half second after the consensus update
+  ESP_LOGE( MINITOR_TAG, "now %lu", now );
+  ESP_LOGE( MINITOR_TAG, "srv_start_time + offset %lu", ( srv_start_time + ( 25 * voting_interval ) ) );
+  ESP_LOGE( MINITOR_TAG, "Next update in %lu seconds", ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) );
+  xTimerChangePeriod( onion_service->hsdir_timer, ( 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  xTimerStart( onion_service->hsdir_timer, portMAX_DELAY );
+#else
+  // start the hsdir_timer at 60-120 minutes, may be too long for clock accurracy
+  xTimerChangePeriod( onion_service->hsdir_timer, 1000 * 60 * ( ( esp_random() % 60 ) + 60 ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  xTimerStart( onion_service->hsdir_timer, portMAX_DELAY );
+#endif
 
   return 0;
 }

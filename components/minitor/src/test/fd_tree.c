@@ -11,9 +11,9 @@
 
 #define NODE_COUNT 1000
 
-void v_test_setup_issi()
+void v_test_setup_fd_tree()
 {
-  if ( d_reset_hsdir_relay_tree() != 0 )
+  if ( d_reset_hsdir_relay_tree_file() != 0 )
   {
     ESP_LOGE( MINITOR_TAG, "Failed to reset hsdir relay tree" );
 
@@ -23,7 +23,7 @@ void v_test_setup_issi()
   }
 }
 
-void v_test_d_traverse_hsdir_relays_in_order()
+void v_test_d_traverse_hsdir_relays_from_fd_in_order()
 {
   int i;
   int j;
@@ -55,9 +55,39 @@ void v_test_d_traverse_hsdir_relays_in_order()
       //relay.id_hash_previous[j] = i;
     }
 
-    d_create_hsdir_relay( &relay );
+    if ( d_create_hsdir_relay_in_file( &relay ) < 0 )
+    {
+      ESP_LOGE( MINITOR_TAG, "Failed to insert to file tree" );
+
+      while ( 1 )
+      {
+      }
+    }
   }
+
+  if ( d_finalize_hsdir_relays_file() < 0 )
+  {
+    ESP_LOGE( MINITOR_TAG, "Failed to finalize file tree" );
+
+    while ( 1 )
+    {
+    }
+  }
+
   ESP_LOGE( MINITOR_TAG, "Insert time: %lld", esp_timer_get_time() - start );
+
+  start = esp_timer_get_time();
+
+  if ( d_load_hsdir_relays_from_file() < 0 )
+  {
+    ESP_LOGE( MINITOR_TAG, "Failed to load relays from file" );
+
+    while ( 1 )
+    {
+    }
+  }
+
+  ESP_LOGE( MINITOR_TAG, "load time: %lld", esp_timer_get_time() - start );
 
   ESP_LOGE( MINITOR_TAG, "Iterate over identity" );
 

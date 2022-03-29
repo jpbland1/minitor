@@ -3,6 +3,9 @@
 #include "../../include/config.h"
 #include "../../h/structures/consensus.h"
 
+TimerHandle_t consensus_timer;
+TimerHandle_t consensus_valid_timer;
+
 // shared state must be protected by mutex
 NetworkConsensus network_consensus = {
   .method = 0,

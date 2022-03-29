@@ -2,6 +2,8 @@
 #include <stdlib.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 #include "../include/config.h"
 #include "../include/minitor.h"
@@ -10,7 +12,73 @@
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
 
+#define MINITOR_TIMER_CONSENSUS 0
+#define MINITOR_TIMER_CONSENSUS_VALID 1
+#define MINITOR_TIMER_KEEPALIVE 2
+
+QueueHandle_t timer_queue;
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
+TimerHandle_t keepalive_timer;
+
+static void v_timer_trigger_consensus( TimerHandle_t x_timer )
+{
+  int succ;
+  int action = MINITOR_TIMER_CONSENSUS;
+
+  succ = xQueueSendToBack( timer_queue, &action, 0 );
+
+  // try again in half a second
+  if ( succ == pdFALSE )
+  {
+    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    xTimerStart( x_timer, portMAX_DELAY );
+  }
+}
+
+static void v_timer_trigger_consensus_valid( TimerHandle_t x_timer )
+{
+  int succ;
+  int action = MINITOR_TIMER_CONSENSUS_VALID;
+
+  succ = xQueueSendToBack( timer_queue, &action, 0 );
+
+  // try again in half a second
+  if ( succ == pdFALSE )
+  {
+    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    xTimerStart( x_timer, portMAX_DELAY );
+  }
+}
+
+static void v_timer_trigger_keepalive( TimerHandle_t x_timer )
+{
+  int succ;
+  int action = MINITOR_TIMER_KEEPALIVE;
+
+  succ = xQueueSendToBack( timer_queue, &action, 0 );
+
+  // try again in half a second
+  if ( succ == pdFALSE )
+  {
+    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    xTimerStart( x_timer, portMAX_DELAY );
+  }
+}
+
+static void v_timer_trigger_hsdir_update( TimerHandle_t x_timer )
+{
+  int succ;
+  OnionService* onion_service = pvTimerGetTimerID( x_timer );;
+
+  succ = xQueueSendToBack( timer_queue, &onion_service, 0 );
+
+  // try again in half a second
+  if ( succ == pdFALSE )
+  {
+    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    xTimerStart( x_timer, portMAX_DELAY );
+  }
+}
 
 static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
 {
@@ -22,6 +90,7 @@ static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
 
   padding_cell.command = PADDING;
   padding_cell.payload = NULL;
+
   node = list->head;
 
   for ( i = 0; i < list->length; i++ )
@@ -49,51 +118,72 @@ static void v_keep_circuitlist_alive( DoublyLinkedOnionCircuitList* list )
   }
 }
 
-static void v_circuit_keepalive( void* pv_parameters )
+static void v_handle_timed_jobs( void* pv_parameters )
 {
-  time_t now;
-  unsigned long int fresh_until;
+  int succ;
+  uint32_t action_or_service;
 
-  while ( 1 ) {
-    vTaskDelay( 1000 * 60 / portTICK_PERIOD_MS );
+  while ( 1 )
+  {
+    xQueueReceive( timer_queue, &action_or_service, portMAX_DELAY );
 
-    xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-
-    v_keep_circuitlist_alive( &standby_circuits );
-
-    xSemaphoreGive( standby_circuits_mutex );
-
-    ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive taking rend mutex" );
-
-    xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
-
-    v_keep_circuitlist_alive( &standby_rend_circuits );
-
-    xSemaphoreGive( standby_rend_circuits_mutex );
-
-    ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive gave rend mutex" );
-
-    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-    fresh_until = network_consensus.fresh_until;
-
-    xSemaphoreGive( network_consensus_mutex );
-
-/*
-    time( &now );
-
-    if ( now >= fresh_until )
+    // This saves us from having a null onion_service later
+    if ( action_or_service == MINITOR_TIMER_CONSENSUS )
     {
-      while ( d_fetch_consensus_info() < 0 )
+      if ( d_fetch_consensus_info() < 0 )
       {
 #ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "couldn't refresh the consensus, retrying" );
+        ESP_LOGE( MINITOR_TAG, "Failed to fetch consensus" );
 #endif
 
-        vTaskDelay( 1000 * 5 / portTICK_PERIOD_MS );
+        xTimerChangePeriod( consensus_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+        xTimerStart( consensus_timer, portMAX_DELAY );
       }
     }
-*/
+    else if ( action_or_service == MINITOR_TIMER_CONSENSUS_VALID )
+    {
+      if ( d_set_next_consenus() < 0 )
+      {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to load next consensus" );
+#endif
+
+        xTimerChangePeriod( consensus_valid_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+        xTimerStart( consensus_valid_timer, portMAX_DELAY );
+      }
+    }
+    else if ( action_or_service == MINITOR_TIMER_KEEPALIVE )
+    {
+      xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
+
+      v_keep_circuitlist_alive( &standby_circuits );
+
+      xSemaphoreGive( standby_circuits_mutex );
+
+      ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive taking rend mutex" );
+
+      xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+      v_keep_circuitlist_alive( &standby_rend_circuits );
+
+      xSemaphoreGive( standby_rend_circuits_mutex );
+
+      ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive gave rend mutex" );
+
+      xTimerStart( keepalive_timer, portMAX_DELAY );
+    }
+    else
+    {
+      if ( d_push_hsdir( (OnionService*)action_or_service ) < 0 )
+      {
+#ifdef DEBUG_MINITOR
+        ESP_LOGE( MINITOR_TAG, "Failed to d_push_hsdir for %s", ( (OnionService*)action_or_service )->onion_service_directory );
+#endif
+
+        xTimerChangePeriod( ( (OnionService*)action_or_service )->hsdir_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+        xTimerStart( ( (OnionService*)action_or_service )->hsdir_timer, portMAX_DELAY );
+      }
+    }
   }
 }
 
@@ -105,6 +195,44 @@ int v_minitor_INIT()
   standby_circuits_mutex = xSemaphoreCreateMutex();
   standby_rend_circuits_mutex = xSemaphoreCreateMutex();
   or_connections_mutex = xSemaphoreCreateMutex();
+
+  timer_queue = xQueueCreate( 5, sizeof( uint32_t ) );
+
+  xTaskCreatePinnedToCore(
+    v_handle_timed_jobs,
+    "HANDLE_TIMED_JOBS",
+    8192,
+    NULL,
+    4,
+    NULL,
+    tskNO_AFFINITY
+  );
+
+  consensus_timer = xTimerCreate(
+    "CONSENSUS_TIMER",
+    1000 * 60 * 60 * 24 / portTICK_PERIOD_MS,
+    0,
+    NULL,
+    v_timer_trigger_consensus
+  );
+  xTimerStop( consensus_timer, portMAX_DELAY );
+
+  consensus_valid_timer = xTimerCreate(
+    "CONSENSUS_VALID_TIMER",
+    1000 * 60 * 60 * 24 / portTICK_PERIOD_MS,
+    0,
+    NULL,
+    v_timer_trigger_consensus_valid
+  );
+  xTimerStop( consensus_valid_timer, portMAX_DELAY );
+
+  keepalive_timer = xTimerCreate(
+    "KEEPALIVE_TIMER",
+    1000 * 60 * 2,
+    0,
+    NULL,
+    v_timer_trigger_keepalive
+  );
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
@@ -133,17 +261,6 @@ int v_minitor_INIT()
   {
     return -1;
   }
-
-  ESP_LOGE( MINITOR_TAG, "Starting keepalive" );
-  xTaskCreatePinnedToCore(
-    v_circuit_keepalive,
-    "CIRCUIT_KEEPALIVE",
-    8192,
-    NULL,
-    6,
-    NULL,
-    tskNO_AFFINITY
-  );
 
   return 1;
 }
@@ -240,6 +357,15 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     node = node->next;
   }
 
+  onion_service->hsdir_timer = xTimerCreate(
+    "HSDIR_TIMER",
+    1000 * 60 * 60 * 24 / portTICK_PERIOD_MS,
+    0,
+    (void*)onion_service,
+    v_timer_trigger_hsdir_update
+  );
+  xTimerStop( onion_service->hsdir_timer, portMAX_DELAY );
+
   if ( d_push_hsdir( onion_service ) < 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -264,7 +390,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   xTaskCreatePinnedToCore(
     v_handle_onion_service,
     "HANDLE_HS",
-    8192,
+    6144,
     (void*)(onion_service),
     7,
     NULL,

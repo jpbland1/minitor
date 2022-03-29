@@ -139,6 +139,7 @@ void v_handle_or_connections( void* pv_parameters )
           tmp_or_connection = or_connection->next;
           v_cleanup_or_connection( or_connection );
           or_connection = tmp_or_connection;
+          continue;
         }
         else
         {
@@ -171,7 +172,7 @@ void v_handle_or_connections( void* pv_parameters )
           else
           {
 #ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell" );
+            ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell: %d", circ_id );
 #endif
             free( packed_cell );
           }

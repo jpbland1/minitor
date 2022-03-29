@@ -1,6 +1,9 @@
 #ifndef MINITOR_STRUCTURES_CONSENSUS_H
 #define MINITOR_STRUCTURES_CONSENSUS_H
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/aes.h"
@@ -66,5 +69,7 @@ void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;
 extern SemaphoreHandle_t network_consensus_mutex;
+extern TimerHandle_t consensus_timer;
+extern TimerHandle_t consensus_valid_timer;
 
 #endif
