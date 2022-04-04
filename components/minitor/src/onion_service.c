@@ -7,6 +7,7 @@
 #include "../include/config.h"
 #include "../h/onion_service.h"
 #include "../h/constants.h"
+#include "../h/consensus.h"
 #include "../h/encoding.h"
 #include "../h/cell.h"
 #include "../h/circuit.h"
@@ -279,10 +280,10 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  if ( ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != onion_service->exit_port )
+  if ( ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != onion_service->exit_port && ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != 443 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "request was for the wrong port" );
+    ESP_LOGE( MINITOR_TAG, "request was for the wrong port: %d, looking for: %d", ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port, onion_service->exit_port );
 #endif
 
     return -1;
@@ -347,16 +348,17 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
   ( (PayloadRelay*)unpacked_connected_cell.payload )->recognized = 0;
   ( (PayloadRelay*)unpacked_connected_cell.payload )->stream_id = ( (PayloadRelay*)unpacked_cell->payload )->stream_id;
   ( (PayloadRelay*)unpacked_connected_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->length = 8;
+  ( (PayloadRelay*)unpacked_connected_cell.payload )->length = 0;
+/*
   ( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadConnected ) );
 
   ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address = malloc( sizeof( unsigned char ) * 4 );
 
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address[0] = 0x7f;
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address[1] = 0x00;
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address[2] = 0x00;
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address[3] = 0x01;
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->time_to_live = 120;
+  ESP_LOGE( MINITOR_TAG, "got address: %s", ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->address );
+
+  memset( ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address, 0, 4 );
+  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->time_to_live = 300;
+*/
 
   packed_cell = pack_and_free( &unpacked_connected_cell );
 
@@ -629,7 +631,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
 
   ESP_LOGE( MINITOR_TAG, "now: %ld, timestap: %ld", now, onion_service->rend_timestamp );
 
-  if ( now - onion_service->rend_timestamp < 20 )
+  if ( now - onion_service->rend_timestamp < 10 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Rate limit in effect, dropping intro" );
@@ -856,6 +858,7 @@ int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpac
   {
     db_rend_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
     db_rend_circuit->circuit = malloc( sizeof( OnionCircuit ) );
+    memset( db_rend_circuit->circuit, 0, sizeof( OnionCircuit ) );
     db_rend_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
 
     ESP_LOGE( MINITOR_TAG, "Building new rend circuit" );
@@ -1416,7 +1419,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     to_store = hsdir_spread_store;
 
-    hsdir_index_list = px_get_relays_by_hash( hs_index, hsdir_spread_store, &used_relays, next );
+    hsdir_index_list = px_get_hsdir_relays_by_id_hash( hs_index, hsdir_spread_store, next, target_relays );
 
     if ( hsdir_index_list == NULL )
     {
@@ -1442,8 +1445,28 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
       v_add_relay_to_list( hsdir_relay_node, target_relays );
 
-      ESP_LOGE( MINITOR_TAG, "Target or_port: %d", hsdir_relay_node->relay->or_port );
-      ESP_LOGE( MINITOR_TAG, "Target id_hash: %.2x %.2x %.2x %.2x", hsdir_relay_node->relay->id_hash[0], hsdir_relay_node->relay->id_hash[1], hsdir_relay_node->relay->id_hash[2], hsdir_relay_node->relay->id_hash[3] );
+      ESP_LOGE( MINITOR_TAG, "Target identity: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x",
+        hsdir_relay_node->relay->identity[0],
+        hsdir_relay_node->relay->identity[1],
+        hsdir_relay_node->relay->identity[2],
+        hsdir_relay_node->relay->identity[3],
+        hsdir_relay_node->relay->identity[4],
+        hsdir_relay_node->relay->identity[5],
+        hsdir_relay_node->relay->identity[6],
+        hsdir_relay_node->relay->identity[7],
+        hsdir_relay_node->relay->identity[8],
+        hsdir_relay_node->relay->identity[9],
+        hsdir_relay_node->relay->identity[10],
+        hsdir_relay_node->relay->identity[11],
+        hsdir_relay_node->relay->identity[12],
+        hsdir_relay_node->relay->identity[13],
+        hsdir_relay_node->relay->identity[14],
+        hsdir_relay_node->relay->identity[15],
+        hsdir_relay_node->relay->identity[16],
+        hsdir_relay_node->relay->identity[17],
+        hsdir_relay_node->relay->identity[18],
+        hsdir_relay_node->relay->identity[19]
+      );
 
       hsdir_relay_node = next_hsdir_relay_node;
 
@@ -1556,6 +1579,8 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, D
               }
 
               publish_circuit->or_connection = NULL;
+              ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
+              goto next;
             }
           }
 
@@ -1594,7 +1619,10 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, D
 #endif
           }
 
+          start_node = NULL;
           publish_circuit->or_connection = NULL;
+          ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
+          goto next;
         }
 
         start_node = NULL;
@@ -1606,6 +1634,8 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, D
 #endif
 
         publish_circuit->or_connection = NULL;
+        ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
+        goto next;
       }
     }
 
@@ -1619,10 +1649,11 @@ int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, D
       goto finish;
     }
 
+next:
     db_target_relay = db_target_relay->next;
   }
 
-  if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
+  if ( publish_circuit->or_connection != NULL && d_destroy_onion_circuit( publish_circuit ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
@@ -2824,14 +2855,9 @@ int d_push_hsdir( OnionService* onion_service )
   unsigned int idx;
   int voting_interval;
   time_t srv_start_time;
-  time_t tp_start_time;
   time_t now;
-  long int valid_after;
-  unsigned int hsdir_interval;
-  unsigned int hsdir_n_replicas;
-  unsigned int hsdir_spread_store;
-  unsigned char previous_shared_rand[32];
-  unsigned char shared_rand[32];
+  time_t fresh_until;
+  time_t valid_after;
   int time_period;
   int revision_counter;
   WC_RNG rng;
@@ -2863,35 +2889,16 @@ int d_push_hsdir( OnionService* onion_service )
   xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
 
   valid_after = network_consensus.valid_after;
-  hsdir_interval = network_consensus.hsdir_interval;
-  hsdir_n_replicas = network_consensus.hsdir_n_replicas;
-  hsdir_spread_store = network_consensus.hsdir_spread_store;
+  fresh_until = network_consensus.fresh_until;
 
-  voting_interval = network_consensus.fresh_until - valid_after;
-
-  // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
-  srv_start_time = valid_after - ( ( ( ( valid_after / voting_interval ) ) % 24 ) * voting_interval );
-  tp_start_time = srv_start_time + hsdir_interval * 60;
-
-  // TODO 4 is the rotation offset used by chutney, need to make this adjustable based on the build
-  if ( valid_after >= srv_start_time && valid_after < tp_start_time )
-  {
-    time_period = ( valid_after / 60 - (4) ) / hsdir_interval;
-  }
-  else
-  {
-    time_period = ( ( valid_after / 60 - (4) ) / hsdir_interval ) - 1;
-  }
-
-  memcpy( previous_shared_rand, network_consensus.previous_shared_rand, 32 );
-  memcpy( shared_rand, network_consensus.shared_rand, 32 );
+  time_period = d_get_hs_time_period( network_consensus.fresh_until, network_consensus.valid_after, network_consensus.hsdir_interval );
 
   // my stragety is to get all the target relays within a single mutex lock so that we
   // can garentee that we use the same consensus in case it tries to update during the
   // long upload process
   for ( i = 0; i < 2; i++ )
   {
-    mini_succ = d_derive_blinded_key( &blinded_keys[i], &onion_service->master_key, time_period + i, hsdir_interval, NULL, 0 );
+    mini_succ = d_derive_blinded_key( &blinded_keys[i], &onion_service->master_key, time_period + i, network_consensus.hsdir_interval, NULL, 0 );
 
     if ( mini_succ < 0 )
     {
@@ -2914,7 +2921,7 @@ int d_push_hsdir( OnionService* onion_service )
       return -1;
     }
 
-    target_relays[i] = px_get_target_relays( hsdir_n_replicas, blinded_pub_keys[i], time_period + i, hsdir_interval, hsdir_spread_store, i );
+    target_relays[i] = px_get_target_relays( network_consensus.hsdir_n_replicas, blinded_pub_keys[i], time_period + i, network_consensus.hsdir_interval, network_consensus.hsdir_spread_store, i );
 
     if ( target_relays[i] == NULL )
     {
@@ -3080,8 +3087,6 @@ int d_push_hsdir( OnionService* onion_service )
     free( reusable_plaintext );
   }
 
-  onion_service->last_hsdir_update = time_period;
-
   while ( target_relays[0]->length > 0 )
   {
     v_pop_relay_from_list_back( target_relays[0] );
@@ -3103,11 +3108,23 @@ int d_push_hsdir( OnionService* onion_service )
 #ifdef MINITOR_CHUTNEY
   time( &now );
 
+  voting_interval = fresh_until - valid_after;
+
+  // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
+  srv_start_time = valid_after - ( ( ( ( valid_after / voting_interval ) ) % ( SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES ) ) * voting_interval );
+
   // start the update timer a half second after the consensus update
-  ESP_LOGE( MINITOR_TAG, "now %lu", now );
-  ESP_LOGE( MINITOR_TAG, "srv_start_time + offset %lu", ( srv_start_time + ( 25 * voting_interval ) ) );
-  ESP_LOGE( MINITOR_TAG, "Next update in %lu seconds", ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) );
-  xTimerChangePeriod( onion_service->hsdir_timer, ( 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  if ( now > ( srv_start_time + ( 25 * voting_interval ) ) )
+  {
+    ESP_LOGE( MINITOR_TAG, "Setting hsdir timer to backup time %d seconds", ( 25 * voting_interval ) );
+    xTimerChangePeriod( onion_service->hsdir_timer, ( 1000 * ( 25 * voting_interval ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  }
+  else
+  {
+    ESP_LOGE( MINITOR_TAG, "Setting hsdir timer to normal time %lu seconds", ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) );
+    xTimerChangePeriod( onion_service->hsdir_timer, ( 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  }
+
   xTimerStart( onion_service->hsdir_timer, portMAX_DELAY );
 #else
   // start the hsdir_timer at 60-120 minutes, may be too long for clock accurracy

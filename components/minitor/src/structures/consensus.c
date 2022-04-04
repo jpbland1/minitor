@@ -25,6 +25,7 @@ NetworkConsensus network_consensus = {
 #endif
 };
 SemaphoreHandle_t network_consensus_mutex;
+SemaphoreHandle_t crypto_insert_finish;
 
 // add a linked onion relay to a doubly linked list of onion relays
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list )

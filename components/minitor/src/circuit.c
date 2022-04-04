@@ -537,6 +537,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit ) {
       free( tmp_relay_node->relay_crypto );
     }
 
+    ESP_LOGE( MINITOR_TAG, "Freeing relay: %d", i );
     free( tmp_relay_node->relay );
 
     if ( i == circuit->relay_list.length - 1 )
@@ -895,12 +896,12 @@ int d_router_extend2( OnionCircuit* circuit, int node_index )
 
   free_cell( &unpacked_cell );
 
+  ESP_LOGE( MINITOR_TAG, "Finished handshake" );
+
 finish:
   wc_curve25519_free( &extend2_handshake_key );
   wc_curve25519_free( &extended2_handshake_public_key );
   wc_curve25519_free( &ntor_onion_key );
-
-  ESP_LOGE( MINITOR_TAG, "Finished handshake" );
 
   return ret;
 }
@@ -973,6 +974,8 @@ int d_router_create2( OnionCircuit* circuit )
     goto cleanup;
   }
 
+  ESP_LOGE( MINITOR_TAG, "Finishing the handshake" );
+
   if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell.payload )->handshake_data, circuit->relay_list.head, &create2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
@@ -986,6 +989,8 @@ int d_router_create2( OnionCircuit* circuit )
 
   wc_curve25519_free( &create2_handshake_key );
   free_cell( &unpacked_cell );
+
+  ESP_LOGE( MINITOR_TAG, "Finished create2" );
 
   return 0;
 

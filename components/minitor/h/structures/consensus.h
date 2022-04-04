@@ -14,14 +14,15 @@ typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 
 typedef struct NetworkConsensus {
   unsigned int method;
-  unsigned long int valid_after;
-  unsigned long int fresh_until;
-  unsigned long int valid_until;
+  time_t valid_after;
+  time_t fresh_until;
+  time_t valid_until;
   unsigned char previous_shared_rand[32];
   unsigned char shared_rand[32];
   unsigned int hsdir_interval;
   unsigned int hsdir_n_replicas;
   unsigned int hsdir_spread_store;
+  int time_period;
 } NetworkConsensus;
 
 typedef struct OnionRelay {
@@ -30,9 +31,10 @@ typedef struct OnionRelay {
   unsigned char master_key[H_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
   unsigned int address;
-  short or_port;
-  short dir_port;
+  uint16_t or_port;
+  uint16_t dir_port;
   unsigned char hsdir;
+  uint8_t dir_cache;
   unsigned char suitable;
   unsigned char id_hash[H_LENGTH];
   unsigned char id_hash_previous[H_LENGTH];
@@ -69,6 +71,7 @@ void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;
 extern SemaphoreHandle_t network_consensus_mutex;
+extern SemaphoreHandle_t crypto_insert_finish;
 extern TimerHandle_t consensus_timer;
 extern TimerHandle_t consensus_valid_timer;
 

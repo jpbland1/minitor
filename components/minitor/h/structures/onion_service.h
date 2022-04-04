@@ -61,7 +61,6 @@ typedef struct OnionService
   DoublyLinkedOnionCircuitList rend_circuits;
   DoublyLinkedRendezvousCookieList rendezvous_cookies;
   DoublyLinkedLocalStreamList local_streams;
-  unsigned int last_hsdir_update;
   time_t rend_timestamp;
   TimerHandle_t hsdir_timer;
 } OnionService;

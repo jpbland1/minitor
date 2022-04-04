@@ -188,13 +188,14 @@ static void v_handle_timed_jobs( void* pv_parameters )
 }
 
 // intialize tor
-int v_minitor_INIT()
+int d_minitor_INIT()
 {
   circ_id_mutex = xSemaphoreCreateMutex();
   network_consensus_mutex = xSemaphoreCreateMutex();
   standby_circuits_mutex = xSemaphoreCreateMutex();
   standby_rend_circuits_mutex = xSemaphoreCreateMutex();
   or_connections_mutex = xSemaphoreCreateMutex();
+  crypto_insert_finish = xSemaphoreCreateMutex();
 
   timer_queue = xQueueCreate( 5, sizeof( uint32_t ) );
 
@@ -390,7 +391,7 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
   xTaskCreatePinnedToCore(
     v_handle_onion_service,
     "HANDLE_HS",
-    6144,
+    8192,
     (void*)(onion_service),
     7,
     NULL,

@@ -47,4 +47,7 @@
 
 #define HSDIR_TREE_ROOT 0
 
+#define SHARED_RANDOM_N_ROUNDS 12
+#define SHARED_RANDOM_N_PHASES 2
+
 #endif

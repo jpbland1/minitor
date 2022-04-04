@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdlib.h>
+#include "esp_log.h"
 #include "esp_system.h"
 #include "../../h/structures/cell.h"
 
@@ -437,6 +438,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 
       break;
     case RELAY_CONNECTED:
+/*
       pack_buffer(
         packed_cell,
         ( (RelayPayloadConnected*)payload )->address,
@@ -444,6 +446,7 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
         );
 
       pack_four_bytes( packed_cell, ( (RelayPayloadConnected*)payload )->time_to_live );
+*/
 
       break;
     case RELAY_SENDME:
@@ -1005,7 +1008,8 @@ void unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_
   free( packed_cell_start );
 }
 
-void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length ) {
+void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, unsigned short payload_length )
+{
   int i;
   void* result = -1;
   unsigned char* packed_cell_relay_end = packed_cell + payload_length;
@@ -1014,11 +1018,13 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
   // relay payloads start at byte 17
   switch( command ) {
     case RELAY_BEGIN:
+      ESP_LOGE( ">>>>>>>>>", "in relay_begin unpack: %s", packed_cell );
       result = malloc( sizeof( RelayPayloadBegin ) );
 
       i = 0;
 
       while ( packed_cell[i] != ':' ) {
+        ESP_LOGE( ">>>>>>>>>", "%c", packed_cell[i] );
         i++;
       }
 
@@ -1029,6 +1035,7 @@ void* unpack_relay_payload( unsigned char* packed_cell, unsigned char command, u
         i,
         &packed_cell
         );
+
 
       ( (RelayPayloadBegin*)result )->address[i] = 0;
       packed_cell++;
@@ -1658,7 +1665,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
       break;
     case RELAY_CONNECTED:
       // free the address
-      free( ( (RelayPayloadConnected*)payload )->address );
+      //free( ( (RelayPayloadConnected*)payload )->address );
 
       break;
     case RELAY_SENDME:
@@ -1805,7 +1812,10 @@ void free_relay_payload( void * payload, unsigned char command ) {
       break;
   }
 
-  free( payload );
+  if ( command != RELAY_CONNECTED )
+  {
+    free( payload );
+  }
 }
 
 void v_free_introduce_2_data( DecryptedIntroduce2* unpacked_data ) {

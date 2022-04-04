@@ -161,76 +161,67 @@ finish:
 int d_recv_cell( OnionCircuit* circuit, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha, HsCrypto* hs_crypto )
 {
   int succ;
-  int retry;
   uint8_t* packed_cell;
   OnionMessage* onion_message = NULL;
 
   // retry in case we killed a final relay before processing a RELAY_END
-  for ( retry = 3; retry > 0; retry-- )
+  // MUTEX TAKE
+  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
+
+  succ = b_verify_or_connection( circuit->or_connection, &or_connections );
+
+  xSemaphoreGive( or_connections_mutex );
+  // MUTEX GIVE
+
+  if ( succ == 0 )
   {
-    // MUTEX TAKE
-    xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-    succ = b_verify_or_connection( circuit->or_connection, &or_connections );
-
-    xSemaphoreGive( or_connections_mutex );
-    // MUTEX GIVE
-
-    if ( succ == 0 )
-    {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
+    ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
 #endif
 
-      return -1;
-    }
+    return -1;
+  }
 
-    ESP_LOGE( MINITOR_TAG, "Trying to recv on rx_queue" );
-    succ = xQueueReceive( circuit->rx_queue, &onion_message, portMAX_DELAY );
-    ESP_LOGE( MINITOR_TAG, "Done recv on rx_queue" );
+  succ = xQueueReceive( circuit->rx_queue, &onion_message, 1000 * 5 / portTICK_PERIOD_MS );
 
-    if ( succ == pdFALSE || onion_message == NULL )
-    {
+  if ( succ == pdFALSE || onion_message == NULL )
+  {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to recv packed cell" );
+    ESP_LOGE( MINITOR_TAG, "Failed to recv packed cell" );
 #endif
 
-      if ( onion_message != NULL )
-      {
-        free( onion_message->data );
-        free( onion_message );
-      }
-
-      return -1;
-    }
-
-    packed_cell = onion_message->data;
-
-    if ( d_decrypt_packed_cell( packed_cell, circ_id_length, relay_list, hs_crypto, &unpacked_cell->recv_index ) < 0 )
+    if ( onion_message != NULL )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "failed to decrypt packed cell" );
-#endif
-
       free( onion_message->data );
       free( onion_message );
-
-      continue;
     }
 
-    if ( sha != NULL )
-    {
-      wc_Sha256Update( sha, packed_cell, onion_message->length );
-    }
+    return -1;
+  }
 
+  packed_cell = onion_message->data;
+
+  if ( d_decrypt_packed_cell( packed_cell, circ_id_length, relay_list, hs_crypto, &unpacked_cell->recv_index ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "failed to decrypt packed cell" );
+#endif
+
+    free( onion_message->data );
     free( onion_message );
 
-    // set the unpacked cell and return success
-    unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
-
-    ESP_LOGE( MINITOR_TAG, "Done reading cell" );
-    return 0;
+    continue;
   }
+
+  if ( sha != NULL )
+  {
+    wc_Sha256Update( sha, packed_cell, onion_message->length );
+  }
+
+  free( onion_message );
+
+  // set the unpacked cell and return success
+  unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
 
   return 0;
 }

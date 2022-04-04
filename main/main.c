@@ -203,7 +203,14 @@ void app_main()
   } while ( time_info.tm_year < (2016 - 1900) );
 
   ESP_LOGE( TAG, "Starting init" );
-  v_minitor_INIT();
+  if ( d_minitor_INIT() < 0 )
+  {
+    ESP_LOGE( TAG, "Failed to init" );
+
+    while ( 1 )
+    {
+    }
+  }
 
   ESP_LOGE( TAG, "Starting service" );
   OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );

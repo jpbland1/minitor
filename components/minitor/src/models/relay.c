@@ -16,7 +16,9 @@
 #include "../../h/models/relay.h"
 
 uint32_t hsdir_relay_count = 0;
+uint32_t cache_relay_count = 0;
 uint32_t file_hsdir_relay_count = 0;
+uint32_t file_cache_relay_count = 0;
 uint32_t random_offset_count = 1;
 
 int file_avl_roots[3] = { HSDIR_TREE_ROOT };
@@ -26,13 +28,11 @@ static int d_get_relay_from_issi( BinaryRelay* b_relay, int addr )
 {
   int err;
 
-  err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
-
-  if ( err != 0 ) {
-    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus" );
-
-    return -1;
-  }
+  do
+  {
+    err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
+    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus, retrying - in d_get_relay_from_issi" );
+  } while ( err != 0 );
 
   spi_transaction_ext_t t;
 
@@ -78,7 +78,7 @@ static int d_get_relay_from_file( BinaryRelay* b_relay, int addr )
     return -1;
   }
 
-  err = lseek( fd, addr + sizeof( int ) * 4, SEEK_SET );
+  err = lseek( fd, addr + sizeof( int ) * 5, SEEK_SET );
 
   if ( err < 0 )
   {
@@ -123,13 +123,11 @@ static int d_store_relay_to_issi( BinaryRelay* b_relay, int addr )
 {
   int err;
 
-  err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
-
-  if ( err != 0 ) {
-    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus" );
-
-    return -1;
-  }
+  do
+  {
+    err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
+    ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus, retrying - in d_store_relay_to_issi" );
+  } while ( err != 0 );
 
   spi_transaction_ext_t t;
 
@@ -174,7 +172,7 @@ static int d_store_relay_to_file( BinaryRelay* b_relay, int addr )
     return -1;
   }
 
-  err = lseek( fd, addr + sizeof( int ) * 4, SEEK_SET );
+  err = lseek( fd, addr + sizeof( int ) * 5, SEEK_SET );
 
   if ( err < 0 )
   {
@@ -233,6 +231,7 @@ int d_reset_hsdir_relay_tree()
   }
 
   hsdir_relay_count = 0;
+  cache_relay_count = 0;
 
   free( b_relay );
 
@@ -867,10 +866,20 @@ static int d_create_hsdir_relay_by_options( OnionRelay* onion_relay, int avl_ind
     if ( file == 1 )
     {
       file_hsdir_relay_count++;
+
+      if ( onion_relay->dir_cache == 1 && onion_relay->dir_port != 0 )
+      {
+        file_cache_relay_count++;
+      }
     }
     else
     {
       hsdir_relay_count++;
+
+      if ( onion_relay->dir_cache == 1 && onion_relay->dir_port != 0 )
+      {
+        cache_relay_count++;
+      }
     }
   }
 
@@ -913,14 +922,14 @@ int d_traverse_hsdir_relays_in_order( BinaryRelay* b_relay, int next_addr, int* 
   int i;
   int root_addr;
 
-  root_addr = avl_roots[avl_index];
+  root_addr = file_avl_roots[avl_index];
 
   // traverse to the next node offset times
   for ( i = 0; i < offset; i++ )
   {
-    if ( hsdir_relay_count == 1 )
+    if ( file_hsdir_relay_count == 1 )
     {
-      if ( d_get_relay_at_address( b_relay, root_addr, 0 ) != 0 )
+      if ( d_get_relay_at_address( b_relay, root_addr, 1 ) != 0 )
       {
         return -1;
       }
@@ -928,7 +937,7 @@ int d_traverse_hsdir_relays_in_order( BinaryRelay* b_relay, int next_addr, int* 
       return 0;
     }
 
-    if ( d_get_relay_at_address( b_relay, next_addr, 0 ) != 0 )
+    if ( d_get_relay_at_address( b_relay, next_addr, 1 ) != 0 )
     {
       return -1;
     }
@@ -1003,16 +1012,16 @@ OnionRelay* px_get_hsdir_relay_by_identity( uint8_t* identity )
 
   b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  next_addr = avl_roots[0];
+  next_addr = file_avl_roots[0];
 
   while ( 1 )
   {
-    if ( d_get_relay_at_address( b_relay, next_addr, 0 ) != 0 )
+    if ( d_get_relay_at_address( b_relay, next_addr, 1 ) != 0 )
     {
       goto fail;
     }
 
-    if ( next_addr == avl_roots[0] )
+    if ( next_addr == file_avl_roots[0] )
     {
       if ( b_relay->avl_blocks[0].parent_addr == 0xffffffff )
       {
@@ -1062,6 +1071,211 @@ fail:
   return NULL;
 }
 
+DoublyLinkedOnionRelayList* px_get_hsdir_relays_by_id_hash( uint8_t* id_hash, int desired_count, int current, DoublyLinkedOnionRelayList* used_relays )
+{
+  int i;
+  int count = 0;
+  int fd;
+  int succ;
+  OnionRelay* onion_relay;
+  DoublyLinkedOnionRelay* db_relay;
+  DoublyLinkedOnionRelay* new_db_relay;
+  DoublyLinkedOnionRelayList* working_list;
+  DoublyLinkedOnionRelayList* greater_list;
+  DoublyLinkedOnionRelayList least_list;
+
+  greater_list = malloc( sizeof( DoublyLinkedOnionRelayList ) );
+  onion_relay = malloc( sizeof( OnionRelay ) );
+
+  memset( greater_list, 0, sizeof( DoublyLinkedOnionRelayList ) );
+  memset( &least_list, 0, sizeof( DoublyLinkedOnionRelayList ) );
+  memset( onion_relay, 0, sizeof( OnionRelay ) );
+
+  fd = open( "/sdcard/hsdir_list", O_RDONLY );
+
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  succ = lseek( fd, sizeof( time_t ), SEEK_SET );
+
+  if ( succ < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to lseek /sdcard/hsdir_relay_tree, errno: %d", errno );
+#endif
+
+    close( fd );
+
+    return -1;
+  }
+
+  while ( 1 )
+  {
+    succ = read( fd, onion_relay, sizeof( OnionRelay ) );
+
+    if ( succ != sizeof( OnionRelay ) )
+    {
+      break;
+    }
+
+    count++;
+
+    //ESP_LOGE( MINITOR_TAG, "or_port: %d", onion_relay->or_port );
+
+    db_relay = used_relays->head;
+
+    while ( db_relay != NULL )
+    {
+      if ( memcmp( db_relay->relay->identity, onion_relay->identity, ID_LENGTH ) == 0 )
+      {
+        break;
+      }
+
+      db_relay = db_relay->next;
+    }
+
+    if ( db_relay != NULL )
+    {
+      continue;
+    }
+
+    if ( current == 1 )
+    {
+      succ = memcmp( onion_relay->id_hash, id_hash, H_LENGTH );
+    }
+    else
+    {
+      succ = memcmp( onion_relay->id_hash_previous, id_hash, H_LENGTH );
+    }
+
+    if ( succ > 0 )
+    {
+      working_list = greater_list;
+    }
+    else if ( greater_list->length < desired_count )
+    {
+      working_list = &least_list;
+    }
+    else
+    {
+      continue;
+    }
+
+    db_relay = working_list->head;
+
+    // find the node i am lower than
+    while ( db_relay != NULL )
+    {
+      if ( current == 1 )
+      {
+        succ = memcmp( onion_relay->id_hash, db_relay->relay->id_hash, H_LENGTH );
+      }
+      else
+      {
+        succ = memcmp( onion_relay->id_hash_previous, db_relay->relay->id_hash_previous, H_LENGTH );
+      }
+
+      if ( succ > 0 )
+      {
+        break;
+      }
+
+      db_relay = db_relay->next;
+    }
+
+    new_db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    memset( new_db_relay, 0, sizeof( DoublyLinkedOnionRelay ) );
+    new_db_relay->relay = onion_relay;
+
+    if ( db_relay == NULL )
+    {
+      v_add_relay_to_list( new_db_relay, working_list );
+    }
+    else
+    {
+      new_db_relay->next = db_relay;
+      new_db_relay->previous = db_relay->previous;
+
+      if ( db_relay->previous != NULL )
+      {
+        db_relay->previous->next = new_db_relay;
+      }
+
+      db_relay->previous = new_db_relay;
+
+      if ( working_list->head == db_relay )
+      {
+        working_list->head = new_db_relay;
+      }
+
+      working_list->length++;
+    }
+
+    if ( working_list->length > desired_count )
+    {
+      working_list->head = working_list->head->next;
+      free( working_list->head->previous->relay );
+      free( working_list->head->previous );
+      working_list->head->previous = NULL;
+      working_list->length--;
+    }
+
+    onion_relay = malloc( sizeof( OnionRelay ) );
+    memset( onion_relay, 0, sizeof( OnionRelay ) );
+  }
+
+  free( onion_relay );
+
+  // merge the two lists, order no loger matters
+  while ( greater_list->length < desired_count && least_list.tail != NULL )
+  {
+    db_relay = least_list.tail;
+
+    least_list.tail = db_relay->previous;
+
+    if ( least_list.tail != NULL )
+    {
+      least_list.tail->next = NULL;
+    }
+
+    least_list.length--;
+
+    v_add_relay_to_list( db_relay, greater_list );
+  }
+
+  while ( least_list.length > 0 )
+  {
+    v_pop_relay_from_list_back( &least_list );
+  }
+
+  if ( succ < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/hsdir_list, errno: %d", errno );
+#endif
+    while ( greater_list->length > 0 )
+    {
+      v_pop_relay_from_list_back( greater_list );
+    }
+
+    free( greater_list );
+
+    return NULL;
+  }
+
+  ESP_LOGE( MINITOR_TAG, "Found %d hsdir relays", count );
+
+  close( fd );
+
+  return greater_list;
+}
+
 OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, int offset, DoublyLinkedOnionRelayList* used_relays, int current )
 {
   int i;
@@ -1083,7 +1297,7 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, int offset, DoublyL
     avl_index = 2;
   }
 
-  root_addr = avl_roots[avl_index];
+  root_addr = file_avl_roots[avl_index];
 
   b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
@@ -1091,7 +1305,7 @@ OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, int offset, DoublyL
 
   while ( 1 )
   {
-    if ( d_get_relay_at_address( b_relay, next_addr, 0 ) != 0 )
+    if ( d_get_relay_at_address( b_relay, next_addr, 1 ) != 0 )
     {
       goto fail;
     }
@@ -1238,9 +1452,9 @@ OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayLis
 
   b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  start_addr = avl_roots[0];
-  previous_addr = avl_roots[0];
-  offset = ( esp_random() % hsdir_relay_count ) + 1;
+  start_addr = file_avl_roots[0];
+  previous_addr = file_avl_roots[0];
+  offset = ( esp_random() % file_hsdir_relay_count ) + 1;
   //offset = random_offset_count;
   //random_offset_count++;
 
@@ -1306,7 +1520,7 @@ fail:
 
 int d_get_hsdir_count()
 {
-  return hsdir_relay_count;
+  return file_hsdir_relay_count;
 }
 
 static int d_update_relay_guard( uint8_t* identity, int guard )
@@ -1317,16 +1531,16 @@ static int d_update_relay_guard( uint8_t* identity, int guard )
 
   b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
 
-  next_addr = avl_roots[0];
+  next_addr = file_avl_roots[0];
 
   while ( 1 )
   {
-    if ( d_get_relay_at_address( b_relay, next_addr, 0 ) != 0 )
+    if ( d_get_relay_at_address( b_relay, next_addr, 1 ) != 0 )
     {
       goto fail;
     }
 
-    if ( next_addr == avl_roots[0] )
+    if ( next_addr == file_avl_roots[0] )
     {
       if ( b_relay->avl_blocks[0].parent_addr == 0xffffffff )
       {
@@ -1362,7 +1576,7 @@ static int d_update_relay_guard( uint8_t* identity, int guard )
     {
       b_relay->relay.is_guard = guard;
 
-      if ( d_store_relay_at_address( b_relay, next_addr, 0 ) != 0 )
+      if ( d_store_relay_at_address( b_relay, next_addr, 1 ) != 0 )
       {
         goto fail;
       }
@@ -1408,7 +1622,7 @@ int d_reset_hsdir_relay_tree_file()
     return -1;
   }
 
-  for ( i = 0; i < sizeof( BinaryRelay ) + sizeof( int ) * 4; i++ )
+  for ( i = 0; i < sizeof( BinaryRelay ) + sizeof( int ) * 5; i++ )
   {
     if ( write( fd, &byte, 1 ) < 0 )
     {
@@ -1422,6 +1636,7 @@ int d_reset_hsdir_relay_tree_file()
   }
 
   file_hsdir_relay_count = 0;
+  file_cache_relay_count = 0;
   file_avl_roots[0] = HSDIR_TREE_ROOT;
   file_avl_roots[1] = HSDIR_TREE_ROOT;
   file_avl_roots[2] = HSDIR_TREE_ROOT;
@@ -1433,12 +1648,13 @@ int d_reset_hsdir_relay_tree_file()
 int d_finalize_hsdir_relays_file()
 {
   int fd;
-  int tree_header[4];
+  int tree_header[5];
 
   tree_header[0] = file_hsdir_relay_count;
-  tree_header[1] = file_avl_roots[0];
-  tree_header[2] = file_avl_roots[1];
-  tree_header[3] = file_avl_roots[2];
+  tree_header[1] = file_cache_relay_count;
+  tree_header[2] = file_avl_roots[0];
+  tree_header[3] = file_avl_roots[1];
+  tree_header[4] = file_avl_roots[2];
 
   fd = open( "/sdcard/hsdir_relay_tree", O_WRONLY );
 
@@ -1451,7 +1667,7 @@ int d_finalize_hsdir_relays_file()
     return -1;
   }
 
-  if ( write( fd, tree_header, sizeof( int ) * 4 ) != sizeof( int ) * 4 )
+  if ( write( fd, tree_header, sizeof( int ) * 5 ) != sizeof( int ) * 5 )
   {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/hsdir_relay_tree, errno: %d", errno );
@@ -1468,7 +1684,7 @@ int d_finalize_hsdir_relays_file()
 int d_load_hsdir_relays_from_file()
 {
   int ret = 0;
-  int tree_header[4];
+  int tree_header[5];
   int err = 0;
   int fd;
   int read_ret;
@@ -1486,7 +1702,7 @@ int d_load_hsdir_relays_from_file()
     return -1;
   }
 
-  read_ret = read( fd, tree_header, sizeof( int ) * 4 );
+  read_ret = read( fd, tree_header, sizeof( int ) * 5 );
 
   if ( read_ret < 0 )
   {
@@ -1508,11 +1724,13 @@ int d_load_hsdir_relays_from_file()
     return -1;
   }
 
-  hsdir_relay_count = tree_header[0];
-  avl_roots[0] = tree_header[1];
-  avl_roots[1] = tree_header[2];
-  avl_roots[2] = tree_header[3];
+  file_hsdir_relay_count = tree_header[0];
+  file_cache_relay_count = tree_header[1];
+  file_avl_roots[0] = tree_header[2];
+  file_avl_roots[1] = tree_header[3];
+  file_avl_roots[2] = tree_header[4];
 
+/*
   tree_scoop = heap_caps_malloc( 4092, MALLOC_CAP_DMA );
 
   do
@@ -1529,14 +1747,11 @@ int d_load_hsdir_relays_from_file()
       goto finish;
     }
 
-    err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
-
-    if ( err != 0 ) {
-      ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus" );
-
-      ret = -1;
-      goto finish;
-    }
+    do
+    {
+      err = spi_device_acquire_bus( issi_spi, portMAX_DELAY );
+      ESP_LOGE( MINITOR_TAG, "Failed to aquire the spi bus, retrying - in d_load_hsdir_relays_from_file" );
+    } while ( err != 0 );
 
     spi_transaction_ext_t t;
 
@@ -1564,10 +1779,10 @@ int d_load_hsdir_relays_from_file()
 
     addr += read_ret;
   } while ( read_ret == 4092 );
+*/
 
-finish:
   close( fd );
-  free( tree_scoop );
+  //free( tree_scoop );
 
   return ret;
 }
@@ -1584,12 +1799,209 @@ int d_create_hsdir_relay_in_file( OnionRelay* onion_relay )
     return -1;
   }
 
-  write_addr = d_create_hsdir_relay_by_options( onion_relay, 1, write_addr, 1 );
+  return 0;
 
-  if ( write_addr < 0 )
+  //write_addr = d_create_hsdir_relay_by_options( onion_relay, 1, write_addr, 1 );
+
+  //if ( write_addr < 0 )
+  //{
+    //return -1;
+  //}
+
+  //return d_create_hsdir_relay_by_options( onion_relay, 2, write_addr, 1 );
+}
+
+int d_get_cache_relay_count()
+{
+  return file_cache_relay_count;
+}
+
+OnionRelay* px_get_dir_cache_relay()
+{
+  int start_addr;
+  int previous_addr;
+  int offset;
+  BinaryRelay* b_relay;
+  OnionRelay* onion_relay;
+
+  b_relay = heap_caps_malloc( sizeof( BinaryRelay ), MALLOC_CAP_DMA );
+
+  start_addr = file_avl_roots[0];
+  previous_addr = file_avl_roots[0];
+  offset = ( esp_random() % file_hsdir_relay_count ) + 1;
+
+  while ( 1 )
   {
+    start_addr = d_traverse_hsdir_relays_in_order( b_relay, start_addr, &previous_addr, offset, 0 );
+
+    offset = 1;
+
+    if ( start_addr < 0 )
+    {
+      goto fail;
+    }
+
+    if ( b_relay->relay.dir_cache == 1 && b_relay->relay.dir_port != 0 )
+    {
+      break;
+    }
+  }
+
+  onion_relay = malloc( sizeof( OnionRelay ) );
+  memcpy( onion_relay, &b_relay->relay, sizeof( OnionRelay ) );
+  free( b_relay );
+
+  return onion_relay;
+
+fail:
+  free( b_relay );
+
+  return NULL;
+}
+
+int d_reset_hsdir_list()
+{
+  int fd;
+  time_t dummy_until = 0;
+
+  fd = open( "/sdcard/hsdir_list", O_CREAT | O_WRONLY | O_TRUNC );
+
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to reset /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
     return -1;
   }
 
-  return d_create_hsdir_relay_by_options( onion_relay, 2, write_addr, 1 );
+  if ( write( fd, &dummy_until, sizeof( time_t )  ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    close( fd );
+
+    return -1;
+  }
+
+  close( fd );
+
+  return 0;
+}
+
+int d_add_hsdir_relay_to_list( OnionRelay* onion_relay )
+{
+  int fd;
+
+  fd = open( "/sdcard/hsdir_list", O_WRONLY | O_APPEND );
+
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  if ( write( fd, onion_relay, sizeof( OnionRelay )  ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    close( fd );
+
+    return -1;
+  }
+
+  if ( close( fd ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int d_get_hsdir_list_valid_until()
+{
+  int fd;
+  time_t valid_until;
+
+  fd = open( "/sdcard/hsdir_list", O_RDONLY );
+
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  if ( read( fd, &valid_until, sizeof( time_t )  ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    close( fd );
+
+    return -1;
+  }
+
+  if ( close( fd ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  return valid_until;
+}
+
+int d_set_hsdir_list_valid_until( time_t valid_until )
+{
+  int fd;
+
+  fd = open( "/sdcard/hsdir_list", O_WRONLY );
+
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  if ( write( fd, &valid_until, sizeof( time_t )  ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    close( fd );
+
+    return -1;
+  }
+
+  if ( close( fd ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/hsdir_list, errno: %d", errno );
+#endif
+
+    return -1;
+  }
+
+  return valid_until;
 }
