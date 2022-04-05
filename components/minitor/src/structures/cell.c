@@ -7,7 +7,8 @@
 //
 // PACK CELL
 //
-unsigned char* pack_and_free( Cell* unpacked_cell ) {
+unsigned char* pack_and_free( Cell* unpacked_cell )
+{
   int i;
   // create a buffer for the packed cell
   unsigned char* packed_cell;
@@ -80,13 +81,15 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
       // pack the length
       pack_two_bytes( &packed_cell, ( (PayloadRelay*)unpacked_cell->payload )->length );
       // pack relay payload
-      pack_relay_payload(
-        &packed_cell,
-        ( (PayloadRelay*)unpacked_cell->payload )->relay_payload,
-        ( (PayloadRelay*)unpacked_cell->payload )->command,
-        ( (PayloadRelay*)unpacked_cell->payload )->length
-        );
-      // TODO may need to encrypt after packing relay payload
+      if ( ( (PayloadRelay*)unpacked_cell->payload )->length > 0 )
+      {
+        pack_relay_payload(
+          &packed_cell,
+          ( (PayloadRelay*)unpacked_cell->payload )->relay_payload,
+          ( (PayloadRelay*)unpacked_cell->payload )->command,
+          ( (PayloadRelay*)unpacked_cell->payload )->length
+          );
+      }
 
       break;
     case DESTROY:
@@ -400,7 +403,8 @@ unsigned char* pack_and_free( Cell* unpacked_cell ) {
   return packed_cell_start;
 }
 
-void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length ) {
+void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned char command, unsigned short payload_length )
+{
   int i;
 
   switch( command ) {
@@ -438,7 +442,6 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
 
       break;
     case RELAY_CONNECTED:
-/*
       pack_buffer(
         packed_cell,
         ( (RelayPayloadConnected*)payload )->address,
@@ -446,7 +449,6 @@ void pack_relay_payload( unsigned char** packed_cell, void* payload, unsigned ch
         );
 
       pack_four_bytes( packed_cell, ( (RelayPayloadConnected*)payload )->time_to_live );
-*/
 
       break;
     case RELAY_SENDME:
@@ -816,13 +818,15 @@ void unpack_and_free( Cell* unpacked_cell, unsigned char* packed_cell, int circ_
       ( (PayloadRelay*) unpacked_cell->payload )->length = unpack_two_bytes( &packed_cell );
 
       // now we need to unpack the relay_payload, nested operation :(
-      // TODO possibly need to decrypt the relay payload before unpacking it
-      ( (PayloadRelay*) unpacked_cell->payload )->relay_payload =
-        unpack_relay_payload(
-          packed_cell,
-          ( (PayloadRelay*) unpacked_cell->payload )->command,
-          ( (PayloadRelay*) unpacked_cell->payload )->length
-        );
+      if ( ( (PayloadRelay*) unpacked_cell->payload )->length > 0 )
+      {
+        ( (PayloadRelay*) unpacked_cell->payload )->relay_payload =
+          unpack_relay_payload(
+            packed_cell,
+            ( (PayloadRelay*) unpacked_cell->payload )->command,
+            ( (PayloadRelay*) unpacked_cell->payload )->length
+          );
+      }
 
       break;
     case DESTROY:
@@ -1523,7 +1527,8 @@ void unpack_buffer_short( unsigned short* buffer, int length, unsigned char** pa
 // FREE CELL
 //
 
-void free_cell( Cell* unpacked_cell ) {
+void free_cell( Cell* unpacked_cell )
+{
   int i;
 
   switch( unpacked_cell->command ) {
@@ -1541,7 +1546,10 @@ void free_cell( Cell* unpacked_cell ) {
     case RELAY:
     case RELAY_EARLY:
       // free the relay payload
-      free_relay_payload( ( (PayloadRelay*)unpacked_cell->payload )->relay_payload, ( (PayloadRelay*)unpacked_cell->payload )->command );
+      if ( ( (PayloadRelay*)unpacked_cell->payload )->length > 0 )
+      {
+        free_relay_payload( ( (PayloadRelay*)unpacked_cell->payload )->relay_payload, ( (PayloadRelay*)unpacked_cell->payload )->command );
+      }
 
       break;
     // nothing to do, no malloc pointers
@@ -1639,14 +1647,16 @@ void free_cell( Cell* unpacked_cell ) {
   }
 
   // free the payload buffer
-  if ( unpacked_cell->payload != NULL ) {
+  if ( unpacked_cell->payload != NULL )
+  {
     free( unpacked_cell->payload );
   }
   // free the cell, may not need to do this if we don't create malloc cells
   // free( unpacked_cell );
 }
 
-void free_relay_payload( void * payload, unsigned char command ) {
+void free_relay_payload( void * payload, unsigned char command )
+{
   int i;
 
   switch ( command ) {
@@ -1665,7 +1675,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
       break;
     case RELAY_CONNECTED:
       // free the address
-      //free( ( (RelayPayloadConnected*)payload )->address );
+      free( ( (RelayPayloadConnected*)payload )->address );
 
       break;
     case RELAY_SENDME:
@@ -1812,10 +1822,7 @@ void free_relay_payload( void * payload, unsigned char command ) {
       break;
   }
 
-  if ( command != RELAY_CONNECTED )
-  {
-    free( payload );
-  }
+  free( payload );
 }
 
 void v_free_introduce_2_data( DecryptedIntroduce2* unpacked_data ) {

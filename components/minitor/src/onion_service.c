@@ -1774,6 +1774,8 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
     ESP_LOGE( MINITOR_TAG, "Didn't get RELAY_CONNECTED back" );
 #endif
 
+    free_cell( &unpacked_cell );
+
     return -1;
   }
 
