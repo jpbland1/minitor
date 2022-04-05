@@ -26,7 +26,18 @@ uint8_t fastest_identity[ID_LENGTH];
 
 QueueHandle_t insert_relays_queue;
 
-static int d_parse_date_string( char* date_string ) {
+typedef struct FetchDescriptorState
+{
+  OnionRelay relays[3];
+  int num_relays;
+  int sock_fd;
+  int using_cache_relay;
+  uint8_t cache_identity[ID_LENGTH];
+  uint64_t start;
+} FetchDescriptorState;
+
+static int d_parse_date_string( char* date_string )
+{
   struct tm tmp_time;
 
   tmp_time.tm_year = atoi( date_string ) - 1900;
@@ -39,7 +50,8 @@ static int d_parse_date_string( char* date_string ) {
   return mktime( &tmp_time );
 }
 
-static void v_ipv4_to_string( unsigned int address, char* string ) {
+static void v_ipv4_to_string( unsigned int address, char* string )
+{
   int i;
   int length = 0;
   int tmp_length = 0;
@@ -68,6 +80,386 @@ static void v_ipv4_to_string( unsigned int address, char* string ) {
   string[length] = 0;
 }
 
+static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr_str, uint8_t* out_identity )
+{
+  int i;
+  int ret = 0;
+  char* authority_string;
+  OnionRelay* cache_relay;
+
+  if ( d_get_cache_relay_count() == 0 )
+  {
+    i = esp_random() % tor_authorities_count;
+
+    authority_string = tor_authorities[i];
+
+    for ( i = 0; i < strlen( authority_string ); i++ )
+    {
+      if ( authority_string[i] == '=' )
+      {
+        //ESP_LOGE( MINITOR_TAG, "Got port: %d", atoi( authority_string + i + 1 ) );
+        dest_addr->sin_port = htons( atoi( authority_string + i + 1 ) );
+        break;
+      }
+      else if ( authority_string[i] == ' ' )
+      {
+        memcpy( ip_addr_str, authority_string, i );
+        ip_addr_str[i] = 0;;
+        //ESP_LOGE( MINITOR_TAG, "Got ip: %s", ip_addr_str );
+      }
+    }
+  }
+  else
+  {
+    if ( fetch_speed_sample >= 30 )
+    {
+      cache_relay = px_get_hsdir_relay_by_identity( fastest_identity );
+      ret = 2;
+    }
+    else
+    {
+      cache_relay = px_get_dir_cache_relay();
+      ret = 1;
+    }
+
+    if ( cache_relay == NULL )
+    {
+      return -1;
+    }
+
+    //ESP_LOGE( MINITOR_TAG, "\n\nUSING CACHE %d FOR DIR", cache_relay->dir_port );
+
+    if ( out_identity != NULL )
+    {
+      memcpy( out_identity, cache_relay->identity, ID_LENGTH );
+    }
+
+    v_ipv4_to_string( cache_relay->address, ip_addr_str );
+    dest_addr->sin_port = htons( cache_relay->dir_port );
+
+    free( cache_relay );
+  }
+
+  dest_addr->sin_addr.s_addr = inet_addr( ip_addr_str );
+  dest_addr->sin_family = AF_INET;
+
+  return ret;
+}
+
+// split up the fetch task, start should make the request and then peace out,
+// let d_finish_descriptor_fetch actually recv the descriptors
+static int d_start_descriptor_fetch( FetchDescriptorState* fetch_state )
+{
+  int ret = 0;
+  const char* REQUEST_FMT = "GET /tor/server/d/%s%s%s HTTP/1.0\r\n"
+      "Host: %s\r\n"
+      "User-Agent: esp-idf/1.0 esp3266\r\n"
+      "\r\n";
+  char REQUEST[230];
+  char ip_addr_str[16];
+  struct sockaddr_in dest_addr;
+
+  int i;
+  int j;
+  int err;
+
+  fetch_state->using_cache_relay = d_get_suitable_dir_addr( &dest_addr, ip_addr_str, fetch_state->cache_identity );
+
+  if ( fetch_state->using_cache_relay < 0 )
+  {
+    return -1;
+  }
+
+  switch ( fetch_state->num_relays )
+  {
+    case 1:
+      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "", "", ip_addr_str );
+      break;
+    case 2:
+      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", "", ip_addr_str );
+      break;
+    case 3:
+      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", ip_addr_str );
+      break;
+  }
+
+  for ( i = 0; i < fetch_state->num_relays; i++ )
+  {
+    for ( j = 0; j < 20; j++ )
+    {
+      if ( fetch_state->relays[i].digest[j] >> 4 < 10 )
+      {
+        REQUEST[18 + 2 * j + i * 41] = 48 + ( fetch_state->relays[i].digest[j] >> 4 );
+      }
+      else
+      {
+        REQUEST[18 + 2 * j + i * 41] = 65 + ( ( fetch_state->relays[i].digest[j] >> 4 ) - 10 );
+      }
+
+      if ( ( fetch_state->relays[i].digest[j] & 0x0f ) < 10  )
+      {
+        REQUEST[18 + 2 * j + 1 + i * 41] = 48 + ( fetch_state->relays[i].digest[j] & 0x0f );
+      }
+      else
+      {
+        REQUEST[18 + 2 * j + 1 + i * 41] = 65 + ( ( fetch_state->relays[i].digest[j] & 0x0f ) - 10 );
+      }
+    }
+  }
+
+  //ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
+
+  fetch_state->start = esp_timer_get_time();
+
+  // create a socket to access the descriptor
+  fetch_state->sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
+
+  if ( fetch_state->sock_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
+#endif
+
+    return -1;
+  }
+
+  // connect the socket to the dir server address
+  err = connect( fetch_state->sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
+
+  if ( err != 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
+#endif
+
+    goto fail;
+  }
+
+  // send the http request to the dir server
+  err = send( fetch_state->sock_fd, REQUEST, strlen( REQUEST ), 0 );
+
+  if ( err < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
+#endif
+
+    goto fail;
+  }
+
+  return 0;
+
+fail:
+  shutdown( fetch_state->sock_fd, 0 );
+  close( fetch_state->sock_fd );
+
+  return -1;
+}
+
+static int d_finish_descriptor_fetch( FetchDescriptorState* fetch_state )
+{
+  int i;
+  int j;
+  int ret = 0;
+  int rx_length = 0;
+  char rx_buffer[512];
+  int end_header = 0;
+  int relays_set = 0;
+  int matched_relay = 0;
+  uint64_t end;
+
+  const char* master_key = "\nmaster-key-ed25519 ";
+  int master_key_found = 0;
+  char master_key_64[43] = { 0 };
+  int master_key_64_length = 0;
+
+  const char* ntor_onion_key = "\nntor-onion-key ";
+  int ntor_onion_key_found = 0;
+  char ntor_onion_key_64[43] = { 0 };
+  int ntor_onion_key_64_length = 0;
+
+  const char* signing_key = "\nsigning-key\n-----BEGIN RSA PUBLIC KEY-----\n";
+  int signing_key_found = 0;
+  char signing_key_64[187] = { 0 };
+  int signing_key_64_length = 0;
+  uint8_t der[141];
+  uint8_t identity_digest[ID_LENGTH];
+  Sha tmp_sha;
+
+  wc_InitSha( &tmp_sha );
+
+  // keep reading forever, we will break inside when the transfer is over
+  while ( relays_set < fetch_state->num_relays )
+  {
+    // recv data from the destination and fill the rx_buffer with the data
+    rx_length = recv( fetch_state->sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
+
+    // if we got less than 0 we encoutered an error
+    if ( rx_length < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
+#endif
+
+      ret = -1;
+      goto finish;
+    // we got 0 bytes back then the connection closed and we're done getting
+    // consensus data
+    }
+    else if ( rx_length == 0 )
+    {
+      break;
+    }
+
+    // iterate over each byte we got back from the socket recv
+    // NOTE that we can't rely on all the data being there, we
+    // have to treat each byte as though we only have that byte
+    for ( i = 0; i < rx_length && relays_set < fetch_state->num_relays; i++ )
+    {
+      // skip over the http header, when we get two \r\n s in a row we
+      // know we're at the end
+      if ( end_header < 4 )
+      {
+        // increment end_header whenever we get part of a carrage retrun
+        if ( rx_buffer[i] == '\r' || rx_buffer[i] == '\n' )
+        {
+          end_header++;
+        // otherwise reset the count
+        }
+        else
+        {
+          end_header = 0;
+        }
+      // if we have 4 end_header we're onto the actual data
+      }
+      else
+      {
+        if ( ntor_onion_key_found != -1 )
+        {
+          if ( ntor_onion_key_found == strlen( ntor_onion_key ) )
+          {
+            ntor_onion_key_64[ntor_onion_key_64_length] = rx_buffer[i];
+            ntor_onion_key_64_length++;
+
+            if ( ntor_onion_key_64_length == 43 )
+            {
+              ntor_onion_key_found = -1;
+            }
+          }
+          else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] )
+          {
+            ntor_onion_key_found++;
+          }
+          else
+          {
+            ntor_onion_key_found = 0;
+          }
+        }
+
+        if ( master_key_found != -1 )
+        {
+          if ( master_key_found == strlen( master_key ) )
+          {
+            master_key_64[master_key_64_length] = rx_buffer[i];
+            master_key_64_length++;
+
+            if ( master_key_64_length == 43 )
+            {
+              master_key_found = -1;
+            }
+          }
+          else if ( rx_buffer[i] == master_key[master_key_found] )
+          {
+            master_key_found++;
+          }
+          else
+          {
+            master_key_found = 0;
+          }
+        }
+
+        if ( signing_key_found != -1 )
+        {
+          if ( signing_key_found == strlen( signing_key ) )
+          {
+            if ( rx_buffer[i] != '\n' )
+            {
+              signing_key_64[signing_key_64_length] = rx_buffer[i];
+              signing_key_64_length++;
+            }
+
+            if ( signing_key_64_length == 187 )
+            {
+              v_base_64_decode( der, signing_key_64, 187 );
+              wc_ShaUpdate( &tmp_sha, der, 140 );
+              wc_ShaFinal( &tmp_sha, identity_digest );
+
+              for ( j = 0; j < fetch_state->num_relays; j++ )
+              {
+                if ( memcmp( identity_digest, fetch_state->relays[j].identity, ID_LENGTH ) == 0 )
+                {
+                  matched_relay = j;
+                  break;
+                }
+              }
+              signing_key_found = -1;
+            }
+          }
+          else if ( rx_buffer[i] == signing_key[signing_key_found] )
+          {
+            signing_key_found++;
+          }
+          else
+          {
+            signing_key_found = 0;
+          }
+        }
+
+        if ( master_key_found == -1 && ntor_onion_key_found == -1 && signing_key_found == -1 )
+        {
+          v_base_64_decode( fetch_state->relays[matched_relay].ntor_onion_key, ntor_onion_key_64, 43 );
+          v_base_64_decode( fetch_state->relays[matched_relay].master_key, master_key_64, 43 );
+
+          relays_set++;
+          master_key_64_length = 0;
+          master_key_found = 0;
+          ntor_onion_key_64_length = 0;
+          ntor_onion_key_found = 0;
+          signing_key_64_length = 0;
+          signing_key_found = 0;
+        }
+      }
+    }
+  }
+
+finish:
+  wc_ShaFree( &tmp_sha );
+
+  shutdown( fetch_state->sock_fd, 0 );
+  close( fetch_state->sock_fd );
+
+  end = esp_timer_get_time();
+
+  if ( ret < 0 && fetch_state->using_cache_relay == 2 )
+  {
+    fetch_speed_sample = 0;
+    fastest_fetch_time = 0xffffffffffffffff;
+  }
+  else if ( fetch_state->using_cache_relay == 1 )
+  {
+    fetch_speed_sample++;
+
+    if ( end - fetch_state->start < fastest_fetch_time )
+    {
+      fastest_fetch_time = end - fetch_state->start;
+      memcpy( fastest_identity, fetch_state->cache_identity, ID_LENGTH );
+    }
+  }
+
+  return ret;
+}
+
+/*
 static int d_fetch_descriptor_info( OnionRelay* relays, int num_relays )
 {
   const char* REQUEST_FMT = "GET /tor/server/d/%s%s%s HTTP/1.0\r\n"
@@ -76,7 +468,6 @@ static int d_fetch_descriptor_info( OnionRelay* relays, int num_relays )
       "\r\n";
   char REQUEST[230];
   char ip_addr_str[16];
-  char* authority_string;
 
   const char* master_key = "\nmaster-key-ed25519 ";
   int master_key_found = 0;
@@ -110,55 +501,15 @@ static int d_fetch_descriptor_info( OnionRelay* relays, int num_relays )
   // buffer thath holds data returned from the socket
   char rx_buffer[512];
   struct sockaddr_in dest_addr;
-  OnionRelay* cache_relay = NULL;
   uint64_t start;
   uint64_t end;
-  int using_fastest = 0;
+  int using_cache_relay;
 
-  if ( d_get_cache_relay_count() == 0 )
+  using_cache_relay = d_get_suitable_dir_relay( &dest_addr, ip_addr_str, cache_identity );
+
+  if ( using_cache_relay < 0 )
   {
-    i = esp_random() % tor_authorities_count;
-    //ESP_LOGE( MINITOR_TAG, "\n\nUSING AUTHORITIES FOR DIR" );
-
-    authority_string = tor_authorities[i];
-
-    for ( i = 0; i < strlen( authority_string ); i++ )
-    {
-      if ( authority_string[i] == '=' )
-      {
-        //ESP_LOGE( MINITOR_TAG, "Got port: %d", atoi( authority_string + i + 1 ) );
-        dest_addr.sin_port = htons( atoi( authority_string + i + 1 ) );
-        break;
-      }
-      else if ( authority_string[i] == ' ' )
-      {
-        memcpy( ip_addr_str, authority_string, i );
-        ip_addr_str[i] = 0;;
-        //ESP_LOGE( MINITOR_TAG, "Got ip: %s", ip_addr_str );
-      }
-    }
-  }
-  else
-  {
-    if ( fetch_speed_sample >= 30 )
-    {
-      cache_relay = px_get_hsdir_relay_by_identity( fastest_identity );
-      using_fastest = 1;
-    }
-    else
-    {
-      cache_relay = px_get_dir_cache_relay();
-    }
-
-    if ( cache_relay == NULL )
-    {
-      return -1;
-    }
-
-    //ESP_LOGE( MINITOR_TAG, "\n\nUSING CACHE %d FOR DIR", cache_relay->dir_port );
-
-    v_ipv4_to_string( cache_relay->address, ip_addr_str );
-    dest_addr.sin_port = htons( cache_relay->dir_port );
+    return -1;
   }
 
   switch ( num_relays )
@@ -173,10 +524,6 @@ static int d_fetch_descriptor_info( OnionRelay* relays, int num_relays )
       sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", ip_addr_str );
       break;
   }
-
-  dest_addr.sin_addr.s_addr = inet_addr( ip_addr_str );
-
-  dest_addr.sin_family = AF_INET;
 
   start = esp_timer_get_time();
 
@@ -414,7 +761,7 @@ finish:
       fastest_fetch_time = 0xffffffffffffffff;
     }
   }
-  else if ( cache_relay != NULL )
+  else if ( using_cache_relay == 1 )
   {
     if ( using_fastest == 0 )
     {
@@ -424,14 +771,13 @@ finish:
     if ( end - start < fastest_fetch_time )
     {
       fastest_fetch_time = end - start;
-      memcpy( fastest_identity, cache_relay->identity, ID_LENGTH );
+      memcpy( fastest_identity, cache_identity, ID_LENGTH );
     }
-
-    free( cache_relay );
   }
 
   return ret;
 }
+*/
 
 // TODO handle http errors
 static int d_download_consensus()
@@ -516,48 +862,12 @@ static int d_download_consensus()
   close( fd );
 #endif
 
-  if ( d_get_cache_relay_count() == 0 )
+  if ( d_get_suitable_dir_addr( &dest_addr, ip_addr_str, NULL ) < 0 )
   {
-    i = esp_random() % tor_authorities_count;
-    ESP_LOGE( MINITOR_TAG, "\n\nUSING AUTHORITIES FOR DIR" );
-
-    authority_string = tor_authorities[i];
-
-    for ( i = 0; i < strlen( authority_string ); i++ )
-    {
-      if ( authority_string[i] == '=' )
-      {
-        ESP_LOGE( MINITOR_TAG, "Got port: %d", atoi( authority_string + i + 1 ) );
-        dest_addr.sin_port = htons( atoi( authority_string + i + 1 ) );
-        break;
-      }
-      else if ( authority_string[i] == ' ' )
-      {
-        memcpy( ip_addr_str, authority_string, i );
-        ip_addr_str[i] = 0;;
-        ESP_LOGE( MINITOR_TAG, "Got ip: %s", ip_addr_str );
-      }
-    }
-  }
-  else
-  {
-    cache_relay = px_get_dir_cache_relay();
-
-    if ( cache_relay == NULL )
-    {
-      return -1;
-    }
-
-    ESP_LOGE( MINITOR_TAG, "\n\nUSING CACHE %d FOR DIR", cache_relay->dir_port );
-
-    v_ipv4_to_string( cache_relay->address, ip_addr_str );
-    dest_addr.sin_port = htons( cache_relay->dir_port );
-
-    free( cache_relay );
+    return -1;
   }
 
   sprintf( REQUEST, REQUEST_FMT, ip_addr_str );
-  dest_addr.sin_addr.s_addr = inet_addr( ip_addr_str );
 
   // buffer that holds data returned from the socket
   rx_buffer = malloc( sizeof( char ) * 4092 );
@@ -980,40 +1290,26 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
     //v_get_id_hash( onion_relay->master_key, onion_relay->id_hash_previous, working_consensus->time_period, working_consensus->hsdir_interval, working_consensus->shared_rand );
     v_get_id_hash( onion_relay->master_key, onion_relay->id_hash, working_consensus->time_period + 1, working_consensus->hsdir_interval, working_consensus->shared_rand );
 
-    //if ( hsdir_tree_occupied == 0 )
-    //{
-      //if ( d_create_hsdir_relay( onion_relay ) < 0 )
-      //{
-        //ESP_LOGE( MINITOR_TAG, "Failed to insert into issi, quiting without giving" );
-        //vTaskDelete( NULL );
-      //}
-    //}
-    //else
-    //{
 #ifdef MINITOR_CHUTNEY
-      if ( d_get_hsdir_count() <= 10 )
+    if ( d_get_hsdir_count() <= 10 )
 #else
-      if ( d_get_hsdir_count() <= 100 && onion_relay->suitable == 1 )
+    if ( d_get_hsdir_count() <= 100 && onion_relay->suitable == 1 )
 #endif
+    {
+      if ( d_create_hsdir_relay_in_file( onion_relay ) < 0 )
       {
-        if ( d_create_hsdir_relay_in_file( onion_relay ) < 0 )
-        {
-          ESP_LOGE( MINITOR_TAG, "Failed to insert into file, quiting without giving" );
-          vTaskDelete( NULL );
-        }
-      }
-
-      if ( d_add_hsdir_relay_to_list( onion_relay ) < 0 )
-      {
-        ESP_LOGE( MINITOR_TAG, "Failed to add to list" );
+        ESP_LOGE( MINITOR_TAG, "Failed to insert into file, quiting without giving" );
         vTaskDelete( NULL );
       }
-    //}
+    }
+
+    if ( d_add_hsdir_relay_to_list( onion_relay ) < 0 )
+    {
+      ESP_LOGE( MINITOR_TAG, "Failed to add to list" );
+      vTaskDelete( NULL );
+    }
 
     free( onion_relay );
-#ifdef DEBUG_MINITOR
-    //ESP_LOGE( MINITOR_TAG, "Finished Processing" );
-#endif
   }
 }
 
@@ -1023,13 +1319,24 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
   time_t tp_start_time;
   int valid_delay;
   int i = 0;
+  int j;
   int fd;
   int ret = 0;
   int voting_interval;
-  OnionRelay canidate_relays[3];
-  //OnionRelay canidate_relay;
+  FetchDescriptorState fetch_states[3];
   OnionRelay* tmp_relay;
-  int num_relays = 0;
+  struct pollfd fetch_poll[3];
+  int final_relay_hit = 0;
+  int parse_succ;
+  int poll_succ;
+  int running_fetches = 0;
+
+  memset( fetch_states, 0, sizeof( fetch_states ) );
+
+  for ( i = 0; i < 3; i++ )
+  {
+    fetch_poll[i].fd = -1;
+  }
 
   if ( ( fd = open( "/sdcard/consensus", O_RDONLY ) ) < 0 )
   {
@@ -1092,15 +1399,9 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
       memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
       memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
 
-      //if ( hsdir_tree_occupied == 1 )
-      //{
-        //ret = d_load_hsdir_relays_from_file();
-      //}
-
       xSemaphoreGive( network_consensus_mutex );
       // END mutex for the network consensus
 
-      //hsdir_tree_occupied = 1;
       next_network_consensus = NULL;
     }
 
@@ -1108,22 +1409,11 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
   }
 #endif
 
-  //if ( hsdir_tree_occupied == 0 )
-  //{
-    //if ( d_reset_hsdir_relay_tree() < 0 )
-    //{
-      //ret = -1;
-      //goto finish;
-    //}
-  //}
-  //else
-  //{
-    if ( d_reset_hsdir_relay_tree_file() < 0 )
-    {
-      ret = -1;
-      goto finish;
-    }
-  //}
+  if ( d_reset_hsdir_relay_tree_file() < 0 )
+  {
+    ret = -1;
+    goto finish;
+  }
 
   if ( d_reset_hsdir_list() < 0 )
   {
@@ -1133,7 +1423,8 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
 
   (*result_network_consensus)->time_period = d_get_hs_time_period( (*result_network_consensus)->fresh_until, (*result_network_consensus)->valid_after, (*result_network_consensus)->hsdir_interval );
 
-  insert_relays_queue = xQueueCreate( 6, sizeof( OnionRelay* ) );
+  // sizeof pointer, not the actual struct
+  insert_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
 
   xTaskCreatePinnedToCore(
     v_handle_crypto_and_insert,
@@ -1145,53 +1436,106 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
     1
   );
 
-  memset( canidate_relays, 0, sizeof( canidate_relays ) );
-
   do
   {
-    //memset( &canidate_relay, 0, sizeof( canidate_relay ) );
-
-    ret = d_parse_single_relay( fd, &canidate_relays[num_relays] );
-    //ret = d_parse_single_relay( fd, &canidate_relay );
-
-    if ( ret >= 0 )
-    //if ( ret == 0 )
+    for ( i = 0; i < 3; i++ )
     {
-      if ( canidate_relays[num_relays].hsdir == 1 )
-      //if ( canidate_relay.hsdir == 1 )
+      if ( fetch_states[i].num_relays < 3 )
       {
-        if ( ret == 0 )
+        break;
+      }
+    }
+
+    // parse a relay, add it to the available fetch we found
+    if ( i < 3 && final_relay_hit == 0 )
+    {
+      parse_succ = d_parse_single_relay( fd, &fetch_states[i].relays[fetch_states[i].num_relays] );
+
+      // we either have a new relay or have hit the last relay and need to run our free fetch with the 1-2 relays in it
+      if ( parse_succ >= 0 )
+      {
+        if ( fetch_states[i].relays[fetch_states[i].num_relays].hsdir == 1 || parse_succ != 0 )
         {
-          num_relays++;
+          // got a new relay, increment num_relays
+          if ( parse_succ == 0 )
+          {
+            fetch_states[i].num_relays++;
+          }
+          else
+          {
+            final_relay_hit = 1;
+          }
+
+          // we either have 3 or have more than 1 and hit the final relay in consensus where ret != 0
+          if ( fetch_states[i].num_relays == 3 || ( final_relay_hit == 1 && fetch_states[i].num_relays > 0 ) )
+          {
+            while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
+            {
+              ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+            }
+
+            fetch_poll[i].fd = fetch_states[i].sock_fd;
+            fetch_poll[i].events = POLLIN;
+            running_fetches++;
+          }
         }
+      }
+      else
+      {
+        goto finish;
+      }
+    }
 
-        if ( num_relays == 3 || ( ret != 0 && num_relays > 0 ) )
+    // if we hit the final relay or have no more fetches to fill, wait forever
+    if ( final_relay_hit == 1 || i >= 3 )
+    {
+      poll_succ = poll( fetch_poll, 3, -1 );
+    }
+    // otherwise just peek so we can keep on building fetches
+    else
+    {
+      poll_succ = poll( fetch_poll, 3, 0 );
+    }
+
+    if ( poll_succ > 0 )
+    {
+      for ( i = 0; i < 3; i++ )
+      {
+        if ( ( fetch_poll[i].revents & POLLIN ) == POLLIN )
         {
-          while ( d_fetch_descriptor_info( canidate_relays, num_relays ) < 0 )
-          //while ( d_fetch_descriptor_info( &canidate_relay ) < 0 )
+          // we're going to assume that once a socket is ready to read, we can read the entire thing
+          if ( d_finish_descriptor_fetch( &fetch_states[i] ) < 0 )
           {
-            ESP_LOGE( MINITOR_TAG, "Failed to fetch canidate descriptor, retrying: %d", num_relays );
-          }
+            ESP_LOGE( MINITOR_TAG, "Failed to finish fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
 
-          for ( i = 0; i < num_relays; i++ )
+            while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
+            {
+              ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+            }
+
+            fetch_poll[i].fd = fetch_states[i].sock_fd;
+            fetch_poll[i].events = POLLIN;
+          }
+          else
           {
-            tmp_relay = malloc( sizeof( OnionRelay ) );
+            // send the fetched relays off to the insert task
+            for ( j = 0; j < fetch_states[i].num_relays; j++ )
+            {
+              tmp_relay = malloc( sizeof( OnionRelay ) );
 
-            memcpy( tmp_relay, &canidate_relays[i], sizeof( OnionRelay ) );
-            //memcpy( tmp_relay, &canidate_relay, sizeof( OnionRelay ) );
-            xQueueSendToBack( insert_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
+              memcpy( tmp_relay, &fetch_states[i].relays[j], sizeof( OnionRelay ) );
+              //memcpy( tmp_relay, &canidate_relay, sizeof( OnionRelay ) );
+              xQueueSendToBack( insert_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
+            }
+
+            fetch_poll[i].fd = -1;
+            memset( &fetch_states[i], 0, sizeof( FetchDescriptorState ) );
+            running_fetches--;
           }
-
-          num_relays = 0;
-          memset( canidate_relays, 0, sizeof( canidate_relays ) );
         }
       }
     }
-    else if ( ret < 0 )
-    {
-      goto finish;
-    }
-  } while ( ret == 0 );
+  } while ( final_relay_hit == 0 || running_fetches > 0 );
 
   tmp_relay = NULL;
   xQueueSendToBack( insert_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
@@ -1214,32 +1558,28 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
   ret = 0;
   valid_delay = 0;
 
-  //if ( hsdir_tree_occupied == 1 )
-  //{
-    if ( d_finalize_hsdir_relays_file() < 0 || d_set_hsdir_list_valid_until( (*result_network_consensus)->valid_until ) < 0 )
-    {
-      ret = -1;
-      goto finish;
-    }
+  if ( d_finalize_hsdir_relays_file() < 0 || d_set_hsdir_list_valid_until( (*result_network_consensus)->valid_until ) < 0 )
+  {
+    ret = -1;
+    goto finish;
+  }
 
-    time( &now );
+  time( &now );
 
-    if ( (*result_network_consensus)->valid_after > now )
-    {
-      valid_delay = 1000 * ( (*result_network_consensus)->valid_after - now ) / portTICK_PERIOD_MS;
-    }
+  if ( (*result_network_consensus)->valid_after > now )
+  {
+    valid_delay = 1000 * ( (*result_network_consensus)->valid_after - now ) / portTICK_PERIOD_MS;
+  }
 
-    if ( valid_delay != 0 )
-    {
-      ESP_LOGE( MINITOR_TAG, "Triggering consensus switch in %lu seconds", ( (*result_network_consensus)->valid_after - now ) );
-      next_network_consensus = *result_network_consensus;
+  if ( valid_delay != 0 )
+  {
+    ESP_LOGE( MINITOR_TAG, "Triggering consensus switch in %lu seconds", ( (*result_network_consensus)->valid_after - now ) );
+    next_network_consensus = *result_network_consensus;
 
-      xTimerChangePeriod( consensus_valid_timer, valid_delay, portMAX_DELAY );
-      xTimerStart( consensus_valid_timer, portMAX_DELAY );
-    }
-  //}
+    xTimerChangePeriod( consensus_valid_timer, valid_delay, portMAX_DELAY );
+    xTimerStart( consensus_valid_timer, portMAX_DELAY );
+  }
 
-  //if ( valid_delay == 0 || hsdir_tree_occupied == 0 )
   if ( valid_delay == 0 )
   {
     // BEGIN mutex for the network consensus
@@ -1253,15 +1593,9 @@ static int d_parse_downloaded_consensus( NetworkConsensus** result_network_conse
     memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
     memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
 
-    //if ( hsdir_tree_occupied == 1 )
-    //{
-      //ret = d_load_hsdir_relays_from_file();
-    //}
-
     xSemaphoreGive( network_consensus_mutex );
     // END mutex for the network consensus
 
-    //hsdir_tree_occupied = 1;
     next_network_consensus = NULL;
   }
 
