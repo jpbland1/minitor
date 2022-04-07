@@ -1917,14 +1917,7 @@ int d_add_hsdir_relay_to_list( OnionRelay* onion_relay )
     return -1;
   }
 
-  if ( close( fd ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/hsdir_list, errno: %d", errno );
-#endif
-
-    return -1;
-  }
+  close( fd );
 
   return 0;
 }

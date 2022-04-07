@@ -24,6 +24,7 @@ int fetch_speed_sample = 0;
 uint64_t fastest_fetch_time = 0xffffffffffffffff;
 uint8_t fastest_identity[ID_LENGTH];
 
+SemaphoreHandle_t fastest_cache_mutex;
 QueueHandle_t insert_relays_queue;
 QueueHandle_t fetch_relays_queue;
 
@@ -43,17 +44,6 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
   Sha3 reusable_sha3;
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
-
-  /*
-  {
-    ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
-    ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
-    ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
-    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
-    ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
-    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
-  }
-  */
 
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"node-idx", strlen( "node-idx" ) );
   wc_Sha3_256_Update( &reusable_sha3, identity, H_LENGTH );
@@ -92,8 +82,18 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
 
   wc_Sha3_256_Final( &reusable_sha3, id_hash );
 
+
+  if ( identity[0] == 0xee && identity[1] == 0xef && identity[2] == 0xb7 && identity[3] == 0x52 )
   {
-    //ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
+    {
+      ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
+      ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
+      ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
+      ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
+      ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
+      ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
+      ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
+    }
   }
 
   wc_Sha3_256_Free( &reusable_sha3 );
@@ -102,6 +102,7 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
 static void v_handle_crypto_and_insert( void* pv_parameters )
 {
   int process_count = 0;
+  int shutdown_count = 0;
   OnionRelay* onion_relay;
   NetworkConsensus* working_consensus = (NetworkConsensus*)pv_parameters;
 
@@ -110,35 +111,44 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
 
   while ( xQueueReceive( insert_relays_queue, &onion_relay, portMAX_DELAY ) )
   {
+
+    if ( onion_relay == NULL )
+    {
+      shutdown_count++;
+
+      if ( shutdown_count >= 2 )
+      {
+        ESP_LOGE( MINITOR_TAG, "%d total relays processed", process_count );
+        xSemaphoreGive( crypto_insert_finish );
+        // MUTEX GIVE
+        vTaskDelete( NULL );
+      }
+
+      continue;
+    }
+    else
+    {
 #ifdef DEBUG_MINITOR
 #ifdef MINITOR_CHUTNEY
       ESP_LOGE( MINITOR_TAG, "%d relays processed so far", process_count );
 #else
-    if ( process_count % 50 == 0 )
-    {
-      ESP_LOGE( MINITOR_TAG, "%d relays processed so far", process_count );
-    }
+      if ( process_count % 50 == 0 )
+      {
+        ESP_LOGE( MINITOR_TAG, "%d relays processed so far", process_count );
+      }
 #endif
 
-    process_count++;
+      process_count++;
 #endif
-
-    if ( onion_relay == NULL )
-    {
-      ESP_LOGE( MINITOR_TAG, "Got a null, quiting" );
-      xSemaphoreGive( crypto_insert_finish );
-      // MUTEX GIVE
-      vTaskDelete( NULL );
     }
 
     v_get_id_hash( onion_relay->master_key, onion_relay->id_hash_previous, working_consensus->time_period, working_consensus->hsdir_interval, working_consensus->previous_shared_rand );
-    //v_get_id_hash( onion_relay->master_key, onion_relay->id_hash_previous, working_consensus->time_period, working_consensus->hsdir_interval, working_consensus->shared_rand );
     v_get_id_hash( onion_relay->master_key, onion_relay->id_hash, working_consensus->time_period + 1, working_consensus->hsdir_interval, working_consensus->shared_rand );
 
 #ifdef MINITOR_CHUTNEY
     if ( d_get_hsdir_count() <= 10 )
 #else
-    if ( d_get_hsdir_count() <= 100 && onion_relay->suitable == 1 )
+    if ( d_get_hsdir_count() <= 50 && onion_relay->suitable == 1 )
 #endif
     {
       if ( d_create_hsdir_relay_in_file( onion_relay ) < 0 )
@@ -219,6 +229,9 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
   }
   else
   {
+    // MUTEX TAKE
+    xSemaphoreTake( fastest_cache_mutex, portMAX_DELAY );
+
     if ( fetch_speed_sample >= 30 )
     {
       cache_relay = px_get_hsdir_relay_by_identity( fastest_identity );
@@ -229,6 +242,9 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
       cache_relay = px_get_dir_cache_relay();
       ret = 1;
     }
+
+    xSemaphoreGive( fastest_cache_mutex );
+    // MUTEX GIVE
 
     if ( cache_relay == NULL )
     {
@@ -548,6 +564,9 @@ finish:
 
   end = esp_timer_get_time();
 
+  // MUTEX TAKE
+  xSemaphoreTake( fastest_cache_mutex, portMAX_DELAY );
+
   if ( ret < 0 && fetch_state->using_cache_relay == 2 )
   {
     fetch_speed_sample = 0;
@@ -564,6 +583,9 @@ finish:
     }
   }
 
+  xSemaphoreGive( fastest_cache_mutex );
+  // MUTEX GIVE
+
   return ret;
 }
 
@@ -571,17 +593,19 @@ static void v_handle_relay_fetch( void* pv_parameters )
 {
   int i;
   int j;
-  int succ;
+  int succ = pdFALSE;
   OnionRelay* onion_relay;
   NetworkConsensus* working_consensus = (NetworkConsensus*)pv_parameters;
-  FetchDescriptorState fetch_states[3];
-  struct pollfd fetch_poll[3];
+  FetchDescriptorState fetch_states[2];
+  struct pollfd fetch_poll[2];
   int running_fetches = 0;
   int final_relay_hit = 0;
+  int waiting_relay = 0;
+  int relays_fetched = 0;
 
   memset( fetch_states, 0, sizeof( fetch_states ) );
 
-  for ( i = 0; i < 3; i++ )
+  for ( i = 0; i < 2; i++ )
   {
     fetch_poll[i].fd = -1;
   }
@@ -589,7 +613,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
   while ( final_relay_hit == 0 || running_fetches > 0 )
   {
     // wait half a second at most before checking our polls
-    if ( final_relay_hit == 0 )
+    if ( final_relay_hit == 0 && waiting_relay == 0 )
     {
       succ = xQueueReceive( fetch_relays_queue, &onion_relay, 500 / portTICK_PERIOD_MS );
     }
@@ -604,7 +628,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
         ESP_LOGE( MINITOR_TAG, "Got final relay to fetch" );
 #endif
 
-        for ( i = 0; i < 3; i++ )
+        for ( i = 0; i < 2; i++ )
         {
           if ( fetch_states[i].num_relays > 0 && fetch_states[i].num_relays < 3 )
           {
@@ -622,7 +646,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
       else
       {
         // find a fetch to put our new relay in
-        for ( i = 0; i < 3; i++ )
+        for ( i = 0; i < 2; i++ )
         {
           if ( fetch_states[i].num_relays < 3 )
           {
@@ -641,33 +665,33 @@ static void v_handle_relay_fetch( void* pv_parameters )
               running_fetches++;
             }
 
+            waiting_relay = 0;
+
             break;
           }
+        }
+
+        if ( i >= 2 )
+        {
+          waiting_relay = 1;
         }
       }
     }
 
     if ( running_fetches > 0 )
     {
-      for ( i = 0; i < 3; i++ )
-      {
-#ifdef MINITOR_CHUTNEY
-        ESP_LOGE( MINITOR_TAG, "About to poll: %d with num_relays: %d", fetch_poll[i].fd, fetch_states[i].num_relays );
-#endif
-      }
-
       if ( final_relay_hit == 1 )
       {
-        succ = poll( fetch_poll, 3, -1 );
+        succ = poll( fetch_poll, 2, -1 );
       }
       else
       {
-        succ = poll( fetch_poll, 3, 0 );
+        succ = poll( fetch_poll, 2, 0 );
       }
 
       if ( succ > 0 )
       {
-        for ( i = 0; i < 3; i++ )
+        for ( i = 0; i < 2; i++ )
         {
           if ( ( fetch_poll[i].revents & POLLIN ) == POLLIN )
           {
@@ -690,6 +714,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
               for ( j = 0; j < fetch_states[i].num_relays; j++ )
               {
                 xQueueSendToBack( insert_relays_queue, (void*)(&fetch_states[i].relays[j]), portMAX_DELAY );
+                relays_fetched++;
               }
 
               fetch_poll[i].fd = -1;
@@ -702,8 +727,11 @@ static void v_handle_relay_fetch( void* pv_parameters )
     }
   }
 
+  // send null, the insert task receives 2 before shutting down
   onion_relay = NULL;
   xQueueSendToBack( insert_relays_queue, (void*)(&onion_relay), portMAX_DELAY );
+
+  ESP_LOGE( MINITOR_TAG, "This task fetched %d relays", relays_fetched );
   vTaskDelete( NULL );
 }
 
@@ -1296,6 +1324,7 @@ static int d_download_consensus()
   OnionRelay* tmp_relay;
   int finished_consensus = 0;
   NetworkConsensus* consensus;
+  int found_hsdir = 0;
 
 #ifndef MINITOR_CHUTNEY
   // check if our current consensus is still fresh, no need to re-download
@@ -1335,7 +1364,7 @@ static int d_download_consensus()
             valid_until_time = d_parse_date_string( date_str );
 
             // consensus is still valid
-            if ( now < valid_until_time && valid_until_time == d_get_hsdir_list_valid_until() )
+            if ( now < valid_until_time && valid_until_time == d_get_hsdir_list_valid_until() && d_load_hsdir_relays_from_file() == 0 )
             {
               ESP_LOGE( MINITOR_TAG, "Using valid consensus already downloaded" );
 
@@ -1433,7 +1462,8 @@ static int d_download_consensus()
   // connect the socket to the dir server address
   err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
 
-  if ( err != 0 ) {
+  if ( err != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
 #endif
@@ -1446,7 +1476,8 @@ static int d_download_consensus()
   // send the http request to the dir server
   err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
 
-  if ( err < 0 ) {
+  if ( err < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
 #endif
@@ -1457,7 +1488,8 @@ static int d_download_consensus()
     return -1;
   }
 
-  if ( ( fd = open( "/sdcard/consensus", O_CREAT | O_TRUNC ) ) < 0 ) {
+  if ( ( fd = open( "/sdcard/consensus", O_CREAT | O_TRUNC ) ) < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
 #endif
@@ -1583,6 +1615,19 @@ static int d_download_consensus()
             insert_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
             fetch_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
 
+            fastest_cache_mutex = xSemaphoreCreateMutex();
+
+            // create two v_handle_relay_fetch to increase throughput
+            xTaskCreatePinnedToCore(
+              v_handle_relay_fetch,
+              "H_RELAY_FETCH",
+              3072,
+              (void*)(consensus),
+              7,
+              NULL,
+              tskNO_AFFINITY
+            );
+
             xTaskCreatePinnedToCore(
               v_handle_relay_fetch,
               "H_RELAY_FETCH",
@@ -1608,6 +1653,7 @@ static int d_download_consensus()
           {
             if ( parse_relay.hsdir == 1 )
             {
+              found_hsdir++;
               tmp_relay = malloc( sizeof( OnionRelay ) );
               memcpy( tmp_relay, &parse_relay, sizeof( OnionRelay ) );
               xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
@@ -1624,17 +1670,19 @@ static int d_download_consensus()
     rx_total += rx_length;
   }
 
-  // null on the queue will shut down both tasks when they finish
+  ESP_LOGE( MINITOR_TAG, "Found %d hsdir relays in the consensus", found_hsdir );
+
+  // send two nulls, each fetch task will forward it to the insert task which
+  // will wait for 2 before quitting
   tmp_relay = NULL;
+  xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
   xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
 
   // take the semaphore so we know the crypto and insert task finished
-  ret = xSemaphoreTake( crypto_insert_finish, 1000 * 5 / portTICK_PERIOD_MS );
+  ret = xSemaphoreTake( crypto_insert_finish, 1000 * 60 / portTICK_PERIOD_MS );
 
   if ( ret != pdTRUE )
   {
-    xSemaphoreGive( crypto_insert_finish );
-
     ret = -1;
     goto finish;
   }
@@ -1666,6 +1714,7 @@ finish:
   {
     vQueueDelete( fetch_relays_queue );
     vQueueDelete( insert_relays_queue );
+    vSemaphoreDelete( fastest_cache_mutex );
   }
 
   free( rx_buffer );
@@ -2062,13 +2111,14 @@ int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_inte
   int rotation_offset;
   int time_period;
 
+  ESP_LOGE( MINITOR_TAG, "fresh_until: %ld, valid_after: %ld, hsdir_interval: %d", fresh_until, valid_after, hsdir_interval );
   voting_interval = fresh_until - valid_after;
+  rotation_offset = SHARED_RANDOM_N_ROUNDS * voting_interval / 60;
 
   // SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES = 24
   srv_start_time = valid_after - ( ( ( ( valid_after / voting_interval ) ) % ( SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES ) ) * voting_interval );
-  tp_start_time = srv_start_time + hsdir_interval * 60;
+  tp_start_time = ( srv_start_time / 60 - rotation_offset + hsdir_interval ) * 60;
 
-  rotation_offset = SHARED_RANDOM_N_ROUNDS * voting_interval / 60;
   ESP_LOGE( MINITOR_TAG, "Roation offset: %d", rotation_offset );
   time_period = ( valid_after / 60 - rotation_offset ) / hsdir_interval;
 
