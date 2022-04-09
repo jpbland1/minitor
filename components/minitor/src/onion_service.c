@@ -11,6 +11,7 @@
 #include "../h/encoding.h"
 #include "../h/cell.h"
 #include "../h/circuit.h"
+#include "../h/local_connection.h"
 #include "../h/models/relay.h"
 #include "../h/models/revision_counter.h"
 
@@ -124,15 +125,19 @@ int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceT
   return 0;
 }
 
-int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cell ) {
-  switch( unpacked_cell->command ) {
+int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cell )
+{
+  switch( unpacked_cell->command )
+  {
     case RELAY:
-      switch( ( (PayloadRelay*)unpacked_cell->payload )->command ) {
+      switch( ( (PayloadRelay*)unpacked_cell->payload )->command )
+      {
         // TODO when a relay_begin comes in, create a task to block on the local tcp stream
         case RELAY_BEGIN:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_BEGIN!" );
 
-          if ( d_onion_service_handle_relay_begin( onion_service, unpacked_cell ) < 0 ) {
+          if ( d_onion_service_handle_relay_begin( onion_service, unpacked_cell ) < 0 )
+          {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
 #endif
@@ -145,7 +150,8 @@ int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cel
         case RELAY_DATA:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_DATA!" );
 
-          if ( d_onion_service_handle_relay_data( onion_service, unpacked_cell ) < 0 ) {
+          if ( d_onion_service_handle_relay_data( onion_service, unpacked_cell ) < 0 )
+          {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_DATA cell" );
 #endif
@@ -185,7 +191,8 @@ int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cel
           break;
         // when an intro request comes in, respond to it
         case RELAY_COMMAND_INTRODUCE2:
-          if ( d_onion_service_handle_introduce_2( onion_service, unpacked_cell ) < 0 ) {
+          if ( d_onion_service_handle_introduce_2( onion_service, unpacked_cell ) < 0 )
+          {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
 #endif
@@ -213,22 +220,25 @@ int d_onion_service_handle_cell( OnionService* onion_service, Cell* unpacked_cel
   return 0;
 }
 
-int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpacked_cell ) {
-  int i;
-  int err;
-  DoublyLinkedLocalStream* db_local_stream;
+int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpacked_cell )
+{
+  int succ;
+  DoublyLinkedLocalConnection* db_local_connection;
 
-  db_local_stream = onion_service->local_streams.head;
+  db_local_connection = onion_service->local_connections;
 
-  for ( i = 0; i < onion_service->local_streams.length; i++ ) {
-    if ( db_local_stream->circ_id == unpacked_cell->circ_id && db_local_stream->stream_id == ( (PayloadRelay*)unpacked_cell->payload )->stream_id ) {
+  while ( db_local_connection != NULL )
+  {
+    if ( db_local_connection->connection->circ_id == unpacked_cell->circ_id && db_local_connection->connection->stream_id == ( (PayloadRelay*)unpacked_cell->payload )->stream_id )
+    {
       break;
     }
 
-    db_local_stream = db_local_stream->next;
+    db_local_connection = db_local_connection->next;
   }
 
-  if ( db_local_stream == NULL ) {
+  if ( db_local_connection == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't find the associated local_stream" );
 #endif
@@ -236,9 +246,18 @@ int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpack
     return -1;
   }
 
-  err = send( db_local_stream->sock_fd, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload, ( (PayloadRelay*)unpacked_cell->payload )->length, 0 );
+  ESP_LOGE( MINITOR_TAG, "%.*s", ( (PayloadRelay*)unpacked_cell->payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload );
 
-  if ( err < 0 ) {
+  // MUTEX TAKE
+  xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+
+  succ = send( db_local_connection->connection->sock_fd, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload, ( (PayloadRelay*)unpacked_cell->payload )->length, 0 );
+
+  xSemaphoreGive( standby_rend_circuits_mutex );
+  // MUTEX GIVE
+
+  if ( succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't send to local stream" );
 #endif
@@ -253,8 +272,6 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
 {
   int i;
   int err;
-  struct sockaddr_in dest_addr;
-  DoublyLinkedLocalStream* db_local_stream;
   Cell unpacked_connected_cell;
   unsigned char* packed_cell;
   DoublyLinkedOnionCircuit* db_rend_circuit;
@@ -289,56 +306,14 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
     return -1;
   }
 
-  db_local_stream = malloc( sizeof( DoublyLinkedLocalStream ) );
-
-  db_local_stream->circ_id = unpacked_cell->circ_id;
-  db_local_stream->stream_id = ( (PayloadRelay*)unpacked_cell->payload )->stream_id;
-  db_local_stream->rx_queue = onion_service->rx_queue;
-
-  // set the address of the directory server
-  dest_addr.sin_addr.s_addr = inet_addr( "127.0.0.1" );
-  dest_addr.sin_family = AF_INET;
-  dest_addr.sin_port = htons( onion_service->local_port );
-
-  db_local_stream->sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
-
-  if ( db_local_stream->sock_fd < 0 )
+  if ( d_create_local_connection( onion_service, unpacked_cell->circ_id, ( (PayloadRelay*)unpacked_cell->payload )->stream_id ) < 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to the local port, err: %d, errno: %d", db_local_stream->sock_fd, errno );
+    ESP_LOGE( MINITOR_TAG, "couldn't create local connection" );
 #endif
-
-    free( db_local_stream );
 
     return -1;
   }
-
-  err = connect( db_local_stream->sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
-
-  if ( err != 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't connect to the local port" );
-#endif
-
-    close( db_local_stream->sock_fd );
-    free( db_local_stream );
-
-    return -1;
-  }
-
-  xTaskCreatePinnedToCore(
-    v_handle_local,
-    "HANDLE_LOCAL",
-    4096,
-    (void*)(db_local_stream),
-    6,
-    &db_local_stream->task_handle,
-    //tskNO_AFFINITY
-    0
-  );
-
-  v_add_local_stream_to_list( db_local_stream, &onion_service->local_streams );
 
   unpacked_connected_cell.circ_id = unpacked_cell->circ_id;
   unpacked_connected_cell.command = RELAY;
@@ -349,16 +324,6 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
   ( (PayloadRelay*)unpacked_connected_cell.payload )->stream_id = ( (PayloadRelay*)unpacked_cell->payload )->stream_id;
   ( (PayloadRelay*)unpacked_connected_cell.payload )->digest = 0;
   ( (PayloadRelay*)unpacked_connected_cell.payload )->length = 0;
-/*
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadConnected ) );
-
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address = malloc( sizeof( unsigned char ) * 4 );
-
-  ESP_LOGE( MINITOR_TAG, "got address: %s", ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->address );
-
-  memset( ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->address, 0, 4 );
-  ( (RelayPayloadConnected*)( (PayloadRelay*)unpacked_connected_cell.payload )->relay_payload )->time_to_live = 300;
-*/
 
   packed_cell = pack_and_free( &unpacked_connected_cell );
 
@@ -376,44 +341,22 @@ int d_onion_service_handle_relay_begin( OnionService* onion_service, Cell* unpac
 
 int d_onion_service_handle_relay_end( OnionService* onion_service, Cell* unpacked_cell )
 {
-  int i;
-  DoublyLinkedLocalStream* db_local_stream;
+  DoublyLinkedLocalConnection* db_local_connection;
 
-  db_local_stream = onion_service->local_streams.head;
+  db_local_connection = onion_service->local_connections;
 
-  for ( i = 0; i < onion_service->local_streams.length; i++ )
+  while ( db_local_connection != NULL )
   {
-    if ( db_local_stream->circ_id == unpacked_cell->circ_id && db_local_stream->stream_id == ( (PayloadRelay*)unpacked_cell->payload )->stream_id )
+    if ( db_local_connection->connection->circ_id == unpacked_cell->circ_id && db_local_connection->connection->stream_id == ( (PayloadRelay*)unpacked_cell->payload )->stream_id )
     {
-      if ( i == 0 )
-      {
-        onion_service->local_streams.head = db_local_stream->next;
-      }
-
-      if ( i == onion_service->local_streams.length - 1 )
-      {
-        onion_service->local_streams.tail = db_local_stream->previous;
-      }
-
-      if ( db_local_stream->next != NULL )
-      {
-        db_local_stream->next->previous = db_local_stream->previous;
-      }
-
-      if ( db_local_stream->previous != NULL )
-      {
-        db_local_stream->previous->next = db_local_stream->next;
-      }
-
-      onion_service->local_streams.length--;
-
+      v_pop_local_connection_from_list( db_local_connection, &onion_service->local_connections );
       break;
     }
 
-    db_local_stream = db_local_stream->next;
+    db_local_connection = db_local_connection->next;
   }
 
-  if ( db_local_stream == NULL )
+  if ( db_local_connection == NULL )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't find the associated local_stream" );
@@ -422,16 +365,7 @@ int d_onion_service_handle_relay_end( OnionService* onion_service, Cell* unpacke
     return -1;
   }
 
-  //if ( db_local_stream->task_handle != NULL )
-  //{
-    //vTaskDelete( db_local_stream->task_handle );
-  //}
-
-  shutdown( db_local_stream->sock_fd, 0 );
-  close( db_local_stream->sock_fd );
-
-
-  free( db_local_stream );
+  free( db_local_connection );
 
   return 0;
 }
@@ -439,53 +373,25 @@ int d_onion_service_handle_relay_end( OnionService* onion_service, Cell* unpacke
 int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* unpacked_cell )
 {
   int i;
-  DoublyLinkedLocalStream* db_local_stream;
-  DoublyLinkedLocalStream* next_db_local_stream;
+  DoublyLinkedLocalConnection* db_local_connection;
+  DoublyLinkedLocalConnection* next_db_local_connection;
   DoublyLinkedOnionCircuit* db_rend_circuit;
   DoublyLinkedOnionRelay* db_rend_relay;
 
-  db_local_stream = onion_service->local_streams.head;
+  db_local_connection = onion_service->local_connections;
 
-  while ( db_local_stream != NULL )
+  while ( db_local_connection != NULL )
   {
-    next_db_local_stream = db_local_stream->next;
+    next_db_local_connection = db_local_connection->next;
 
-    if ( db_local_stream->circ_id == unpacked_cell->circ_id )
+    if ( db_local_connection->connection->circ_id == unpacked_cell->circ_id )
     {
-      if ( onion_service->local_streams.head == db_local_stream )
-      {
-        onion_service->local_streams.head = db_local_stream->next;
-      }
+      v_pop_local_connection_from_list( db_local_connection, &onion_service->local_connections );
 
-      if ( onion_service->local_streams.tail == db_local_stream )
-      {
-        onion_service->local_streams.tail = db_local_stream->previous;
-      }
-
-      if ( db_local_stream->next != NULL )
-      {
-        db_local_stream->next->previous = db_local_stream->previous;
-      }
-
-      if ( db_local_stream->previous != NULL )
-      {
-        db_local_stream->previous->next = db_local_stream->next;
-      }
-
-      //if ( db_local_stream->task_handle != NULL )
-      //{
-        //vTaskDelete( db_local_stream->task_handle );
-      //}
-
-      shutdown( db_local_stream->sock_fd, 0 );
-      close( db_local_stream->sock_fd );
-
-      free( db_local_stream );
-
-      onion_service->local_streams.length--;
+      free( db_local_connection );
     }
 
-    db_local_stream = next_db_local_stream;
+    db_local_connection = next_db_local_connection;
   }
 
   db_rend_circuit = onion_service->rend_circuits.head;
@@ -568,18 +474,22 @@ int d_onion_service_handle_relay_truncated( OnionService* onion_service, Cell* u
   return 0;
 }
 
-void v_handle_local( void* pv_parameters ) {
+/*
+void v_handle_local( void* pv_parameters )
+{
   int rx_length;
   unsigned char rx_buffer[RELAY_PAYLOAD_LEN];
   DoublyLinkedLocalStream* db_local_stream = (DoublyLinkedLocalStream*)pv_parameters;
   OnionMessage* onion_message;
 
-  while ( 1 ) {
+  while ( 1 )
+  {
     // recv data from the destination and fill the rx_buffer with the data
     rx_length = recv( db_local_stream->sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
 
     // if we got less than 0 we encoutered an error
-    if ( rx_length < 0 ) {
+    if ( rx_length < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "couldn't recv local socket" );
 #endif
@@ -596,17 +506,21 @@ void v_handle_local( void* pv_parameters ) {
     ( (ServiceTcpTraffic*)onion_message->data )->stream_id = db_local_stream->stream_id;
     ( (ServiceTcpTraffic*)onion_message->data )->length = rx_length;
 
-    if ( rx_length == 0 ) {
-      xQueueSendToBack( db_local_stream->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+    if ( rx_length == 0 )
+    {
+      xQueueSendToBack( db_local_stream->forward_queue, (void*)(&onion_message), portMAX_DELAY );
       ESP_LOGE( MINITOR_TAG, "self ending" );
       vTaskDelete( NULL );
-    } else {
+    }
+    else
+    {
       ( (ServiceTcpTraffic*)onion_message->data )->data = malloc( sizeof( unsigned char ) * rx_length );
       memcpy( ( (ServiceTcpTraffic*)onion_message->data )->data, rx_buffer, rx_length );
-      xQueueSendToBack( db_local_stream->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+      xQueueSendToBack( db_local_stream->forward_queue, (void*)(&onion_message), portMAX_DELAY );
     }
   }
 }
+*/
 
 int d_onion_service_handle_introduce_2( OnionService* onion_service, Cell* unpacked_cell )
 {
@@ -1257,6 +1171,7 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
   return 0;
 }
 
+/*
 int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_array, int index_length ) {
   int left = 0;
   int mid = 0;
@@ -1282,6 +1197,7 @@ int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_arr
 
   return mid;
 }
+*/
 
 static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int desired_count, DoublyLinkedOnionRelayList* used_relays, int next )
 {
@@ -1881,6 +1797,7 @@ int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, On
 }
 
 // depricated
+/*
 void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_array, int index_length ) {
   int i;
   int mid = d_binary_search_hsdir_index( node->hash, index_array, index_length );
@@ -1895,6 +1812,7 @@ void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_a
 
   index_array[mid] = node;
 }
+*/
 
 int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* ciphertext, int ciphertext_length, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter ) {
   unsigned int idx;

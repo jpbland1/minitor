@@ -83,18 +83,17 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
   wc_Sha3_256_Final( &reusable_sha3, id_hash );
 
 
-  if ( identity[0] == 0xee && identity[1] == 0xef && identity[2] == 0xb7 && identity[3] == 0x52 )
+  /*
   {
-    {
-      ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
-      ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
-      ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
-      ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
-      ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
-      ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
-      ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
-    }
+    ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
+    ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
+    ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
+    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
+    ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
+    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
+    ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
   }
+  */
 
   wc_Sha3_256_Free( &reusable_sha3 );
 }

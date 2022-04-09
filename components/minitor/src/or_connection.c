@@ -19,9 +19,8 @@
 #include "../h/consensus.h"
 
 TaskHandle_t handle_or_connections_task_handle;
-SemaphoreHandle_t poll_mutex;
 
-struct pollfd connections_poll[16];
+struct pollfd or_connections_poll[16];
 int free_poll_indices[16];
 
 static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
@@ -77,7 +76,7 @@ void v_cleanup_or_connection( OrConnection* or_connection )
   close( wolfSSL_get_fd( or_connection->ssl ) );
   wolfSSL_free( or_connection->ssl );
 
-  connections_poll[or_connection->poll_index].fd = -1;
+  or_connections_poll[or_connection->poll_index].fd = -1;
   free_poll_indices[or_connection->poll_index] = 0;
 
   free( or_connection );
@@ -95,18 +94,17 @@ void v_handle_or_connections( void* pv_parameters )
 
   while ( 1 )
   {
-    // at most we will have to wait 3 seconds for a connection to become readable
+    // at most we will have to wait 1.5 seconds for a connection to become readable
     // hopefully execution time to the continue statement is neglegable
-    succ = poll( connections_poll, 16, 1000 * 3 );
+    succ = poll( or_connections_poll, 16, 1500 );
 
-    if ( succ == 0 )
-    {
-      continue;
-    }
-    else if ( succ < 0 )
+    if ( succ <= 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to poll" );
+      if ( succ < 0 )
+      {
+        ESP_LOGE( MINITOR_TAG, "Failed to poll or connections" );
+      }
 #endif
 
       continue;
@@ -119,7 +117,7 @@ void v_handle_or_connections( void* pv_parameters )
 
     while ( or_connection != NULL )
     {
-      if ( ( connections_poll[or_connection->poll_index].revents & connections_poll[or_connection->poll_index].events ) != 0 )
+      if ( ( or_connections_poll[or_connection->poll_index].revents & or_connections_poll[or_connection->poll_index].events ) != 0 )
       {
         // MUTEX TAKE
         xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
@@ -383,7 +381,7 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
   {
     for ( i = 0; i < 16; i++ )
     {
-      connections_poll[i].fd = -1;
+      or_connections_poll[i].fd = -1;
     }
   }
 
@@ -393,8 +391,8 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
     {
       free_poll_indices[i] = 1;
       or_connection->poll_index = i;
-      connections_poll[i].fd = wolfSSL_get_fd( or_connection->ssl );
-      connections_poll[i].events = POLLIN;
+      or_connections_poll[i].fd = wolfSSL_get_fd( or_connection->ssl );
+      or_connections_poll[i].events = POLLIN;
       break;
     }
   }
@@ -403,12 +401,12 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
   {
     xTaskCreatePinnedToCore(
       v_handle_or_connections,
-      "HANDLE_OR_CONNECTIONS",
+      "H_OR_CONNECTIONS",
       4096,
-      (void*)or_connection,
-      5,
+      NULL,
+      4,
       &handle_or_connections_task_handle,
-      0
+      tskNO_AFFINITY
     );
   }
 

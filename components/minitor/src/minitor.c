@@ -11,6 +11,7 @@
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
+#include "../h/local_connection.h"
 
 #define MINITOR_TIMER_CONSENSUS 0
 #define MINITOR_TIMER_CONSENSUS_VALID 1
@@ -195,6 +196,7 @@ int d_minitor_INIT()
   standby_circuits_mutex = xSemaphoreCreateMutex();
   standby_rend_circuits_mutex = xSemaphoreCreateMutex();
   or_connections_mutex = xSemaphoreCreateMutex();
+  local_connections_mutex = xSemaphoreCreateMutex();
   crypto_insert_finish = xSemaphoreCreateMutex();
 
   timer_queue = xQueueCreate( 5, sizeof( uint32_t ) );

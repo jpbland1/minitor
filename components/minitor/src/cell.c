@@ -35,11 +35,9 @@ int d_send_packed_cell_and_free( OrConnection* or_connection, unsigned char* pac
 
   // MUTEX TAKE
   xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-  ESP_LOGE( MINITOR_TAG, "Took mutex for write" );
 
   succ = wolfSSL_send( or_connection->ssl, packed_cell, CELL_LEN, 0 );
 
-  ESP_LOGE( MINITOR_TAG, "Gave mutex from write" );
   xSemaphoreGive( or_connection->access_mutex );
   // MUTEX GIVE
 
@@ -132,12 +130,10 @@ int d_send_packed_relay_cell_and_free( OrConnection* or_connection, unsigned cha
 
   // MUTEX TAKE
   xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-  ESP_LOGE( MINITOR_TAG, "Took mutex for write" );
 
   // send the RELAY_EARLY to the first node in the circuit
   succ = wolfSSL_send( or_connection->ssl, packed_cell, CELL_LEN, 0 );
 
-  ESP_LOGE( MINITOR_TAG, "Gave mutex from write" );
   xSemaphoreGive( or_connection->access_mutex );
   // MUTEX GIVE
 

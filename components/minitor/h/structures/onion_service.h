@@ -8,6 +8,7 @@
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
 
+#include "./local_connection.h"
 #include "./consensus.h"
 #include "./circuit.h"
 
@@ -26,28 +27,6 @@ typedef struct DoublyLinkedRendezvousCookieList {
   DoublyLinkedRendezvousCookie* tail;
 } DoublyLinkedRendezvousCookieList;
 
-typedef struct HsDirIndexNode {
-  unsigned char hash[WC_SHA3_256_DIGEST_SIZE];
-  OnionRelay* relay;
-  unsigned char chosen;
-} HsDirIndexNode;
-
-struct DoublyLinkedLocalStream {
-  int circ_id;
-  int stream_id;
-  QueueHandle_t rx_queue;
-  int sock_fd;
-  TaskHandle_t task_handle;
-  DoublyLinkedLocalStream* next;
-  DoublyLinkedLocalStream* previous;
-};
-
-typedef struct DoublyLinkedLocalStreamList {
-  int length;
-  DoublyLinkedLocalStream* head;
-  DoublyLinkedLocalStream* tail;
-} DoublyLinkedLocalStreamList;
-
 typedef struct OnionService
 {
   unsigned short exit_port;
@@ -60,12 +39,12 @@ typedef struct OnionService
   DoublyLinkedOnionCircuitList intro_circuits;
   DoublyLinkedOnionCircuitList rend_circuits;
   DoublyLinkedRendezvousCookieList rendezvous_cookies;
-  DoublyLinkedLocalStreamList local_streams;
+  DoublyLinkedLocalConnection* local_connections;
   time_t rend_timestamp;
   TimerHandle_t hsdir_timer;
 } OnionService;
 
 void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, DoublyLinkedRendezvousCookieList* list );
-void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list );
+//void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list );
 
 #endif
