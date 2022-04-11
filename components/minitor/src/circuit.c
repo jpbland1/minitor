@@ -141,7 +141,7 @@ int d_setup_init_rend_circuits( int circuit_count )
           "HANDLE_CIRCUIT",
           4096,
           (void*)(linked_circuit->circuit),
-          6,
+          8,
           &linked_circuit->circuit->task_handle,
           tskNO_AFFINITY
         );
@@ -233,7 +233,7 @@ int d_setup_init_circuits( int circuit_count )
         "HANDLE_CIRCUIT",
         4096,
         (void*)(linked_circuit->circuit),
-        6,
+        8,
         &linked_circuit->circuit->task_handle,
         tskNO_AFFINITY
       );

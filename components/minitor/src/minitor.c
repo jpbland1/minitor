@@ -395,9 +395,9 @@ OnionService* px_setup_hidden_service( unsigned short local_port, unsigned short
     "HANDLE_HS",
     8192,
     (void*)(onion_service),
-    7,
+    8,
     NULL,
-    1
+    tskNO_AFFINITY
   );
 
   // return the onion service

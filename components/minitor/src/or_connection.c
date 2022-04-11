@@ -85,6 +85,7 @@ void v_cleanup_or_connection( OrConnection* or_connection )
 void v_handle_or_connections( void* pv_parameters )
 {
   int succ;
+  int readable_bytes;
   uint32_t circ_id;
   uint8_t* packed_cell;
   OrConnection* or_connection;
@@ -117,67 +118,89 @@ void v_handle_or_connections( void* pv_parameters )
 
     while ( or_connection != NULL )
     {
+      tmp_or_connection = NULL;
+      succ = 0;
+
       if ( ( or_connections_poll[or_connection->poll_index].revents & or_connections_poll[or_connection->poll_index].events ) != 0 )
       {
-        // MUTEX TAKE
-        xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-
-        succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
-
-        xSemaphoreGive( or_connection->access_mutex );
-        // MUTEX GIVE
-
-        if ( succ < 0 )
+        // using an infinite loop because the loop condition is multi line
+        if ( lwip_ioctl( or_connections_poll[or_connection->poll_index].fd, FIONREAD, &readable_bytes ) < 0 )
         {
 #ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to recv cell on connection" );
+          ESP_LOGE( MINITOR_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
+#endif
+          break;
+        }
+
+        // some cells are variable so we need to perform at least one read, hence the succ == 0
+        while ( readable_bytes >= CELL_LEN || succ == 0 )
+        {
+          // MUTEX TAKE
+          xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+
+          succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
+
+          xSemaphoreGive( or_connection->access_mutex );
+          // MUTEX GIVE
+
+          if ( succ < 0 )
+          {
+#ifdef DEBUG_MINITOR
+            ESP_LOGE( MINITOR_TAG, "Failed to recv cell on connection" );
 #endif
 
-          // next could be null so we can't just call cleanup with previous
-          tmp_or_connection = or_connection->next;
-          v_cleanup_or_connection( or_connection );
-          or_connection = tmp_or_connection;
-          continue;
-        }
-        else
-        {
-          db_circuit = or_connection->circuits.head;
-
-          circ_id = ((uint32_t)packed_cell[0]) << 24;
-          circ_id |= ((uint32_t)packed_cell[1]) << 16;
-          circ_id |= ((uint32_t)packed_cell[2]) << 8;
-          circ_id |= (packed_cell[3]);
-
-          while ( db_circuit != NULL )
-          {
-            if ( db_circuit->circuit->circ_id == circ_id )
-            {
-              break;
-            }
-
-            db_circuit = db_circuit->next;
-          }
-
-          if ( db_circuit != NULL )
-          {
-            onion_message = malloc( sizeof( OnionMessage ) );
-            onion_message->type = PACKED_CELL;
-            onion_message->data = packed_cell;
-            onion_message->length = succ;
-
-            xQueueSendToBack( db_circuit->circuit->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+            // next could be null so we can't just call cleanup with previous
+            tmp_or_connection = or_connection->next;
+            v_cleanup_or_connection( or_connection );
+            or_connection = tmp_or_connection;
+            break;
           }
           else
           {
+            readable_bytes -= succ;
+
+            db_circuit = or_connection->circuits.head;
+
+            circ_id = ((uint32_t)packed_cell[0]) << 24;
+            circ_id |= ((uint32_t)packed_cell[1]) << 16;
+            circ_id |= ((uint32_t)packed_cell[2]) << 8;
+            circ_id |= (packed_cell[3]);
+
+            while ( db_circuit != NULL )
+            {
+              if ( db_circuit->circuit->circ_id == circ_id )
+              {
+                break;
+              }
+
+              db_circuit = db_circuit->next;
+            }
+
+            if ( db_circuit != NULL )
+            {
+              onion_message = malloc( sizeof( OnionMessage ) );
+              onion_message->type = PACKED_CELL;
+              onion_message->data = packed_cell;
+              onion_message->length = succ;
+
+              xQueueSendToBack( db_circuit->circuit->rx_queue, (void*)(&onion_message), portMAX_DELAY );
+            }
+            else
+            {
 #ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell: %d", circ_id );
+              ESP_LOGE( MINITOR_TAG, "Ignoring circuit-less cell: %d", circ_id );
 #endif
-            free( packed_cell );
+              free( packed_cell );
+            }
           }
         }
       }
 
-      or_connection = or_connection->next;
+      // will only be null if we didn't already progress
+      if ( tmp_or_connection == NULL )
+      {
+        or_connection = or_connection->next;
+      }
     }
 
     xSemaphoreGive( or_connections_mutex );
@@ -404,7 +427,7 @@ OrConnection* px_create_connection( uint32_t address, uint16_t port )
       "H_OR_CONNECTIONS",
       4096,
       NULL,
-      4,
+      7,
       &handle_or_connections_task_handle,
       tskNO_AFFINITY
     );

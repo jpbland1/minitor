@@ -36,6 +36,7 @@ static void v_cleanup_local_connection( DoublyLinkedLocalConnection* db_local_co
 static void v_handle_local_connections( void* pv_parameters )
 {
   int succ;
+  int readable_bytes;
   uint8_t rx_buffer[RELAY_PAYLOAD_LEN];
   DoublyLinkedLocalConnection* db_local_connection;
   DoublyLinkedLocalConnection* tmp_local_connection;
@@ -65,47 +66,80 @@ static void v_handle_local_connections( void* pv_parameters )
 
     while ( db_local_connection != NULL )
     {
+      tmp_local_connection = NULL;
+
       if ( ( local_connections_poll[db_local_connection->connection->poll_index].revents & local_connections_poll[db_local_connection->connection->poll_index].events ) != 0 )
       {
-        // MUTEX TAKE
-        xSemaphoreTake( db_local_connection->connection->access_mutex, portMAX_DELAY );
-
-        succ = recv( db_local_connection->connection->sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
-
-        xSemaphoreGive( db_local_connection->connection->access_mutex );
-        // MUTEX GIVE
-
-        onion_message = malloc( sizeof( OnionMessage ) );
-
-        onion_message->type = SERVICE_TCP_DATA;
-        onion_message->data = malloc( sizeof( ServiceTcpTraffic ) );
-
-        ( (ServiceTcpTraffic*)onion_message->data )->circ_id = db_local_connection->connection->circ_id;
-        ( (ServiceTcpTraffic*)onion_message->data )->stream_id = db_local_connection->connection->stream_id;
-
-        if ( succ <= 0 )
+        if ( lwip_ioctl( db_local_connection->connection->sock_fd, FIONREAD, &readable_bytes ) < 0 )
         {
-          ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
-        }
-        else
-        {
-          ( (ServiceTcpTraffic*)onion_message->data )->length = succ;
-          ( (ServiceTcpTraffic*)onion_message->data )->data = malloc( sizeof( uint8_t ) * succ );
-          memcpy( ( (ServiceTcpTraffic*)onion_message->data )->data, rx_buffer, succ );
+#ifdef DEBUG_MINITOR
+          ESP_LOGE( MINITOR_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
+#endif
+          break;
         }
 
-        xQueueSendToBack( db_local_connection->connection->forward_queue, (void*)(&onion_message), portMAX_DELAY );
-
-        if ( succ <= 0 )
+        do
         {
-          tmp_local_connection = db_local_connection->next;
-          v_cleanup_local_connection( db_local_connection );
-          db_local_connection = tmp_local_connection;
-          continue;
-        }
+          // MUTEX TAKE
+          xSemaphoreTake( db_local_connection->connection->access_mutex, portMAX_DELAY );
+
+          succ = recv( db_local_connection->connection->sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
+
+          xSemaphoreGive( db_local_connection->connection->access_mutex );
+          // MUTEX GIVE
+
+          onion_message = malloc( sizeof( OnionMessage ) );
+
+          onion_message->type = SERVICE_TCP_DATA;
+          onion_message->data = malloc( sizeof( ServiceTcpTraffic ) );
+
+          ( (ServiceTcpTraffic*)onion_message->data )->circ_id = db_local_connection->connection->circ_id;
+          ( (ServiceTcpTraffic*)onion_message->data )->stream_id = db_local_connection->connection->stream_id;
+
+          if ( succ <= 0 )
+          {
+            ESP_LOGE( MINITOR_TAG, "" );
+            ESP_LOGE( MINITOR_TAG, "Got end of stream" );
+            ESP_LOGE( MINITOR_TAG, "" );
+            ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
+          }
+          else
+          {
+            readable_bytes -= succ;
+
+            ( (ServiceTcpTraffic*)onion_message->data )->length = succ;
+            ( (ServiceTcpTraffic*)onion_message->data )->data = malloc( sizeof( uint8_t ) * succ );
+            memcpy( ( (ServiceTcpTraffic*)onion_message->data )->data, rx_buffer, succ );
+          }
+
+          xQueueSendToBack( db_local_connection->connection->forward_queue, (void*)(&onion_message), portMAX_DELAY );
+
+          if ( succ <= 0 )
+          {
+            tmp_local_connection = db_local_connection->next;
+            v_cleanup_local_connection( db_local_connection );
+            db_local_connection = tmp_local_connection;
+            break;
+          }
+          /*
+          else if ( readable_bytes <= 0 )
+          {
+            if ( lwip_ioctl( db_local_connection->connection->sock_fd, FIONREAD, &readable_bytes ) < 0 )
+            {
+#ifdef DEBUG_MINITOR
+              ESP_LOGE( MINITOR_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
+#endif
+              break;
+            }
+          }
+          */
+        } while ( readable_bytes > 0 );
       }
 
-      db_local_connection = db_local_connection->next;
+      if ( tmp_local_connection == NULL )
+      {
+        db_local_connection = db_local_connection->next;
+      }
     }
 
     xSemaphoreGive( local_connections_mutex );
@@ -207,7 +241,7 @@ int d_create_local_connection( OnionService* onion_service, uint32_t circ_id, ui
       "H_LOCAL_CONNECTIONS",
       3072,
       NULL,
-      10,
+      7,
       &handle_local_connections_task_handle,
       tskNO_AFFINITY
     );

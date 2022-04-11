@@ -79,7 +79,8 @@ int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceT
     db_rend_circuit = db_rend_circuit->next;
   }
 
-  if ( db_rend_circuit == NULL ) {
+  if ( db_rend_circuit == NULL )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't find the associated rend circuit" );
 #endif
@@ -95,13 +96,16 @@ int d_onion_service_handle_local_tcp_data( OnionService* onion_service, ServiceT
   ( (PayloadRelay*)unpacked_cell.payload )->stream_id = tcp_traffic->stream_id;
   ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
 
-  if ( tcp_traffic->length == 0 ) {
+  if ( tcp_traffic->length == 0 )
+  {
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_END;
     ( (PayloadRelay*)unpacked_cell.payload )->length = 1;
     ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEnd ) );
 
     ( (RelayPayloadEnd*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->reason = REASON_DONE;
-  } else {
+  }
+  else
+  {
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
     ( (PayloadRelay*)unpacked_cell.payload )->length = (unsigned short)tcp_traffic->length;
     ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
@@ -249,11 +253,11 @@ int d_onion_service_handle_relay_data( OnionService* onion_service, Cell* unpack
   ESP_LOGE( MINITOR_TAG, "%.*s", ( (PayloadRelay*)unpacked_cell->payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload );
 
   // MUTEX TAKE
-  xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
+  xSemaphoreTake( db_local_connection->connection->access_mutex, portMAX_DELAY );
 
   succ = send( db_local_connection->connection->sock_fd, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload, ( (PayloadRelay*)unpacked_cell->payload )->length, 0 );
 
-  xSemaphoreGive( standby_rend_circuits_mutex );
+  xSemaphoreGive( db_local_connection->connection->access_mutex );
   // MUTEX GIVE
 
   if ( succ < 0 )
@@ -878,7 +882,7 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezv
     "HANDLE_REND_CIRCUIT",
     4096,
     (void*)(rend_circuit),
-    6,
+    8,
     &rend_circuit->task_handle,
     tskNO_AFFINITY
   );

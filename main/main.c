@@ -67,8 +67,8 @@ static const httpd_uri_t hello = {
     .handler   = hello_get_handler,
     /* Let's pass response string in user
      * context to demonstrate it's usage */
-    //.user_ctx  = "<!DOCTYPE html><body><h1>Hello World!</h1><div><video controls><source src=\"/media/big_buck_bunny.mp4\" type=\"video/mp4\"></video></div></body></html>"
-    .user_ctx  = "<!DOCTYPE html><body><h1>Hello World!</h1></body></html>"
+    .user_ctx  = "<!DOCTYPE html><body><h1>Hello World!</h1><div><video controls><source src=\"/media/big_buck_bunny.mp4\" type=\"video/mp4\"></video></div></body></html>"
+    //.user_ctx  = "<!DOCTYPE html><body><h1>Hello World!</h1></body></html>"
 };
 
 #define IS_FILE_EXT(filename, ext) \
