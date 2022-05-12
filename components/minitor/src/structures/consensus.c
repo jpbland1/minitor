@@ -75,3 +75,24 @@ void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list )
 
   list->length--;
 }
+
+OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index )
+{
+  int i;
+  DoublyLinkedOnionRelay* dl_relay;
+
+  dl_relay = list->head;
+
+  for ( i = 0; i < index; i++ )
+  {
+    ESP_LOGE( MINITOR_TAG, "Target %d has point %p", i, dl_relay->relay );
+    dl_relay = dl_relay->next;
+  }
+
+  if ( dl_relay == NULL )
+  {
+    return NULL;
+  }
+
+  return dl_relay->relay;
+}

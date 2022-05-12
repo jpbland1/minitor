@@ -3,32 +3,48 @@
 unsigned int circ_id_counter = 0x80000000;
 SemaphoreHandle_t circ_id_mutex;
 
-DoublyLinkedOnionCircuitList standby_circuits = {
-  .length = 0,
-  .head = NULL,
-  .tail = NULL,
-};
-SemaphoreHandle_t standby_circuits_mutex;
+void v_add_circuit_to_list( OnionCircuit* circuit, OnionCircuit** list )
+{
+  circuit->next = *list;
+  circuit->previous = NULL;
 
-DoublyLinkedOnionCircuitList standby_rend_circuits = {
-  .length = 0,
-  .head = NULL,
-  .tail = NULL,
-};
-SemaphoreHandle_t standby_rend_circuits_mutex;
-
-void v_add_circuit_to_list( DoublyLinkedOnionCircuit* node, DoublyLinkedOnionCircuitList* list ) {
-  node->previous = NULL;
-  node->next = NULL;
-
-  if ( list->length == 0 ) {
-    list->head = node;
-    list->tail = node;
-  } else {
-    node->previous = list->tail;
-    list->tail->next = node;
-    list->tail = node;
+  if ( *list != NULL )
+  {
+    (*list)->previous = circuit;
   }
 
-  list->length++;
+  *list = circuit;
+}
+
+void v_remove_circuit_from_list( OnionCircuit* circuit, OnionCircuit** list )
+{
+  if ( *list == circuit )
+  {
+    *list = circuit->next;
+  }
+
+  if ( circuit->next != NULL )
+  {
+    circuit->next->previous = circuit->previous;
+  }
+
+  if ( circuit->previous != NULL )
+  {
+    circuit->previous->next = circuit->next;
+  }
+}
+
+OnionCircuit* px_get_circuit_by_circ_id( OnionCircuit* list, uint32_t circ_id )
+{
+  while ( list != NULL )
+  {
+    if ( circ_id == list->circ_id )
+    {
+      break;
+    }
+
+    list = list->next;
+  }
+
+  return list;
 }

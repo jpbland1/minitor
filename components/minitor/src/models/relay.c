@@ -205,7 +205,11 @@ static int d_store_relay_at_address( BinaryRelay* b_relay, int addr, int file )
 {
   if ( file == 1 )
   {
-    return d_store_relay_to_file( b_relay, addr );
+    while ( d_store_relay_to_file( b_relay, addr ) < 0 )
+    {
+    }
+
+    return 0;
   }
   else
   {
@@ -1440,7 +1444,7 @@ fail:
   return NULL;
 }
 
-OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude )
+OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude_start, uint8_t* exclude_end )
 {
   int i;
   int start_addr;
@@ -1500,7 +1504,11 @@ OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayLis
       offset = 1;
     }
 
-    if ( exclude != NULL && memcmp( exclude, b_relay->relay.identity, ID_LENGTH ) == 0 )
+    if
+    (
+      ( exclude_start != NULL && memcmp( exclude_start, b_relay->relay.identity, ID_LENGTH ) == 0 ) ||
+      ( exclude_end != NULL && memcmp( exclude_end, b_relay->relay.identity, ID_LENGTH ) == 0 )
+    )
     {
       offset = 1;
     }

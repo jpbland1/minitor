@@ -11,17 +11,11 @@
 #include "../h/cell.h"
 #include "../h/structures/onion_message.h"
 
-int d_send_packed_cell_and_free( OrConnection* or_connection, unsigned char* packed_cell )
+int d_send_packed_cell_and_free( DlConnection* or_connection, unsigned char* packed_cell )
 {
   int succ;
 
-  // MUTEX TAKE
-  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-  succ = b_verify_or_connection( or_connection, &or_connections );
-
-  xSemaphoreGive( or_connections_mutex );
-  // MUTEX GIVE
+  succ = b_verify_or_connection( or_connection );
 
   if ( succ == 0 )
   {
@@ -54,7 +48,7 @@ finish:
   return succ;
 }
 
-int d_send_packed_relay_cell_and_free( OrConnection* or_connection, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto )
+int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto )
 {
   int ret = 0;
   int i;
@@ -62,7 +56,8 @@ int d_send_packed_relay_cell_and_free( OrConnection* or_connection, unsigned cha
   unsigned char tmp_digest[WC_SHA3_256_DIGEST_SIZE];
   DoublyLinkedOnionRelay* db_relay = relay_list->head;
 
-  for ( i = 0; i < relay_list->built_length - 1; i++ ) {
+  for ( i = 0; i < relay_list->built_length - 1; i++ )
+  {
     db_relay = db_relay->next;
   }
 
@@ -110,13 +105,8 @@ int d_send_packed_relay_cell_and_free( OrConnection* or_connection, unsigned cha
       goto finish;
     }
   }
-  // MUTEX TAKE
-  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
 
-  succ = b_verify_or_connection( or_connection, &or_connections );
-
-  xSemaphoreGive( or_connections_mutex );
-  // MUTEX GIVE
+  succ = b_verify_or_connection( or_connection );
 
   if ( succ == 0 )
   {
@@ -154,16 +144,17 @@ finish:
 }
 
 // recv a cell from our or connection
+/*
 int d_recv_cell( OnionCircuit* circuit, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha, HsCrypto* hs_crypto )
 {
   int retry;
   int succ;
   uint8_t* packed_cell;
-  OnionMessage* onion_message = NULL;
 
   // retry in case we killed a final relay before processing a RELAY_END
   for ( retry = 3; retry > 0; retry-- )
   {
+//
     // MUTEX TAKE
     xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
 
@@ -174,37 +165,35 @@ int d_recv_cell( OnionCircuit* circuit, Cell* unpacked_cell, int circ_id_length,
 
     if ( succ == 0 )
     {
-  #ifdef DEBUG_MINITOR
+#ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
-  #endif
+#endif
 
       return -1;
     }
+//
 
-    succ = xQueueReceive( circuit->rx_queue, &onion_message, 1000 * 5 / portTICK_PERIOD_MS );
+    succ = xQueueReceive( circuit->rx_queue, &packed_cell, 1000 * 10 / portTICK_PERIOD_MS );
 
-    if ( succ == pdFALSE || onion_message == NULL )
+    if ( succ == pdFALSE || packed_cell == NULL )
     {
-  #ifdef DEBUG_MINITOR
+#ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to recv packed cell" );
-  #endif
+#endif
 
-      if ( onion_message != NULL )
+      if ( packed_cell != NULL )
       {
-        free( onion_message->data );
-        free( onion_message );
+        free( packed_cell );
       }
 
       return -1;
     }
 
-    packed_cell = onion_message->data;
-
     if ( d_decrypt_packed_cell( packed_cell, circ_id_length, relay_list, hs_crypto, &unpacked_cell->recv_index ) < 0 )
     {
-  #ifdef DEBUG_MINITOR
+#ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "failed to decrypt packed cell" );
-  #endif
+#endif
 
       free( onion_message->data );
       free( onion_message );
@@ -227,6 +216,7 @@ int d_recv_cell( OnionCircuit* circuit, Cell* unpacked_cell, int circ_id_length,
 
   return -1;
 }
+*/
 
 int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length )
 {
@@ -400,8 +390,6 @@ int d_decrypt_packed_cell( uint8_t* packed_cell, int circ_id_length, DoublyLinke
     }
     else if ( !fully_recognized && hs_crypto != NULL )
     {
-      ESP_LOGE( MINITOR_TAG, "Trying hs crypto" );
-
       wolf_succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
 
       if ( wolf_succ < 0 )
@@ -415,8 +403,6 @@ int d_decrypt_packed_cell( uint8_t* packed_cell, int circ_id_length, DoublyLinke
 
       if ( packed_cell[6] == 0 && packed_cell[7] == 0 )
       {
-        ESP_LOGE( MINITOR_TAG, "hs crypto recognized" );
-
         wc_Sha3_256_Copy( &hs_crypto->hs_running_sha_forward, &tmp_sha3 );
 
         wc_Sha3_256_Update( &tmp_sha3, packed_cell + 5, 5 );
@@ -426,8 +412,6 @@ int d_decrypt_packed_cell( uint8_t* packed_cell, int circ_id_length, DoublyLinke
 
         if ( memcmp( tmp_sha3_digest, packed_cell + 10, 4 ) == 0 )
         {
-          ESP_LOGE( MINITOR_TAG, "hs crypto digest match" );
-
           wc_Sha3_256_Free( &hs_crypto->hs_running_sha_forward );
           wc_Sha3_256_Copy( &tmp_sha3, &hs_crypto->hs_running_sha_forward );
         }

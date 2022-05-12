@@ -157,10 +157,9 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
       }
     }
 
-    if ( d_add_hsdir_relay_to_list( onion_relay ) < 0 )
+    while ( d_add_hsdir_relay_to_list( onion_relay ) < 0 )
     {
       ESP_LOGE( MINITOR_TAG, "Failed to add to list" );
-      vTaskDelete( NULL );
     }
 
     free( onion_relay );
@@ -1563,24 +1562,27 @@ static int d_download_consensus()
     if ( end_header >= 4 )
     {
       // first write chunck to consensus to file
-      if ( ( fd = open( "/sdcard/consensus", O_WRONLY | O_APPEND ) ) < 0 )
+      do
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
-#endif
+        if ( ( fd = open( "/sdcard/consensus", O_WRONLY | O_APPEND ) ) < 0 )
+        {
+  #ifdef DEBUG_MINITOR
+          ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
+  #endif
 
-        ret = -1;
-        goto finish;
-      }
+          continue;
+        }
 
-      if ( write( fd, rx_buffer + i, sizeof( char ) * ( rx_length - i ) ) < 0 ) {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/consensus, errno: %d", errno );
-#endif
+        err = write( fd, rx_buffer + i, ( rx_length - i ) );
 
-        ret = -1;
-        goto finish;
-      }
+        if ( err != ( rx_length - i ) ) {
+  #ifdef DEBUG_MINITOR
+          ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/consensus, errno: %d", errno );
+  #endif
+
+          close( fd );
+        }
+      } while ( err != ( rx_length - i ) );
 
       close( fd );
 

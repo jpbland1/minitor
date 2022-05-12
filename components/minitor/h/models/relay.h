@@ -23,7 +23,7 @@ int d_traverse_hsdir_relays_in_order( BinaryRelay* b_relay, int next_addr, int* 
 OnionRelay* px_get_hsdir_relay_by_identity( uint8_t* identity );
 DoublyLinkedOnionRelayList* px_get_hsdir_relays_by_id_hash( uint8_t* id_hash, int desired_count, int current, DoublyLinkedOnionRelayList* used_relays );
 OnionRelay* px_get_hsdir_relay_by_id_hash( uint8_t* id_hash, int offset, DoublyLinkedOnionRelayList* used_relays, int current );
-OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude );
+OnionRelay* px_get_random_hsdir_relay( int want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude_start, uint8_t* exclude_end );
 int d_get_hsdir_count();
 int d_mark_hsdir_relay_as_guard( uint8_t* identity );
 int d_unmark_hsdir_relay_as_guard( uint8_t* identity );

@@ -15,20 +15,15 @@ void v_add_rendezvous_cookie_to_list( DoublyLinkedRendezvousCookie* node, Doubly
   list->length++;
 }
 
-/*
-void v_add_local_stream_to_list( DoublyLinkedLocalStream* node, DoublyLinkedLocalStreamList* list ) {
-  node->next = NULL;
-  node->previous = NULL;
+void v_add_service_to_list( OnionService* service, OnionService** list )
+{
+  service->next = *list;
+  service->previous = NULL;
 
-  if ( list->length == 0 ) {
-    list->head = node;
-    list->tail = node;
-  } else {
-    node->previous = list->tail;
-    list->tail->next = node;
-    list->tail = node;
+  if ( *list != NULL )
+  {
+    (*list)->previous = service;
   }
 
-  list->length++;
+  *list = service;
 }
-*/

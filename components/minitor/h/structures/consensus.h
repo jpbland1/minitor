@@ -67,6 +67,7 @@ typedef struct DoublyLinkedOnionRelayList {
 
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
+OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index );
 
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;

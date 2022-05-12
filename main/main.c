@@ -359,7 +359,10 @@ void app_main()
   }
 
   ESP_LOGE( TAG, "Starting service" );
-  OnionService* test_service = px_setup_hidden_service( 8080, 80, "/sdcard/test_service" );
+  if ( d_setup_onion_service( 8080, 80, "/sdcard/test_service" ) < 0 )
+  {
+    ESP_LOGE( TAG, "Failed to setup hidden service" );
+  }
 
 /*
   v_test_setup_issi();
