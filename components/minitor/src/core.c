@@ -76,6 +76,36 @@ void v_set_hsdir_timer( TimerHandle_t hsdir_timer )
 #endif
 }
 
+int d_get_standby_count()
+{
+  int count = 0;
+  OnionCircuit* circuit;
+
+  ESP_LOGE( CORE_TAG, "Start count get" );
+
+  // MUTEX TAKE
+  xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+
+  circuit = onion_circuits;
+
+  while ( circuit != NULL )
+  {
+    if ( circuit->status == CIRCUIT_STANDBY )
+    {
+      count++;
+    }
+
+    circuit = circuit->next;
+  }
+
+  xSemaphoreGive( circuits_mutex );
+  // MUTEX GIVE
+
+  ESP_LOGE( CORE_TAG, "End count get" );
+
+  return count;
+}
+
 static void v_send_init_circuit_intro( OnionService* service )
 {
   OnionCircuit* circuit;
@@ -473,6 +503,7 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
       break;
     case CIRCUIT_INTRO_LIVE:
     case CIRCUIT_RENDEZVOUS:
+      ESP_LOGE( CORE_TAG, "Got a service cell" );
       v_onion_service_handle_cell( working_circuit, &unpacked_cell );
 
       break;
@@ -888,7 +919,9 @@ static void v_init_service( OnionService* service )
     return;
   }
 
-  for ( i = 0; i < 2; i++ )
+  i = d_get_standby_count();
+
+  for ( ; i < 2; i++ )
   {
     onion_message = malloc( sizeof( OnionMessage ) );
     onion_message->type = INIT_CIRCUIT;

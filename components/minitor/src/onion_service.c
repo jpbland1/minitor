@@ -1503,53 +1503,98 @@ void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_a
 }
 */
 
-int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* ciphertext, int ciphertext_length, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter ) {
+int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter )
+{
+  int ret = 0;
+  int cipher_fd;
+  uint8_t cipher_buff[255];
+  char plain_file[60];
+  int plain_fd;
+  char plain_buff[340];
   unsigned int idx;
+  int succ;
+  int write_len;
   int wolf_succ;
-  int layer_length;
   char revision_counter_str[32];
-  unsigned char* working_outer_layer;
   unsigned char tmp_signature[64];
+  char tmp_buff[187];
 
   const char* outer_layer_template_0 =
     "hs-descriptor 3\n"
     "descriptor-lifetime 180\n"
     "descriptor-signing-key-cert\n"
     "-----BEGIN ED25519 CERT-----\n"
-    "*******************************************************************************************************************************************************************************************"
-    "-----END ED25519 CERT-----\n"
-    "revision-counter ";
+    ;
+    //"*******************************************************************************************************************************************************************************************"
   const char* outer_layer_template_1 =
+    "-----END ED25519 CERT-----\n"
+    "revision-counter "
+    ;
+  const char* outer_layer_template_2 =
     "\nsuperencrypted\n"
     "-----BEGIN MESSAGE-----\n"
     ;
-  const char* outer_layer_template_2 =
+  const char* outer_layer_template_3 =
     "-----END MESSAGE-----\n"
-    "signature **************************************************************************************"
+    ;
+  const char* outer_layer_template_4 =
+    //"signature **************************************************************************************"
+    "signature "
     ;
 
   sprintf( revision_counter_str, "%d", revision_counter );
 
-  layer_length = HS_DESC_SIG_PREFIX_LENGTH + strlen( outer_layer_template_0 ) + strlen( revision_counter_str ) + strlen( outer_layer_template_1 ) + ciphertext_length * 4 / 3 + strlen( outer_layer_template_2 );
+  sprintf( plain_file, "%s_plain", filename );
 
-  if ( ciphertext_length % 6 != 0 ) {
-    layer_length ++;
+  plain_fd = open( plain_file, O_CREAT | O_RDWR | O_TRUNC );
+
+  if ( plain_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", plain_file );
+#endif
+
+    return -1;
   }
 
-  *outer_layer = malloc( sizeof( unsigned char ) * layer_length );
-  working_outer_layer = *outer_layer;
+  cipher_fd = open( filename, O_RDONLY );
 
-  memcpy( working_outer_layer, HS_DESC_SIG_PREFIX, HS_DESC_SIG_PREFIX_LENGTH );
+  if ( cipher_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
+#endif
 
-  // skip past the prefix
-  working_outer_layer += HS_DESC_SIG_PREFIX_LENGTH;
+    close( plain_fd );
 
-  memcpy( working_outer_layer, outer_layer_template_0, strlen( outer_layer_template_0 ) );
+    return -1;
+  }
 
-  // skip past all the headers to the cert body
-  working_outer_layer += 97;
+  succ = write( plain_fd, HS_DESC_SIG_PREFIX, HS_DESC_SIG_PREFIX_LENGTH );
 
-  if ( d_generate_packed_crosscert( working_outer_layer, descriptor_signing_key->p, blinded_key, 0x08, valid_after ) < 0 ) {
+  if ( succ != HS_DESC_SIG_PREFIX_LENGTH )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  succ = write( plain_fd, outer_layer_template_0, strlen( outer_layer_template_0 ) );
+
+  if ( succ != strlen( outer_layer_template_0 ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  if ( d_generate_packed_crosscert( tmp_buff, descriptor_signing_key->p, blinded_key, 0x08, valid_after ) < 0 ) {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 #endif
@@ -1557,36 +1602,116 @@ int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* cip
     return -1;
   }
 
-  // skip past cert body and next header
-  working_outer_layer += 187 + 44;
+  succ = write( plain_fd, tmp_buff, 187 );
 
-  // copy revision counter
-  memcpy( working_outer_layer, revision_counter_str, strlen( revision_counter_str ) );
+  if ( succ != 187 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
 
-  working_outer_layer += strlen( revision_counter_str );
-
-  // copy the next part of the template
-  memcpy( working_outer_layer, outer_layer_template_1, strlen( outer_layer_template_1 ) );
-
-  // skip over the template headers
-  working_outer_layer += strlen( outer_layer_template_1 );
-
-  v_base_64_encode( (char*)working_outer_layer, ciphertext, ciphertext_length );
-
-  // skip past message body
-  working_outer_layer += ciphertext_length * 4 / 3;
-
-  if ( ciphertext_length % 6 != 0 ) {
-    working_outer_layer++;
+    ret = -1;
+    goto finish;
   }
 
-  memcpy( working_outer_layer, outer_layer_template_2, strlen( outer_layer_template_2 ) );
+  succ = write( plain_fd, outer_layer_template_1, strlen( outer_layer_template_1 ) );
 
-  // skip past the header
-  working_outer_layer += 32;
+  if ( succ != strlen( outer_layer_template_1 ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  succ = write( plain_fd, revision_counter_str, strlen( revision_counter_str ) );
+
+  if ( succ != strlen( revision_counter_str ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  succ = write( plain_fd, outer_layer_template_2, strlen( outer_layer_template_2 ) );
+
+  if ( succ != strlen( outer_layer_template_2 ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  do
+  {
+    succ = read( cipher_fd, cipher_buff, sizeof( cipher_buff ) );
+
+    if ( succ == 0 )
+    {
+      break;
+    }
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // WARNING, cipher buff must be 255 in length
+    // to encode in 4:3 ratio without padding some bits
+    // for example if we used 256 plain buff would be filled
+    // to 342 bytes and would include padding bits which is not
+    // acceptable in the middle of a base64 encoded value,
+    // only on the end. thus the only reason this works is because
+    // only the last read will have non 255 length
+    v_base_64_encode( plain_buff, cipher_buff, succ );
+
+    write_len = succ * 4 / 3;
+
+    if ( succ % 3 != 0 )
+    {
+      write_len++;
+    }
+
+    succ = write( plain_fd, plain_buff, write_len );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+  } while ( succ == sizeof( plain_buff ) );
+
+  succ = write( plain_fd, outer_layer_template_3, strlen( outer_layer_template_3 ) );
+
+  if ( succ != strlen( outer_layer_template_3 ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
 
   idx = ED25519_SIG_SIZE;
-  wolf_succ = wc_ed25519_sign_msg( *outer_layer, working_outer_layer - *outer_layer - 10, tmp_signature, &idx, descriptor_signing_key );
+  wolf_succ = ed25519_sign_msg_custom( plain_fd, tmp_signature, &idx, descriptor_signing_key );
 
   if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
 #ifdef DEBUG_MINITOR
@@ -1596,16 +1721,79 @@ int d_generate_outer_descriptor( unsigned char** outer_layer, unsigned char* cip
     return -1;
   }
 
-  v_base_64_encode( (char*)working_outer_layer, tmp_signature, 64 );
+  v_base_64_encode( tmp_buff, tmp_signature, 64 );
 
-  return layer_length - HS_DESC_SIG_PREFIX_LENGTH;
+  succ = write( plain_fd, outer_layer_template_4, strlen( outer_layer_template_4 ) );
+
+  if ( succ != strlen( outer_layer_template_4 ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  succ = write( plain_fd, tmp_buff, 86 );
+
+  if ( succ != 86 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+  }
+
+finish:
+  close( plain_fd );
+  close( cipher_fd );
+
+  if ( ret >= 0 )
+  {
+    succ = unlink( filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
+#endif
+
+      return -1;
+    }
+
+    succ = rename( plain_file, filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to rename first plaintext" );
+#endif
+
+      return -1;
+    }
+  }
+
+  return ret;
 }
 
-int d_generate_first_plaintext( unsigned char** first_layer, unsigned char* ciphertext, int ciphertext_length ) {
+int d_generate_first_plaintext( char* filename )
+{
+  int ret = 0;
+  int succ;
+  int write_len;
+  int cipher_fd;
+  uint8_t cipher_buff[255];
+  int plain_fd;
+  char plain_buff[340];
+  char plain_file[60];
   int i;
   Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
-  unsigned char* working_first_layer;
+  char tmp_buff[58];
+
+  /*
   const char* first_layer_template =
     "desc-auth-type x25519\n"
     "desc-auth-ephemeral-key *******************************************\n"
@@ -1620,84 +1808,240 @@ int d_generate_first_plaintext( unsigned char** first_layer, unsigned char* ciph
   const char* end_encrypted =
     "-----END MESSAGE-----"
     ;
+  */
 
-  int layer_length = strlen( first_layer_template ) + strlen( auth_client_template ) * 16 + strlen( begin_encrypted ) + ciphertext_length * 4 / 3 + strlen( end_encrypted );
+  const char* first_layer_template =
+    "desc-auth-type x25519\n"
+    "desc-auth-ephemeral-key "
+    ;
 
-  if ( ciphertext_length % 6 != 0 ) {
-    layer_length++;
+  const char* auth_client_template =
+    "auth-client "
+    ;
+  const char* begin_encrypted =
+    "encrypted\n"
+    "-----BEGIN MESSAGE-----\n"
+    ;
+  const char* end_encrypted =
+    "-----END MESSAGE-----"
+    ;
+
+  sprintf( plain_file, "%s_plain", filename );
+
+  plain_fd = open( plain_file, O_CREAT | O_WRONLY | O_TRUNC );
+
+  if ( plain_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", plain_file );
+#endif
+
+    return -1;
+  }
+
+  cipher_fd = open( filename, O_RDONLY );
+
+  if ( cipher_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
+#endif
+
+    close( plain_fd );
+
+    return -1;
   }
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
-  *first_layer = malloc( sizeof( unsigned char ) * layer_length );
-  working_first_layer = *first_layer;
+  succ = write( plain_fd, first_layer_template, strlen( first_layer_template ) );
 
-  memcpy( working_first_layer, first_layer_template, strlen( first_layer_template ) );
+  if ( succ != strlen( first_layer_template ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
 
-  // skip over the desc-auth-type and next header
-  working_first_layer += 46;
+    ret = -1;
+    goto finish;
+  }
 
   esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
   wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-  v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  v_base_64_encode( tmp_buff, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  tmp_buff[43] = '\n';
 
-  // skip over the ephemeral key and the newline
-  working_first_layer += 44;
+  succ = write( plain_fd, tmp_buff, 44 );
 
-  for ( i = 0; i < 16; i++ ) {
-    memcpy( working_first_layer, auth_client_template, strlen( auth_client_template ) );
+  if ( succ != 44 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
 
-    // skip over the header
-    working_first_layer += 12;
-
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 8 );
-
-    // skip over the client-id
-    working_first_layer += 12;
-
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 16 );
-
-    // skip over the iv
-    working_first_layer += 23;
-
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
-    v_base_64_encode( (char*)working_first_layer, reusable_sha3_sum, 16 );
-
-    // skip over the encrypted-cookie
-    working_first_layer += 23;
+    ret = -1;
+    goto finish;
   }
 
-  memcpy( working_first_layer, begin_encrypted, strlen( begin_encrypted ) );
+  for ( i = 0; i < 16; i++ )
+  {
+    succ = write( plain_fd, auth_client_template, strlen( auth_client_template ) );
 
-  // skip over the header
-  working_first_layer += strlen( begin_encrypted );
+    if ( succ != strlen( auth_client_template ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
 
-  v_base_64_encode( (char*)working_first_layer, ciphertext, ciphertext_length );
+      ret = -1;
+      goto finish;
+    }
 
-  // skip over the blob
-  working_first_layer += ciphertext_length * 4 / 3;
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( tmp_buff, reusable_sha3_sum, 8 );
+    tmp_buff[11] = ' ';
 
-  if ( ciphertext_length % 6 != 0 ) {
-    working_first_layer++;
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( tmp_buff + 12, reusable_sha3_sum, 16 );
+    tmp_buff[34] = ' ';
+
+    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
+    v_base_64_encode( tmp_buff + 35, reusable_sha3_sum, 16 );
+    tmp_buff[57] = '\n';
+
+    succ = write( plain_fd, tmp_buff, sizeof( tmp_buff ) );
+
+    if ( succ != sizeof( tmp_buff ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
   }
 
-  memcpy( working_first_layer, end_encrypted, strlen( end_encrypted ) );
+  succ = write( plain_fd, begin_encrypted, strlen( begin_encrypted ) );
+
+  if ( succ != strlen( begin_encrypted ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  do
+  {
+    succ = read( cipher_fd, cipher_buff, sizeof( cipher_buff ) );
+
+    if ( succ == 0 )
+    {
+      break;
+    }
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // WARNING, cipher buff must be 255 in length
+    // to encode in 4:3 ratio without padding some bits
+    // for example if we used 256 plain buff would be filled
+    // to 342 bytes and would include padding bits which is not
+    // acceptable in the middle of a base64 encoded value,
+    // only on the end. thus the only reason this works is because
+    // only the last read will have non 255 length
+    v_base_64_encode( plain_buff, cipher_buff, succ );
+
+    write_len = succ * 4 / 3;
+
+    if ( succ % 3 != 0 )
+    {
+      write_len++;
+    }
+
+    succ = write( plain_fd, plain_buff, write_len );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+  } while ( succ == sizeof( plain_buff ) );
+
+  succ = write( plain_fd, end_encrypted, strlen( end_encrypted ) );
+
+  if ( succ != strlen( end_encrypted ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
+#endif
+
+    ret = -1;
+  }
+
+finish:
+  close( plain_fd );
+  close( cipher_fd );
+
+  if ( ret >= 0 )
+  {
+    succ = unlink( filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
+#endif
+
+      return -1;
+    }
+
+    succ = rename( plain_file, filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to rename first plaintext" );
+#endif
+
+      return -1;
+    }
+  }
 
   wc_Sha3_256_Free( &reusable_sha3 );
 
-  return layer_length;
+  return ret;
 }
 
-int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* plaintext, int plaintext_length, unsigned char* secret_data, int secret_data_length, const char* string_constant, int string_constant_length, unsigned char* sub_credential, int64_t revision_counter ) {
+int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, int secret_data_length, const char* string_constant, int string_constant_length, unsigned char* sub_credential, int64_t revision_counter )
+{
+  int ret = 0;
+  int cipher_fd;
+  uint8_t cipher_buff[256];
+  int plain_fd;
+  char plain_buff[256];
+  int succ;
   int wolf_succ;
   int64_t reusable_length;
   unsigned char reusable_length_buffer[8];
@@ -1708,8 +2052,36 @@ int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* p
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   unsigned char keys[AES_256_KEY_SIZE + AES_IV_SIZE + WC_SHA3_256_DIGEST_SIZE];
   Aes reusable_aes_key;
+  char cipher_file[60];
 
-  *ciphertext = malloc( sizeof( unsigned char ) * ( plaintext_length + 16 + WC_SHA3_256_DIGEST_SIZE ) );
+  sprintf( cipher_file, "%s_cipher", filename );
+
+  cipher_fd = open( cipher_file, O_CREAT | O_WRONLY | O_TRUNC );
+
+  if ( cipher_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", cipher_file );
+#endif
+
+    free( secret_input );
+
+    return -1;
+  }
+
+  plain_fd = open( filename, O_RDONLY );
+
+  if ( plain_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
+#endif
+
+    free( secret_input );
+    close( cipher_fd );
+
+    return -1;
+  }
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
   wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
@@ -1737,18 +2109,16 @@ int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* p
   wc_Shake256_Update( &reusable_shake, (unsigned char*)string_constant, string_constant_length );
   wc_Shake256_Final( &reusable_shake, keys, sizeof( keys ) );
 
-  memcpy( *ciphertext, salt, 16 );
+  succ = write( cipher_fd, salt, 16 );
 
-  wc_AesSetKeyDirect( &reusable_aes_key, keys, AES_256_KEY_SIZE, keys + AES_256_KEY_SIZE, AES_ENCRYPTION );
-
-  wolf_succ = wc_AesCtrEncrypt( &reusable_aes_key, *ciphertext + 16, plaintext, plaintext_length );
-
-  if ( wolf_succ < 0 ) {
+  if ( succ != 16 )
+  {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to encrypt descriptor plaintext, error code: %d", wolf_succ );
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   reusable_length = WC_SHA256_DIGEST_SIZE;
@@ -1777,32 +2147,133 @@ int d_encrypt_descriptor_plaintext( unsigned char** ciphertext, unsigned char* p
   wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, sizeof( reusable_length_buffer ) );
   wc_Sha3_256_Update( &reusable_sha3, salt, 16 );
 
-  wc_Sha3_256_Update( &reusable_sha3, *ciphertext + 16, plaintext_length );
+  //memcpy( *ciphertext, salt, 16 );
+
+  wc_AesSetKeyDirect( &reusable_aes_key, keys, AES_256_KEY_SIZE, keys + AES_256_KEY_SIZE, AES_ENCRYPTION );
+
+  do
+  {
+    succ = read( plain_fd, plain_buff, sizeof( plain_buff ) );
+
+    if ( succ == 0 )
+    {
+      break;
+    }
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    wolf_succ = wc_AesCtrEncrypt( &reusable_aes_key, cipher_buff, (uint8_t*)plain_buff, succ );
+
+    if ( wolf_succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to encrypt descriptor plaintext, error code: %d", wolf_succ );
+#endif
+
+      return -1;
+    }
+
+    wc_Sha3_256_Update( &reusable_sha3, cipher_buff, succ );
+
+    succ = write( cipher_fd, cipher_buff, succ );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+  } while ( succ == sizeof( cipher_buff ) );
 
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
 
-  memcpy( *ciphertext + 16 + plaintext_length, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  succ = write( cipher_fd, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
 
+  if ( succ != WC_SHA3_256_DIGEST_SIZE )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  //memcpy( *ciphertext + 16 + plaintext_length, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+
+finish:
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_Shake256_Free( &reusable_shake );
 
   free( secret_input );
 
-  return plaintext_length + 16 + WC_SHA3_256_DIGEST_SIZE;
+  close( cipher_fd );
+  close( plain_fd );
+
+  if ( ret >= 0 )
+  {
+    succ = unlink( filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
+#endif
+
+      return -1;
+    }
+
+    succ = rename( cipher_file, filename );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to rename cipher file %s to %s, errno: %d", cipher_file, filename, errno );
+#endif
+
+      return -1;
+    }
+  }
+
+  return ret;
 }
 
-int d_generate_second_plaintext( unsigned char** second_layer, OnionCircuit** intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key )
+int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, long int valid_after, ed25519_key* descriptor_signing_key )
 {
+  int ret = 0;
+  int fd;
   int i;
   unsigned int idx;
+  int succ;
   int wolf_succ;
   unsigned char packed_link_specifiers[1 + 4 + 6 + ID_LENGTH];
   unsigned char tmp_pub_key[CURVE25519_KEYSIZE];
   unsigned char* working_second_layer;
+  char tmp_buff[187];
 
-  const char* second_layer_template =
+  const char* formats_s =
     "create2-formats 2\n"
     ;
+  const char* intro_point_s = "introduction-point ";
+  const char* onion_key_s = "onion-key ntor ";
+  const char* auth_key_s = "auth-key\n";
+  const char* enc_ntor_s = "enc-key ntor ";
+  const char* enc_cert_s = "enc-key-cert\n";
+  const char* begin_ed_s = "-----BEGIN ED25519 CERT-----\n";
+  const char* end_ed_s = "-----END ED25519 CERT-----\n";
+
+  /*
   const char* introduction_point_template =
     "introduction-point ******************************************\n"
     "onion-key ntor *******************************************\n"
@@ -1819,26 +2290,114 @@ int d_generate_second_plaintext( unsigned char** second_layer, OnionCircuit** in
     "*******************************************************************************************************************************************************************************************"
     "-----END ED25519 CERT-----\n"
     ;
+    */
 
-  *second_layer = malloc( sizeof( unsigned char ) * ( strlen( second_layer_template ) + strlen( introduction_point_template ) * 3 ) );
+  fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC );
 
-  working_second_layer = *second_layer;
+  if ( fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
+#endif
 
-  memcpy( working_second_layer, second_layer_template, strlen( second_layer_template ) );
-  working_second_layer += strlen( second_layer_template );
+    return -1;
+  }
+
+  succ = write( fd, formats_s, strlen( formats_s ) );
+
+  if ( succ != strlen( formats_s ) )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
 
   for ( i = 0; i < 3; i++ )
   {
-    memcpy( working_second_layer, introduction_point_template, strlen( introduction_point_template ) );
-    // skip past the intordouction-point header
-    working_second_layer += 19;
+    // write intro point
+    succ = write( fd, intro_point_s, strlen( intro_point_s ) );
+
+    if ( succ != strlen( intro_point_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
     v_generate_packed_link_specifiers( intro_circuits[i]->relay_list.tail->relay, packed_link_specifiers );
-    v_base_64_encode( (char*)working_second_layer, packed_link_specifiers, sizeof( packed_link_specifiers ) );
-    // skip past the link specifiers and \nonion-key ntor
-    working_second_layer += 42 + 16;
-    v_base_64_encode( (char*)working_second_layer, intro_circuits[i]->relay_list.tail->relay->ntor_onion_key, H_LENGTH );
-    // skip past the onion key and next header
-    working_second_layer += 43 + 39;
+    v_base_64_encode( tmp_buff, packed_link_specifiers, sizeof( packed_link_specifiers ) );
+    tmp_buff[42] = '\n';
+
+    succ = write( fd, tmp_buff, 43 );
+
+    if ( succ != 43 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // write onion key
+    succ = write( fd, onion_key_s, strlen( onion_key_s ) );
+
+    if ( succ != strlen( onion_key_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    v_base_64_encode( tmp_buff, intro_circuits[i]->relay_list.tail->relay->ntor_onion_key, H_LENGTH );
+    tmp_buff[43] = '\n';
+
+    succ = write( fd, tmp_buff, 44 );
+
+    if ( succ != 44 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // write auth key and cert
+    succ = write( fd, auth_key_s, strlen( auth_key_s ) );
+
+    if ( succ != strlen( auth_key_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    succ = write( fd, begin_ed_s, strlen( begin_ed_s ) );
+
+    if ( succ != strlen( begin_ed_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
 
     idx = ED25519_PUB_KEY_SIZE;
     wolf_succ = wc_ed25519_export_public( &intro_circuits[i]->intro_crypto->auth_key, tmp_pub_key, &idx );
@@ -1848,17 +2407,57 @@ int d_generate_second_plaintext( unsigned char** second_layer, OnionCircuit** in
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to export intro circuit auth key, error code: %d", wolf_succ );
 #endif
+
+      ret = -1;
+      goto finish;
     }
 
-    if ( d_generate_packed_crosscert( working_second_layer, tmp_pub_key, descriptor_signing_key, 0x09, valid_after ) < 0 )
+    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x09, valid_after ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 #endif
+
+      ret = -1;
+      goto finish;
     }
 
-    // skip past the cert and next header
-    working_second_layer += 187 + 40;
+    succ = write( fd, tmp_buff, 187 );
+
+    if ( succ != 187 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    succ = write( fd, end_ed_s, strlen( end_ed_s ) );
+
+    if ( succ != strlen( end_ed_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // write enc ntor
+    succ = write( fd, enc_ntor_s, strlen( enc_ntor_s ) );
+
+    if ( succ != strlen( enc_ntor_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
 
     idx = CURVE25519_KEYSIZE;
     wolf_succ = wc_curve25519_export_public_ex( &intro_circuits[i]->intro_crypto->encrypt_key, tmp_pub_key, &idx, EC25519_LITTLE_ENDIAN );
@@ -1869,29 +2468,91 @@ int d_generate_second_plaintext( unsigned char** second_layer, OnionCircuit** in
       ESP_LOGE( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
-    v_base_64_encode( (char*)working_second_layer, tmp_pub_key, CURVE25519_KEYSIZE );
+    v_base_64_encode( tmp_buff, tmp_pub_key, CURVE25519_KEYSIZE );
+    tmp_buff[43] = '\n';
 
-    // skip past the enc key and next header
-    working_second_layer += 43 + 43;
+    succ = write( fd, tmp_buff, 44 );
 
-    // TODO create the derived key by converting our intro_encrypt_key into an ed25519 key and verify that this method works
+    if ( succ != 44 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    // write enc key and cert
+    succ = write( fd, enc_cert_s, strlen( enc_cert_s ) );
+
+    if ( succ != strlen( enc_cert_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    succ = write( fd, begin_ed_s, strlen( begin_ed_s ) );
+
+    if ( succ != strlen( begin_ed_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
     v_ed_pubkey_from_curve_pubkey( tmp_pub_key, intro_circuits[i]->intro_crypto->encrypt_key.p.point, 0 );
 
-    if ( d_generate_packed_crosscert( working_second_layer, tmp_pub_key, descriptor_signing_key, 0x0B, valid_after ) < 0 )
+    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x0B, valid_after ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate the enc-key cross cert" );
 #endif
+
+      ret = -1;
+      goto finish;
     }
 
-    // skip past the cert and next header
-    working_second_layer += 187 + 27;
+    succ = write( fd, tmp_buff, 187 );
+
+    if ( succ != 187 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
+
+    succ = write( fd, end_ed_s, strlen( end_ed_s ) );
+
+    if ( succ != strlen( end_ed_s ) )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
+#endif
+
+      ret = -1;
+      goto finish;
+    }
   }
 
-  return strlen( second_layer_template ) + strlen( introduction_point_template ) * 3;
+finish:
+  close( fd );
+
+  return ret;
 }
 
 void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers ) {
@@ -1908,7 +2569,7 @@ void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed
   packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 );
   packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 );
   packed_link_specifiers[3] = (unsigned char)relay->address;
-  packed_link_specifiers[7] = (unsigned char)relay->or_port >> 8;
+  packed_link_specifiers[7] = (unsigned char)( relay->or_port >> 8 );
   packed_link_specifiers[8] = (unsigned char)relay->or_port;
 
   // LEGACYLink specifier
@@ -1920,7 +2581,7 @@ void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed
   memcpy( packed_link_specifiers + 11, relay->identity, ID_LENGTH );
 }
 
-int d_generate_packed_crosscert( unsigned char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) {
+int d_generate_packed_crosscert( char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) {
   int res = 0;
 
   unsigned int idx;
@@ -2286,6 +2947,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     v_base_32_encode( onion_address, raw_onion_address, sizeof( raw_onion_address ) );
 
+    strcpy( onion_service->hostname, onion_address );
+
     ESP_LOGE( MINITOR_TAG, "onion address: %s", onion_address );
 
     strcpy( working_file, onion_service_directory );
@@ -2434,6 +3097,35 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
       return -1;
     }
+
+    strcpy( working_file, onion_service_directory );
+    strcat( working_file, "/hostname" );
+
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    if ( read( fd, onion_service->hostname, 62 ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
+
+    onion_service->hostname[62] = 0;
+
+    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
+#endif
+
+      return -1;
+    }
   }
 
   wc_Sha3_256_Free( &reusable_sha3 );
@@ -2483,14 +3175,52 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     "Content-Length: "
     ;
   const char* header_end = "\r\n\r\n";
-  int total_tx_length = 0;
+  //int total_tx_length = 0;
   int tx_limit;
-  char content_length[10] = { 0 };
+  char content_length[11] = { 0 };
   int http_header_length;
-  int descriptor_length = publish_circuit->service->hs_desc_lengths[publish_circuit->desc_index];
-  unsigned char* descriptor_text = publish_circuit->service->hs_descs[publish_circuit->desc_index] + HS_DESC_SIG_PREFIX_LENGTH;
+  int descriptor_length;
+  //unsigned char* descriptor_text = publish_circuit->service->hs_descs[publish_circuit->desc_index] + HS_DESC_SIG_PREFIX_LENGTH;
+  int desc_fd;
+  char desc_buff[RELAY_PAYLOAD_LEN];
   Cell unpacked_cell;
   uint8_t* packed_cell;
+  int succ;
+
+  desc_fd = open( publish_circuit->service->hs_descs[publish_circuit->desc_index], O_RDONLY );
+
+  if ( desc_fd < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
+#endif
+
+    return -1;
+  }
+
+  descriptor_length = lseek( desc_fd, 0, SEEK_END ) - HS_DESC_SIG_PREFIX_LENGTH;
+
+  ESP_LOGE( MINITOR_TAG, "desc length %d", descriptor_length );
+
+  if ( descriptor_length < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
+#endif
+
+    return -1;
+  }
+
+  sprintf( content_length, "%d", descriptor_length );
+
+  if ( lseek( desc_fd, HS_DESC_SIG_PREFIX_LENGTH, SEEK_SET ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
+#endif
+
+    return -1;
+  }
 
   ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
   REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) ) );
@@ -2501,59 +3231,88 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
   free( ipv4_string );
 
-  sprintf( content_length, "%d", descriptor_length );
-
-  http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
-  tx_limit = http_header_length + descriptor_length;
+  //http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
 
   unpacked_cell.command = RELAY;
   unpacked_cell.circ_id = publish_circuit->circ_id;
 
-  while ( total_tx_length < tx_limit )
+  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
+  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
+  // TODO possibly need to set the stream_id, wasn't clear in torspec
+  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
+  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  ( (PayloadRelay*)unpacked_cell.payload )->length = RELAY_PAYLOAD_LEN;
+
+  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
+
+  ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * ( (PayloadRelay*)unpacked_cell.payload )->length );
+
+  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
+  http_header_length = strlen( REQUEST );
+  free( REQUEST );
+
+  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, content_length, strlen( content_length ) );
+  http_header_length += strlen( content_length );
+
+  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, header_end, strlen( header_end ) );
+  http_header_length += strlen( header_end );
+
+  succ = read( desc_fd, desc_buff, RELAY_PAYLOAD_LEN - http_header_length );
+
+  if ( succ != RELAY_PAYLOAD_LEN - http_header_length )
   {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
+#endif
+
+    return -1;
+  }
+
+  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, desc_buff, succ );
+
+  packed_cell = pack_and_free( &unpacked_cell );
+
+  if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
+#endif
+
+    return -1;
+  }
+
+  do
+  {
+    succ = read( desc_fd, desc_buff, RELAY_PAYLOAD_LEN );
+
+    if ( succ < 0 )
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
+#endif
+
+      return -1;
+    }
+
+    if ( succ == 0 )
+    {
+      break;
+    }
+
     unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
     ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
     // TODO possibly need to set the stream_id, wasn't clear in torspec
     ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
     ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-
-    if ( tx_limit - total_tx_length < RELAY_PAYLOAD_LEN )
-    {
-      ( (PayloadRelay*)unpacked_cell.payload )->length = tx_limit - total_tx_length;
-    }
-    else
-    {
-      ( (PayloadRelay*)unpacked_cell.payload )->length = RELAY_PAYLOAD_LEN;
-    }
+    ( (PayloadRelay*)unpacked_cell.payload )->length = succ;
 
     ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
 
-    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * ( (PayloadRelay*)unpacked_cell.payload )->length );
+    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * succ );
 
-    if ( total_tx_length == 0 )
-    {
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
-      total_tx_length += strlen( REQUEST );
-
-      free( REQUEST );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, content_length, strlen( content_length ) );
-      total_tx_length += strlen( content_length );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, header_end, strlen( header_end ) );
-      total_tx_length += strlen( header_end );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, descriptor_text, ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length );
-      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length;
-    }
-    else
-    {
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, descriptor_text + total_tx_length - http_header_length, ( (PayloadRelay*)unpacked_cell.payload )->length );
-      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length;
-    }
-
-    //ESP_LOGE( MINITOR_TAG, "%.*s", ( (PayloadRelay*)unpacked_cell.payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload );
+    memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, desc_buff, succ );
 
     packed_cell = pack_and_free( &unpacked_cell );
 
@@ -2565,7 +3324,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
       return -1;
     }
-  }
+  } while ( succ == RELAY_PAYLOAD_LEN );
 
   return 0;
 }
@@ -2620,6 +3379,7 @@ int d_push_hsdir( OnionService* service )
   OnionCircuit* tmp_circuit;
   OnionCircuit* intro_circuits[3];
   OnionRelay* start_relay;
+  char desc_file[26];
 
   if ( service->intro_live_count < 3 )
   {
@@ -2648,7 +3408,10 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
+    ESP_LOGE( MINITOR_TAG, "intro port %d", tmp_circuit->relay_list.tail->relay->or_port );
+
     intro_circuits[i] = tmp_circuit;
+    tmp_circuit = tmp_circuit->next;
   }
 
   xSemaphoreGive( circuits_mutex );
@@ -2662,9 +3425,9 @@ int d_push_hsdir( OnionService* service )
   blinded_keys[1].expanded = 1;
 
   wc_ed25519_init( &descriptor_signing_key );
-  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
-
   wc_ed25519_make_key( &rng, 32, &descriptor_signing_key );
+
+  wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
   wc_FreeRng( &rng );
 
@@ -2736,12 +3499,20 @@ int d_push_hsdir( OnionService* service )
   // i = 0 is first descriptor, 1 is second as per the spec
   for ( i = 0; i < 2; i++ )
   {
-    ESP_LOGE( MINITOR_TAG, "Generating second plaintext" );
+    // null terminated
+    // /sdcard/abcdefghij_desc_0\0
+    strcpy( desc_file, "/sdcard/" );
+    memcpy( desc_file + 8, service->hostname, 10 );
+    desc_file[18] = 0;
+    strcat( desc_file, "_desc_" );
+    desc_file[24] = (char)(48 + i);
+    desc_file[25] = 0;
 
     // generate second layer plaintext
-    reusable_text_length = d_generate_second_plaintext( &reusable_plaintext, intro_circuits, valid_after, &descriptor_signing_key );
+    succ = d_generate_second_plaintext( desc_file, intro_circuits, valid_after, &descriptor_signing_key );
+    //succ = tmp_d_generate_second_plaintext( desc_file, intro_circuits, valid_after, &descriptor_signing_key );
 
-    if ( reusable_text_length < 0 )
+    if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
@@ -2775,11 +3546,8 @@ int d_push_hsdir( OnionService* service )
     }
 
     // encrypt second layer plaintext
-    ESP_LOGE( MINITOR_TAG, "heap before d_encrypt_descriptor_plaintext: %d", xPortGetFreeHeapSize() );
-    reusable_text_length = d_encrypt_descriptor_plaintext(
-      &reusable_ciphertext,
-      reusable_plaintext,
-      reusable_text_length,
+    succ = d_encrypt_descriptor_plaintext(
+      desc_file,
       blinded_pub_keys[i],
       ED25519_PUB_KEY_SIZE,
       "hsdir-encrypted-data",
@@ -2788,9 +3556,9 @@ int d_push_hsdir( OnionService* service )
       revision_counter
     );
 
-    free( reusable_plaintext );
+    //free( reusable_plaintext );
 
-    if ( reusable_text_length < 0 )
+    if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
@@ -2799,9 +3567,9 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
-    reusable_text_length = d_generate_first_plaintext( &reusable_plaintext, reusable_ciphertext, reusable_text_length );
+    succ = d_generate_first_plaintext( desc_file );
 
-    if ( reusable_text_length < 0 )
+    if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
@@ -2810,13 +3578,11 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
-    free( reusable_ciphertext );
+    //free( reusable_ciphertext );
 
     // encrypt first layer plaintext
-    reusable_text_length = d_encrypt_descriptor_plaintext(
-      &reusable_ciphertext,
-      reusable_plaintext,
-      reusable_text_length,
+    succ = d_encrypt_descriptor_plaintext(
+      desc_file,
       blinded_pub_keys[i],
       ED25519_PUB_KEY_SIZE,
       "hsdir-superencrypted-data",
@@ -2825,9 +3591,9 @@ int d_push_hsdir( OnionService* service )
       revision_counter
     );
 
-    free( reusable_plaintext );
+    //free( reusable_plaintext );
 
-    if ( reusable_text_length < 0 )
+    if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
@@ -2837,19 +3603,17 @@ int d_push_hsdir( OnionService* service )
     }
 
     // create outer descriptor wrapper
-    reusable_text_length = d_generate_outer_descriptor(
-      &reusable_plaintext,
-      reusable_ciphertext,
-      reusable_text_length,
+    succ = d_generate_outer_descriptor(
+      desc_file,
       &descriptor_signing_key,
       valid_after,
       &blinded_keys[i],
       revision_counter
     );
 
-    free( reusable_ciphertext );
+    //free( reusable_ciphertext );
 
-    if ( reusable_text_length < 0 )
+    if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
@@ -2875,8 +3639,10 @@ int d_push_hsdir( OnionService* service )
     }
     */
 
-    service->hs_descs[i] = reusable_plaintext;
-    service->hs_desc_lengths[i] = reusable_text_length;
+    strcpy( service->hs_descs[i], desc_file );
+
+    //service->hs_descs[i] = reusable_plaintext;
+    //service->hs_desc_lengths[i] = reusable_text_length;
     //free( reusable_plaintext );
   }
 
@@ -2909,6 +3675,7 @@ int d_push_hsdir( OnionService* service )
 
 void v_cleanup_service_hs_data( OnionService* service, int desc_index )
 {
+  int i;
   OnionCircuit* tmp_circuit;
   DoublyLinkedOnionRelay* dl_relay;
   DoublyLinkedOnionRelay* next_relay;
@@ -2917,26 +3684,9 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
   {
     v_set_hsdir_timer( service->hsdir_timer );
 
-    // MUTEX TAKE
-    xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+    i = d_get_standby_count();
 
-    tmp_circuit = onion_circuits;
-
-    // check if we have at least 1 standby circuit being built or already built
-    while ( tmp_circuit != NULL )
-    {
-      if ( tmp_circuit->target_status == CIRCUIT_STANDBY )
-      {
-        break;
-      }
-
-      tmp_circuit = tmp_circuit->next;
-    }
-
-    xSemaphoreGive( circuits_mutex );
-    // MUTEX GIVE
-
-    if ( tmp_circuit == NULL )
+    for ( ; i < 2; i++ )
     {
       // create a standby circuit
       v_send_init_circuit(
@@ -2964,5 +3714,5 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
   }
 
   free( service->target_relays[desc_index] );
-  free( service->hs_descs[desc_index] );
+  //free( service->hs_descs[desc_index] );
 }

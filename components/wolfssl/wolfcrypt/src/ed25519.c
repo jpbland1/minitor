@@ -22,6 +22,10 @@
 
  /* Based On Daniel J Bernstein's ed25519 Public Domain ref10 work. */
 
+// CUSTOM
+#include <unistd.h>
+#include <errno.h>
+
 #ifdef HAVE_CONFIG_H
     #include <config.h>
 #endif
@@ -251,6 +255,163 @@ static int ed25519_sign_msg(const byte* in, word32 inLen, byte* out,
     if (ret == 0)
         ret = wc_Sha512Update(&sha, in, inLen);
     if (ret == 0)
+        ret = wc_Sha512Final(&sha, hram);
+    wc_Sha512Free(&sha);
+    if (ret != 0)
+        return ret;
+
+#ifdef FREESCALE_LTC_ECC
+    LTC_PKHA_sc_reduce(hram);
+    LTC_PKHA_sc_muladd(out + (ED25519_SIG_SIZE/2), hram, az, nonce);
+#else
+    sc_reduce(hram);
+    sc_muladd(out + (ED25519_SIG_SIZE/2), hram, az, nonce);
+#endif
+
+    return ret;
+}
+
+int ed25519_sign_msg_custom
+(
+  int in_fd,
+  byte* out,
+  word32 *outLen,
+  ed25519_key* key
+)
+{
+#ifdef FREESCALE_LTC_ECC
+    byte   tempBuf[ED25519_PRV_KEY_SIZE];
+#else
+    ge_p3  R;
+#endif
+    byte   nonce[WC_SHA512_DIGEST_SIZE];
+    byte   hram[WC_SHA512_DIGEST_SIZE];
+    byte   az[ED25519_PRV_KEY_SIZE];
+    wc_Sha512 sha;
+    int    ret;
+    uint8_t in_buff[256];
+
+    /* sanity check on arguments */
+    if (in_fd <= 0 || out == NULL || outLen == NULL || key == NULL) {
+        return BAD_FUNC_ARG;
+    }
+    if (!key->pubKeySet)
+        return BAD_FUNC_ARG;
+
+    /* check and set up out length */
+    if (*outLen < ED25519_SIG_SIZE) {
+        *outLen = ED25519_SIG_SIZE;
+        return BUFFER_E;
+    }
+    *outLen = ED25519_SIG_SIZE;
+
+    /* step 1: create nonce to use where nonce is r in
+       r = H(h_b, ... ,h_2b-1,M) */
+    if ( key->expanded == 0 ) {
+      ret = wc_Sha512Hash(key->k, ED25519_KEY_SIZE, az);
+    } else {
+      XMEMCPY( az, key->k, ED25519_PRV_KEY_SIZE );
+      ret = 0;
+    }
+
+    if (ret != 0)
+        return ret;
+
+    /* apply clamp */
+    if ( key->expanded == 0 && key->no_clamp == 0  ) {
+      az[0]  &= 248;
+      az[31] &= 63; /* same than az[31] &= 127 because of az[31] |= 64 */
+      az[31] |= 64;
+    }
+
+    ret = wc_InitSha512(&sha);
+    if (ret != 0)
+        return ret;
+    if (ret == 0)
+        ret = wc_Sha512Update(&sha, az + ED25519_KEY_SIZE, ED25519_KEY_SIZE);
+
+    if ( ret == 0 )
+    {
+      ret = lseek( in_fd, 0, SEEK_SET );
+    }
+
+    if ( ret == 0 )
+    {
+      do
+      {
+        ret = read( in_fd, in_buff, sizeof( in_buff ) );
+
+        if ( ret <= 0 )
+        {
+          break;
+        }
+
+        if ( wc_Sha512Update( &sha, in_buff, ret ) != 0 )
+        {
+          ret = -1;
+          break;
+        }
+      } while ( ret == sizeof( in_buff ) );
+    }
+
+    if (ret >= 0)
+        ret = wc_Sha512Final(&sha, nonce);
+    wc_Sha512Free(&sha);
+    if (ret != 0)
+        return ret;
+
+#ifdef FREESCALE_LTC_ECC
+    ltc_pkha_ecc_point_t ltcPoint = {0};
+    ltcPoint.X = &tempBuf[0];
+    ltcPoint.Y = &tempBuf[32];
+    LTC_PKHA_sc_reduce(nonce);
+    LTC_PKHA_Ed25519_PointMul(LTC_PKHA_Ed25519_BasePoint(), nonce,
+           ED25519_KEY_SIZE, &ltcPoint, kLTC_Ed25519 /* result on Ed25519 */);
+    LTC_PKHA_Ed25519_Compress(&ltcPoint, out);
+#else
+    sc_reduce(nonce);
+
+    /* step 2: computing R = rB where rB is the scalar multiplication of
+       r and B */
+    ge_scalarmult_base(&R,nonce);
+    ge_p3_tobytes(out,&R);
+#endif
+
+    /* step 3: hash R + public key + message getting H(R,A,M) then
+       creating S = (r + H(R,A,M)a) mod l */
+    ret = wc_InitSha512(&sha);
+    if (ret != 0)
+        return ret;
+    if (ret == 0)
+        ret = wc_Sha512Update(&sha, out, ED25519_SIG_SIZE/2);
+    if (ret == 0)
+        ret = wc_Sha512Update(&sha, key->p, ED25519_PUB_KEY_SIZE);
+
+    if ( ret == 0 )
+    {
+      ret = lseek( in_fd, 0, SEEK_SET );
+    }
+
+    if ( ret == 0 )
+    {
+      do
+      {
+        ret = read( in_fd, in_buff, sizeof( in_buff ) );
+
+        if ( ret <= 0 )
+        {
+          break;
+        }
+
+        if ( wc_Sha512Update( &sha, in_buff, ret ) != 0 )
+        {
+          ret = -1;
+          break;
+        }
+      } while ( ret == sizeof( in_buff ) );
+    }
+
+    if (ret >= 0)
         ret = wc_Sha512Final(&sha, hram);
     wc_Sha512Free(&sha);
     if (ret != 0)

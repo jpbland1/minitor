@@ -8,6 +8,7 @@
 void v_send_init_circuit( int length, CircuitStatus target_status, OnionService* service, int desc_index, int target_relay_index, OnionRelay* start_relay, OnionRelay* end_relay, HsCrypto* hs_crypto );
 void v_minitor_daemon( void* pv_parameters );
 void v_set_hsdir_timer( TimerHandle_t hsdir_timer );
+int d_get_standby_count();
 
 extern OnionCircuit* onion_circuits;
 extern OnionService* onion_services;

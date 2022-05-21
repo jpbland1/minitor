@@ -38,8 +38,8 @@ typedef struct OnionService
   int hsdir_sent;
   int hsdir_to_send;
   DoublyLinkedOnionRelayList* target_relays[2];
-  int hs_desc_lengths[2];
-  unsigned char* hs_descs[2];
+  char hostname[63];
+  char hs_descs[2][26];
 } OnionService;
 
 void v_add_service_to_list( OnionService* service, OnionService** list );

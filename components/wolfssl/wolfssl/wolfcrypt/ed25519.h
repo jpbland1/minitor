@@ -100,6 +100,17 @@ int wc_ed25519_make_key(WC_RNG* rng, int keysize, ed25519_key* key);
 WOLFSSL_API
 int wc_ed25519_sign_msg(const byte* in, word32 inLen, byte* out,
                         word32 *outLen, ed25519_key* key);
+
+// TRIPLE CUSTOM
+WOLFSSL_API
+int ed25519_sign_msg_custom
+(
+  int in_fd,
+  byte* out,
+  word32 *outLen,
+  ed25519_key* key
+);
+
 WOLFSSL_API
 int wc_ed25519ctx_sign_msg(const byte* in, word32 inLen, byte* out,
                            word32 *outLen, ed25519_key* key,
