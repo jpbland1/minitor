@@ -1,2 +1,0 @@
-Debug the current memory issues and file not found error. This might be a good opportunity to clean up memory leaks and the stack, this problem could be a memory corruption problem ,
-curse yourself for not commitint earlier this week when the introductions were working

@@ -1,6 +1,9 @@
-# The following lines of boilerplate have to be in your project's
-# CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.5)
 
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(minitor)
+set(COMPONENT_REQUIRES wolfssl esp32-idf-sqlite3)
+
+set(COMPONENT_SRCDIRS "./src/" "./src/structures/ ./src/models ./src/test")
+
+set(COMPONENT_ADD_INCLUDEDIRS "./include/")
+
+register_component()
