@@ -3166,6 +3166,7 @@ int d_begin_hsdir( OnionCircuit* publish_circuit )
 
 int d_post_hs_desc( OnionCircuit* publish_circuit )
 {
+  int ret = 0;
   char* REQUEST;
   char* ipv4_string;
   const char* REQUEST_CONST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
@@ -3208,7 +3209,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   sprintf( content_length, "%d", descriptor_length );
@@ -3219,7 +3221,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
@@ -3266,7 +3269,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, desc_buff, succ );
@@ -3279,7 +3283,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   do
@@ -3292,7 +3297,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
       ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( succ == 0 )
@@ -3322,11 +3328,15 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
       ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
   } while ( succ == RELAY_PAYLOAD_LEN );
 
-  return 0;
+finish:
+  close( desc_fd );
+
+  return ret;
 }
 
 void v_build_hsdir_circuits( OnionService* service, DoublyLinkedOnionRelayList* target_relays, int desc_index )

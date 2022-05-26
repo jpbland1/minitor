@@ -2202,7 +2202,7 @@ int d_fetch_consensus_info()
   if ( d_create_consensus( &network_consensus ) < 0 )
   {
     ret = -1;
-    goto finish;
+    goto start;
   }
 
   time( &now );

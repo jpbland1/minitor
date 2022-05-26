@@ -81,8 +81,6 @@ int d_get_standby_count()
   int count = 0;
   OnionCircuit* circuit;
 
-  ESP_LOGE( CORE_TAG, "Start count get" );
-
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
 
@@ -100,8 +98,6 @@ int d_get_standby_count()
 
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
-
-  ESP_LOGE( CORE_TAG, "End count get" );
 
   return count;
 }

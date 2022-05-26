@@ -671,6 +671,8 @@ int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t
 
       break;
     }
+
+    local_connection = local_connection->next;
   }
 
   if ( local_connection == NULL )
