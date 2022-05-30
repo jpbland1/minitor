@@ -15,6 +15,7 @@ typedef enum OnionMessageType
   TIMER_CONSENSUS,
   TIMER_KEEPALIVE,
   TIMER_HSDIR,
+  TIMER_CIRCUIT_TIMEOUT,
 } OnionMessageType;
 
 typedef struct OnionMessage

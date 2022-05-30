@@ -10,10 +10,11 @@ void v_minitor_daemon( void* pv_parameters );
 void v_set_hsdir_timer( TimerHandle_t hsdir_timer );
 int d_get_standby_count();
 
+extern TimerHandle_t keepalive_timer;
+extern TimerHandle_t timeout_timer;
 extern OnionCircuit* onion_circuits;
 extern OnionService* onion_services;
 extern QueueHandle_t core_task_queue;
 extern SemaphoreHandle_t circuits_mutex;
-extern TimerHandle_t keepalive_timer;
 
 #endif

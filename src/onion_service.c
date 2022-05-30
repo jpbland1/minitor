@@ -79,6 +79,9 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTra
 
   if ( tcp_traffic->length == 0 )
   {
+
+    ESP_LOGE( MINITOR_TAG, "\nSENDING RELAY_END\n" );
+
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_END;
     ( (PayloadRelay*)unpacked_cell.payload )->length = 1;
     ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEnd ) );

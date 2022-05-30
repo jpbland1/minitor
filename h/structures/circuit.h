@@ -53,6 +53,8 @@ typedef struct OnionCircuit
   struct OnionCircuit* next;
   struct OnionCircuit* previous;
   uint32_t circ_id;
+  bool want_action;
+  time_t last_action;
   CircuitStatus status;
   CircuitStatus target_status;
   DlConnection* or_connection;

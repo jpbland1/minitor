@@ -16,6 +16,23 @@
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
+static void v_timer_trigger_timeout( TimerHandle_t x_timer )
+{
+  int succ;
+  OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
+  onion_message->type = TIMER_CIRCUIT_TIMEOUT;
+
+  succ = xQueueSendToBack( core_task_queue, (void*)(&onion_message), 0 );
+
+  // try again in half a second
+  if ( succ == pdFALSE )
+  {
+    free( onion_message );
+    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    xTimerStart( x_timer, portMAX_DELAY );
+  }
+}
+
 static void v_timer_trigger_consensus( TimerHandle_t x_timer )
 {
   int succ;
@@ -27,6 +44,7 @@ static void v_timer_trigger_consensus( TimerHandle_t x_timer )
   // try again in half a second
   if ( succ == pdFALSE )
   {
+    free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
     xTimerStart( x_timer, portMAX_DELAY );
   }
@@ -43,6 +61,7 @@ static void v_timer_trigger_keepalive( TimerHandle_t x_timer )
   // try again in half a second
   if ( succ == pdFALSE )
   {
+    free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
     xTimerStart( x_timer, portMAX_DELAY );
   }
@@ -60,134 +79,11 @@ static void v_timer_trigger_hsdir_update( TimerHandle_t x_timer )
   // try again in half a second
   if ( succ == pdFALSE )
   {
+    free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
     xTimerStart( x_timer, portMAX_DELAY );
   }
 }
-
-/*
-static void v_handle_timed_jobs( void* pv_parameters )
-{
-  int succ;
-  uint32_t action_or_service;
-
-  while ( 1 )
-  {
-    xQueueReceive( timer_queue, &action_or_service, portMAX_DELAY );
-
-    // This saves us from having a null onion_service later
-    if ( action_or_service == MINITOR_TIMER_CONSENSUS )
-    {
-      if ( d_fetch_consensus_info() < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to fetch consensus" );
-#endif
-
-        xTimerChangePeriod( consensus_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-        xTimerStart( consensus_timer, portMAX_DELAY );
-      }
-    }
-    else if ( action_or_service == MINITOR_TIMER_CONSENSUS_VALID )
-    {
-      if ( d_set_next_consenus() < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to load next consensus" );
-#endif
-
-        xTimerChangePeriod( consensus_valid_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-        xTimerStart( consensus_valid_timer, portMAX_DELAY );
-      }
-    }
-    else if ( action_or_service == MINITOR_TIMER_KEEPALIVE )
-    {
-      xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-
-      v_keep_circuitlist_alive( &standby_circuits );
-
-      xSemaphoreGive( standby_circuits_mutex );
-
-      ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive taking rend mutex" );
-
-      xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
-
-      v_keep_circuitlist_alive( &standby_rend_circuits );
-
-      xSemaphoreGive( standby_rend_circuits_mutex );
-
-      ESP_LOGE( MINITOR_TAG, "\nv_circuit_keepalive gave rend mutex" );
-
-      xTimerStart( keepalive_timer, portMAX_DELAY );
-    }
-    else
-    {
-      if ( d_push_hsdir( (OnionService*)action_or_service ) < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to d_push_hsdir for %s", ( (OnionService*)action_or_service )->onion_service_directory );
-#endif
-
-        xTimerChangePeriod( ( (OnionService*)action_or_service )->hsdir_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-        xTimerStart( ( (OnionService*)action_or_service )->hsdir_timer, portMAX_DELAY );
-      }
-    }
-  }
-}
-*/
-
-/*
-// TODO move to services file
-inline void* px_get_service_entity_by_circ_id( DlOnionService* dl_service, uint32_t circ_id, int want_circuit )
-{
-  DlOnionCircuit* dl_circuit
-
-  // loop over all services
-  while ( dl_service != NULL )
-  {
-    dl_circuit = dl_service->onion_circuits;
-
-    // loop over all circuits within the service
-    while ( dl_circuit != NULL )
-    {
-      // if our circuit matches, we found the correct service
-      if ( dl_circuit->circuit->circ_id == circ_id )
-      {
-        break;
-      }
-
-      dl_circuit = dl_circuit->next;
-    }
-
-    if ( dl_circuit != NULL )
-    {
-      break;
-    }
-
-    dl_service = dl_service->next;
-  }
-
-  if ( want_circuit == 1 )
-  {
-    return dl_circuit;
-  }
-
-  return dl_service;
-}
-*/
-
-/*
-DlOnionService* px_get_service_by_circ_id( DlOnionService* dl_service, uint32_t circ_id )
-{
-  // patsy function handles both service and circuit to save lines
-  return (DlOnionService*)px_get_service_entity_by_circ_id( dl_service, circ_id, 0 );
-}
-
-DlOnionCircuit* px_get_service_circuit_by_circ_id( DlOnionService* dl_service, uint32_t circ_id )
-{
-  return (DlOnionCircuit*)px_get_service_entity_by_circ_id( dl_service, circ_id, 1 );
-}
-*/
 
 // intialize tor
 int d_minitor_INIT()
@@ -221,11 +117,21 @@ int d_minitor_INIT()
 
   keepalive_timer = xTimerCreate(
     "KEEPALIVE_TIMER",
-    1000 * 60 * 2,
+    1000 * 60 * 2 / portTICK_PERIOD_MS,
     0,
     NULL,
     v_timer_trigger_keepalive
   );
+  xTimerReset( keepalive_timer, portMAX_DELAY );
+
+  timeout_timer = xTimerCreate(
+    "TIMEOUT_TIMER",
+    1000 * 10 / portTICK_PERIOD_MS,
+    0,
+    NULL,
+    v_timer_trigger_timeout
+  );
+  xTimerReset( timeout_timer, portMAX_DELAY );
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
