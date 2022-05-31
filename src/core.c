@@ -69,11 +69,9 @@ void v_set_hsdir_timer( TimerHandle_t hsdir_timer )
     xTimerChangePeriod( hsdir_timer, ( 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
   }
 
-  xTimerStart( hsdir_timer, portMAX_DELAY );
 #else
   // start the hsdir_timer at 60-120 minutes, may be too long for clock accurracy
   xTimerChangePeriod( hsdir_timer, 1000 * 60 * ( ( esp_random() % 60 ) + 60 ) / portTICK_PERIOD_MS, portMAX_DELAY );
-  xTimerStart( hsdir_timer, portMAX_DELAY );
 #endif
 }
 
@@ -864,7 +862,6 @@ static void v_handle_scheduled_consensus()
 #endif
 
     xTimerChangePeriod( consensus_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-    xTimerStart( consensus_timer, portMAX_DELAY );
   }
 }
 
@@ -1059,7 +1056,6 @@ void v_handle_circuit_timeout()
 
   // this should also start the timer
   xTimerChangePeriod( timeout_timer, 1000 * min_left / portTICK_PERIOD_MS, portMAX_DELAY );
-  //xTimerReset( timeout_timer, portMAX_DELAY );
 }
 
 void v_minitor_daemon( void* pv_parameters )

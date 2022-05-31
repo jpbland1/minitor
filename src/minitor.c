@@ -29,7 +29,6 @@ static void v_timer_trigger_timeout( TimerHandle_t x_timer )
   {
     free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-    xTimerStart( x_timer, portMAX_DELAY );
   }
 }
 
@@ -46,7 +45,6 @@ static void v_timer_trigger_consensus( TimerHandle_t x_timer )
   {
     free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-    xTimerStart( x_timer, portMAX_DELAY );
   }
 }
 
@@ -63,7 +61,6 @@ static void v_timer_trigger_keepalive( TimerHandle_t x_timer )
   {
     free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-    xTimerStart( x_timer, portMAX_DELAY );
   }
 }
 
@@ -81,7 +78,6 @@ static void v_timer_trigger_hsdir_update( TimerHandle_t x_timer )
   {
     free( onion_message );
     xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
-    xTimerStart( x_timer, portMAX_DELAY );
   }
 }
 
