@@ -873,6 +873,7 @@ int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_arr
 }
 */
 
+/*
 static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int desired_count, DoublyLinkedOnionRelayList* used_relays, int next )
 {
   int i;
@@ -931,6 +932,7 @@ cleanup:
 
   return NULL;
 }
+*/
 
 static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
 {
@@ -1009,7 +1011,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     to_store = hsdir_spread_store;
 
-    hsdir_index_list = px_get_hsdir_relays_by_id_hash( hs_index, hsdir_spread_store, next, target_relays );
+    hsdir_index_list = px_get_responsible_hsdir_relays_by_hs_index( hs_index, hsdir_spread_store, next, target_relays );
 
     if ( hsdir_index_list == NULL )
     {
@@ -1284,21 +1286,28 @@ static char* pc_ipv4_to_string( unsigned int address ) {
   int tmp_length = 0;
   unsigned char tmp_byte;
 
-  for ( i = 0; i < 4; i++ ) {
+  for ( i = 0; i < 4; i++ )
+  {
     tmp_byte = ( address >> ( 8 * i ) ) & 0xff;
 
-    if ( tmp_byte < 10 ) {
+    if ( tmp_byte < 10 )
+    {
       tmp_length = 1;
-    } else if ( tmp_byte < 100 ) {
+    }
+    else if ( tmp_byte < 100 )
+    {
       tmp_length = 2;
-    } else {
+    }
+    else
+    {
       tmp_length = 3;
     }
 
     sprintf( result + length, "%d", tmp_byte );
     length += tmp_length;
 
-    if ( i != 3 ) {
+    if ( i != 3 )
+    {
       result[length] = '.';
       length++;
     }
@@ -3172,13 +3181,14 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
   int ret = 0;
   char* REQUEST;
   char* ipv4_string;
-  const char* REQUEST_CONST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
-    "Host: \r\n"
+  const char* REQUEST_CONST =
+    "POST /tor/hs/3/publish HTTP/1.0\r\n"
+    "Host: %s\r\n"
     "User-Agent: esp-idf/1.0 esp3266\r\n"
     "Content-Type: text/plain\r\n"
-    "Content-Length: "
+    "Content-Length: %s"
+    "\r\n\r\n"
     ;
-  const char* header_end = "\r\n\r\n";
   //int total_tx_length = 0;
   int tx_limit;
   char content_length[11] = { 0 };
@@ -3228,12 +3238,21 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     goto finish;
   }
 
-  ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
-  REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) ) );
+  ESP_LOGE( MINITOR_TAG, "pre ip string malloc" );
+  heap_caps_check_integrity_all( 1 );
 
+  ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
+
+  ESP_LOGE( MINITOR_TAG, "pre request malloc" );
+  heap_caps_check_integrity_all( 1 );
+  REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) + strlen( content_length ) ) );
+
+  /*
   memcpy( REQUEST, REQUEST_CONST, 39 );
   strcpy( REQUEST + 39, ipv4_string );
   strcpy( REQUEST + 39 + strlen( ipv4_string ), REQUEST_CONST + 39 );
+  */
+  sprintf( REQUEST, REQUEST_CONST, ipv4_string, content_length );
 
   free( ipv4_string );
 
@@ -3241,6 +3260,9 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
   unpacked_cell.command = RELAY;
   unpacked_cell.circ_id = publish_circuit->circ_id;
+
+  ESP_LOGE( MINITOR_TAG, "pre first payload malloc" );
+  heap_caps_check_integrity_all( 1 );
 
   unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
   ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
@@ -3258,11 +3280,13 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
   http_header_length = strlen( REQUEST );
   free( REQUEST );
 
+/*
   memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, content_length, strlen( content_length ) );
   http_header_length += strlen( content_length );
 
   memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, header_end, strlen( header_end ) );
   http_header_length += strlen( header_end );
+*/
 
   succ = read( desc_fd, desc_buff, RELAY_PAYLOAD_LEN - http_header_length );
 
@@ -3309,6 +3333,9 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
       break;
     }
 
+
+    ESP_LOGE( MINITOR_TAG, "pre second payload malloc" );
+    heap_caps_check_integrity_all( 1 );
     unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
     ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
@@ -3348,7 +3375,7 @@ void v_build_hsdir_circuits( OnionService* service, DoublyLinkedOnionRelayList* 
   OnionRelay* tmp_node;
   DoublyLinkedOnionRelay* target_dl_relay;
 
-  start_node = px_get_random_hsdir_relay( 1, target_relays, NULL, NULL );
+  start_node = px_get_random_fast_relay( 1, target_relays, NULL, NULL );
 
   target_dl_relay = target_relays->head;
 
@@ -3638,7 +3665,7 @@ int d_push_hsdir( OnionService* service )
     // send outer descriptor wrapper to the correct HSDIR nodes
     //succ = d_build_hsdir_circuits( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, target_relays[i] );
     //v_build_hsdir_circuits( service, target_relays[i], i );
-    start_relay = px_get_random_hsdir_relay( 1, service->target_relays[i], NULL, NULL );
+    start_relay = px_get_random_fast_relay( 1, service->target_relays[i], NULL, NULL );
     v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, i, 0, start_relay, service->target_relays[i]->head->relay, NULL );
 
     /*
@@ -3721,6 +3748,8 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
   {
     next_relay = dl_relay->next;
 
+    // TODO this free call triggered a store prohibited exception
+    ESP_LOGE( MINITOR_TAG, "dl_relay pointer %p", dl_relay );
     free( dl_relay );
 
     dl_relay = next_relay;

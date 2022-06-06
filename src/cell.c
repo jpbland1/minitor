@@ -15,9 +15,7 @@ int d_send_packed_cell_and_free( DlConnection* or_connection, unsigned char* pac
 {
   int succ;
 
-  succ = b_verify_or_connection( or_connection );
-
-  if ( succ == 0 )
+  if ( b_verify_or_connection( or_connection ) == false )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
@@ -106,9 +104,7 @@ int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned cha
     }
   }
 
-  succ = b_verify_or_connection( or_connection );
-
-  if ( succ == 0 )
+  if ( b_verify_or_connection( or_connection ) == false )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );

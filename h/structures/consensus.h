@@ -33,14 +33,13 @@ typedef struct OnionRelay {
   unsigned int address;
   uint16_t or_port;
   uint16_t dir_port;
-  unsigned char hsdir;
-  uint8_t dir_cache;
-  unsigned char suitable;
   unsigned char id_hash[H_LENGTH];
   unsigned char id_hash_previous[H_LENGTH];
-  unsigned char can_guard;
-  unsigned char is_guard;
-  unsigned char can_exit;
+  bool suitable;
+  bool hsdir;
+  bool dir_cache;
+  bool can_guard;
+  bool can_exit;
 } OnionRelay;
 
 typedef struct RelayCrypto {

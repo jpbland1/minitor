@@ -449,7 +449,7 @@ int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uin
   DoublyLinkedOnionRelay* db_relay;
 
   db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  db_relay->relay = px_get_random_hsdir_relay( guard, relay_list, exclude_start, exclude_end );
+  db_relay->relay = px_get_random_fast_relay( guard, relay_list, exclude_start, exclude_end );
 
   if ( db_relay->relay == NULL )
   {
@@ -457,18 +457,6 @@ int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uin
     ESP_LOGE( MINITOR_TAG, "Failed to get guard relay" );
 #endif
 
-    free( db_relay );
-
-    return -1;
-  }
-
-  if ( guard == 1 && d_mark_hsdir_relay_as_guard( db_relay->relay->identity ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to mark guard relay" );
-#endif
-
-    free( db_relay->relay );
     free( db_relay );
 
     return -1;
@@ -490,62 +478,33 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
 
     if ( i == 0 )
     {
-      ESP_LOGE( MINITOR_TAG, "Getting first relay" );
-      db_relay->relay = px_get_random_hsdir_relay( 1, NULL, exclude_start, exclude_end );
-
-      if ( db_relay->relay == NULL )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to get guard relay" );
-#endif
-
-        free( db_relay );
-
-        return -1;
-      }
-
-      ESP_LOGE( MINITOR_TAG, "Marking relay as guard" );
-      if ( d_mark_hsdir_relay_as_guard( db_relay->relay->identity ) < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to mark guard relay" );
-#endif
-
-        free( db_relay->relay );
-        free( db_relay );
-
-        goto cleanup;
-      }
+      db_relay->relay = px_get_random_fast_relay( 1, NULL, exclude_start, exclude_end );
     }
     else
     {
-      ESP_LOGE( MINITOR_TAG, "Getting relay: %d", i + 1 );
-      db_relay->relay = px_get_random_hsdir_relay( 0, relay_list, exclude_start, exclude_end );
+      db_relay->relay = px_get_random_fast_relay( 0, relay_list, exclude_start, exclude_end );
+    }
 
-      if ( db_relay->relay == NULL )
-      {
+    if ( db_relay->relay == NULL )
+    {
 #ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to get mid relay" );
+      ESP_LOGE( MINITOR_TAG, "Failed to get guard relay" );
 #endif
 
-        free( db_relay );
+      free( db_relay );
 
-        goto cleanup;
+      while ( relay_list->length > 0 )
+      {
+        v_pop_relay_from_list_back( relay_list );
       }
+
+      return -1;
     }
 
     v_add_relay_to_list( db_relay, relay_list );
   }
 
   return 0;
-
-cleanup:
-  while ( relay_list->length > 0 )
-  {
-    v_pop_relay_from_list_back( relay_list );
-  }
-
-  return -1;
 }
 
 /*
@@ -644,16 +603,6 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
 
   for ( i = 0; i < circuit->relay_list.length; i++ )
   {
-    if ( i == 0 )
-    {
-      if ( d_unmark_hsdir_relay_as_guard( tmp_relay_node->relay->identity ) < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to unmark guard" );
-#endif
-      }
-    }
-
     if ( i < circuit->relay_list.built_length )
     {
       wc_ShaFree( &tmp_relay_node->relay_crypto->running_sha_forward );
@@ -697,7 +646,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
     free( circuit->hs_crypto );
   }
 
-  if ( b_verify_or_connection( circuit->or_connection ) == 1 )
+  if ( b_verify_or_connection( circuit->or_connection ) == true )
   {
     // detach from the connection
     v_dettach_connection( circuit->or_connection );

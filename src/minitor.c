@@ -89,6 +89,7 @@ int d_minitor_INIT()
   crypto_insert_finish = xSemaphoreCreateMutex();
   connections_mutex = xSemaphoreCreateMutex();
   circuits_mutex = xSemaphoreCreateMutex();
+  fastest_cache_mutex = xSemaphoreCreateMutex();
 
   core_task_queue = xQueueCreate( 25, sizeof( OnionMessage* ) );
 

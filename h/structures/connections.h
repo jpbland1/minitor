@@ -29,6 +29,7 @@ typedef struct DlConnection
   SemaphoreHandle_t access_mutex;
   uint32_t circ_id;
   uint16_t stream_id;
+  time_t last_action;
   uint8_t is_or;
   uint8_t* responder_rsa_identity_key_der;
   int responder_rsa_identity_key_der_size;

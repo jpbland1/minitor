@@ -204,8 +204,6 @@ static int d_recv_on_local_connection( DlConnection* local_connection )
   xSemaphoreGive( local_connection->access_mutex );
   // MUTEX GIVE
 
-  ESP_LOGE( CONN_TAG, "Recvd local: %d", succ );
-
   if ( succ <= 0 )
   {
     ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
@@ -240,11 +238,14 @@ static int d_recv_on_connection( DlConnection* dl_connection )
 static void v_connections_daemon( void* pv_parameters )
 {
   int i;
+  time_t now;
   int want_next;
   int succ;
   int readable_bytes;
   uint8_t* rx_buffer;
+  OnionMessage* onion_message;
   DlConnection* dl_connection;
+  DlConnection* tmp_connection;
   DlConnection* ready_connections[16];
 
   while ( 1 )
@@ -259,14 +260,13 @@ static void v_connections_daemon( void* pv_parameters )
         ESP_LOGE( CONN_TAG, "Failed to poll local connections" );
       }
 #endif
-
-      continue;
     }
 
     // MUTEX TAKE
     xSemaphoreTake( connections_mutex, portMAX_DELAY );
 
     i = 0;
+    time( &now );
 
     dl_connection = connections;
 
@@ -278,7 +278,36 @@ static void v_connections_daemon( void* pv_parameters )
         i++;
       }
 
+      // need to send local connection timeout to the core task
+      // as a 0 length tcp event
+      else if ( dl_connection->is_or == 0 && now > dl_connection->last_action && now - dl_connection->last_action >= 5 )
+      {
+        onion_message = malloc( sizeof( OnionMessage ) );
+
+        onion_message->type = SERVICE_TCP_DATA;
+        onion_message->data = malloc( sizeof( ServiceTcpTraffic ) );
+        ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
+        ( (ServiceTcpTraffic*)onion_message->data )->circ_id = dl_connection->circ_id;
+        ( (ServiceTcpTraffic*)onion_message->data )->stream_id = dl_connection->stream_id;
+
+        xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+
+        tmp_connection = dl_connection->next;
+        v_cleanup_connection( dl_connection );
+        dl_connection = tmp_connection;
+
+        continue;
+      }
+
       dl_connection = dl_connection->next;
+    }
+
+    if ( i == 0 )
+    {
+      xSemaphoreGive( connections_mutex );
+      // MUTEX GIVE
+
+      continue;
     }
 
     for ( i = i - 1; i >= 0; i-- )
@@ -306,6 +335,7 @@ static void v_connections_daemon( void* pv_parameters )
         if ( succ <= 0 )
         {
           v_cleanup_connection( ready_connections[i] );
+          ready_connections[i] = NULL;
 
           break;
         }
@@ -333,6 +363,12 @@ static void v_connections_daemon( void* pv_parameters )
         ( ready_connections[i]->is_or == 0 && readable_bytes > 0 ) ||
         ( ready_connections[i]->is_or == 1 && ( readable_bytes >= CELL_LEN || ( ready_connections[i]->status == CONNECTION_WANT_CERTS && readable_bytes >= 0 ) ) )
       );
+
+      if ( ready_connections[i] != NULL && ready_connections[i]->is_or == 0 )
+      {
+        time( &now );
+        ready_connections[i]->last_action = now;
+      }
     }
 
     xSemaphoreGive( connections_mutex );
@@ -586,6 +622,8 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
   local_connection->access_mutex = xSemaphoreCreateMutex();
   local_connection->sock_fd = sock_fd;
   local_connection->is_or = 0;
+  // set last action to uint max so it isn't killed before it can read (no one should be killed before they can read)
+  local_connection->last_action = INT_MAX;
 
   if ( connections_daemon_task_handle == NULL )
   {
@@ -738,9 +776,9 @@ void v_cleanup_local_connections_by_circ_id( uint32_t circ_id )
   // MUTEX GIVE
 }
 
-uint8_t b_verify_or_connection( DlConnection* or_connection )
+bool b_verify_or_connection( DlConnection* or_connection )
 {
-  uint8_t ret = 0;
+  uint8_t ret = false;
   DlConnection* in_list;
 
   // MUTEX TAKE

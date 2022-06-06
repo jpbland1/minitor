@@ -40,10 +40,6 @@ int d_initialize_database() {
     return -1;
   }
 
-  if ( d_reset_hsdir_relay_tree() < 0 ) {
-    return -1;
-  }
-
   if ( d_create_consensus_table() < 0 ) {
     return -1;
   }
