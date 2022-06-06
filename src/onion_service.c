@@ -2321,8 +2321,10 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
   /* rmdir( onion_service_directory ); */
 
   // directory doesn't exist, create the keys
-  if ( stat( onion_service_directory, &st ) == -1 ) {
-    if ( mkdir( onion_service_directory, 0755 ) < 0 ) {
+  if ( stat( onion_service_directory, &st ) == -1 )
+  {
+    if ( mkdir( onion_service_directory, 0755 ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to create %s for onion service, errno: %d", onion_service_directory, errno );
 #endif
@@ -2340,7 +2342,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     idy = ED25519_PUB_KEY_SIZE;
     wolf_succ = wc_ed25519_export_key( &onion_service->master_key, tmp_priv_key, &idx, tmp_pub_key, &idy );
 
-    if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
+    if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to export service master key, error code: %d", wolf_succ );
 #endif
@@ -2366,7 +2369,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/hostname" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2374,7 +2378,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( write( fd, onion_address, sizeof( char ) * strlen( onion_address ) ) < 0 ) {
+    if ( write( fd, onion_address, sizeof( char ) * strlen( onion_address ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2382,7 +2387,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( close( fd ) < 0 ) {
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2393,7 +2399,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/public_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2401,7 +2408,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( write( fd, tmp_pub_key, ED25519_PUB_KEY_SIZE ) < 0 ) {
+    if ( write( fd, tmp_pub_key, ED25519_PUB_KEY_SIZE ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2409,7 +2417,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( close( fd ) < 0 ) {
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2420,7 +2429,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/private_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2428,7 +2438,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( write( fd, tmp_priv_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 ) {
+    if ( write( fd, tmp_priv_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2436,7 +2447,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( close( fd ) < 0 ) {
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2444,11 +2456,14 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
   // directory exists, load the keys
-  } else {
+  }
+  else
+  {
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/private_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2456,7 +2471,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( read( fd, tmp_priv_key, sizeof( char ) * ED25519_PUB_KEY_SIZE ) < 0 ) {
+    if ( read( fd, tmp_priv_key, sizeof( char ) * ED25519_PUB_KEY_SIZE ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2464,7 +2480,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( close( fd ) < 0 ) {
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2475,7 +2492,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/public_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2484,7 +2502,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     }
 
 
-    if ( read( fd, tmp_pub_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 ) {
+    if ( read( fd, tmp_pub_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2492,7 +2511,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( close( fd ) < 0 ) {
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2502,7 +2522,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     wolf_succ = wc_ed25519_import_private_key( tmp_priv_key, ED25519_PRV_KEY_SIZE, tmp_pub_key, ED25519_PUB_KEY_SIZE, &onion_service->master_key );
 
-    if ( wolf_succ < 0 ) {
+    if ( wolf_succ < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to import ed25519 key, error code: %d", wolf_succ );
 #endif
@@ -2513,7 +2534,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/hostname" );
 
-    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 ) {
+    if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2521,7 +2543,8 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
       return -1;
     }
 
-    if ( read( fd, onion_service->hostname, 62 ) < 0 ) {
+    if ( read( fd, onion_service->hostname, 62 ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2531,7 +2554,12 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     onion_service->hostname[62] = 0;
 
-    if ( close( fd ) < 0 ) {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "onion servie hostname: %s", onion_service->hostname );
+#endif
+
+    if ( close( fd ) < 0 )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 #endif
@@ -2947,8 +2975,6 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
-    ESP_LOGE( MINITOR_TAG, "Creating sub cred" );
-
     wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"credential", strlen( "credential" ) );
     wc_Sha3_256_Update( &reusable_sha3, service->master_key.p, ED25519_PUB_KEY_SIZE );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
@@ -2960,14 +2986,10 @@ int d_push_hsdir( OnionService* service )
 
     if ( i == 0 )
     {
-      ESP_LOGE( MINITOR_TAG, "Storing current sub cred" );
-
       memcpy( service->current_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     }
     else
     {
-      ESP_LOGE( MINITOR_TAG, "Storing previous sub cred" );
-
       memcpy( service->previous_sub_credential, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     }
 
