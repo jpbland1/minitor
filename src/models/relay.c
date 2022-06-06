@@ -57,7 +57,7 @@ static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename )
 
 int d_create_hsdir_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, "/sdcard/hsdir_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "hsdir_list_stg" );
 
   if ( ret == 0 )
   {
@@ -69,7 +69,7 @@ int d_create_hsdir_relay( OnionRelay* onion_relay )
 
 int d_create_cache_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, "/sdcard/cache_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "cache_list_stg" );
 
   if ( ret == 0 )
   {
@@ -81,7 +81,7 @@ int d_create_cache_relay( OnionRelay* onion_relay )
 
 int d_create_fast_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, "/sdcard/fast_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "fast_list_stg" );
 
   if ( ret == 0 )
   {
@@ -111,12 +111,12 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
   memset( &least_list, 0, sizeof( DoublyLinkedOnionRelayList ) );
   memset( onion_relay, 0, sizeof( OnionRelay ) );
 
-  fd = open( "/sdcard/hsdir_list", O_RDONLY );
+  fd = open( FILESYSTEM_PREFIX "hsdir_list", O_RDONLY );
 
   if ( fd < 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/hsdir_list, errno: %d", errno );
+    ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 #endif
 
     return -1;
@@ -127,12 +127,12 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
   if ( succ < 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to lseek /sdcard/hsdir_relay_tree, errno: %d", errno );
+    ESP_LOGE( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 #endif
 
     close( fd );
 
-    return -1;
+    return NULL;
   }
 
   while ( 1 )
@@ -277,7 +277,7 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
   if ( succ < 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/hsdir_list, errno: %d", errno );
+    ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 #endif
     while ( greater_list->length > 0 )
     {
@@ -286,10 +286,10 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 
     free( greater_list );
 
+    close( fd );
+
     return NULL;
   }
-
-  ESP_LOGE( MINITOR_TAG, "Found %d hsdir relays", count );
 
   close( fd );
 
@@ -358,11 +358,11 @@ OnionRelay* px_get_random_cache_relay( bool staging )
 {
   if ( staging == true )
   {
-    return get_random_relay_from_list( "/sdcard/cache_list_stg", staging_cache_relay_count );
+    return get_random_relay_from_list( FILESYSTEM_PREFIX "cache_list_stg", staging_cache_relay_count );
   }
   else
   {
-    return get_random_relay_from_list( "/sdcard/cache_list", cache_relay_count );
+    return get_random_relay_from_list( FILESYSTEM_PREFIX "cache_list", cache_relay_count );
   }
 }
 
@@ -373,7 +373,7 @@ OnionRelay* px_get_random_fast_relay( bool want_guard, DoublyLinkedOnionRelayLis
 
   do
   {
-    fast_relay = get_random_relay_from_list( "/sdcard/fast_list", fast_relay_count );
+    fast_relay = get_random_relay_from_list( FILESYSTEM_PREFIX "fast_list", fast_relay_count );
 
     if ( fast_relay == NULL )
     {
@@ -423,11 +423,11 @@ OnionRelay* px_get_cache_relay_by_identity( uint8_t* identity, bool staging )
 
   if ( staging == true )
   {
-    strcpy( filepath, "/sdcard/cache_list_stg" );
+    strcpy( filepath, FILESYSTEM_PREFIX "cache_list_stg" );
   }
   else
   {
-    strcpy( filepath, "/sdcard/cache_list" );
+    strcpy( filepath, FILESYSTEM_PREFIX "cache_list" );
   }
 
   fd = open( filepath, O_RDONLY );
@@ -556,21 +556,21 @@ int d_reset_staging_hsdir_relays()
 {
   staging_hsdir_relay_count = 0;
 
-  return d_reset_relay_list( "/sdcard/hsdir_list_stg" );
+  return d_reset_relay_list( FILESYSTEM_PREFIX "hsdir_list_stg" );
 }
 
 int d_reset_staging_cache_relays()
 {
   staging_cache_relay_count = 0;
 
-  return d_reset_relay_list( "/sdcard/cache_list_stg" );
+  return d_reset_relay_list( FILESYSTEM_PREFIX "cache_list_stg" );
 }
 
 int d_reset_staging_fast_relays()
 {
   staging_fast_relay_count = 0;
 
-  return d_reset_relay_list( "/sdcard/fast_list_stg" );
+  return d_reset_relay_list( FILESYSTEM_PREFIX "fast_list_stg" );
 }
 
 static int d_get_relay_list_valid_until( const char* filename )
@@ -614,17 +614,17 @@ static int d_get_relay_list_valid_until( const char* filename )
 
 int d_get_hsdir_relay_valid_until()
 {
-  return d_get_relay_list_valid_until( "/sdcard/hsdir_list" );
+  return d_get_relay_list_valid_until( FILESYSTEM_PREFIX "hsdir_list" );
 }
 
 int d_get_cache_relay_valid_until()
 {
-  return d_get_relay_list_valid_until( "/sdcard/cache_list" );
+  return d_get_relay_list_valid_until( FILESYSTEM_PREFIX "cache_list" );
 }
 
 int d_get_fast_relay_valid_until()
 {
-  return d_get_relay_list_valid_until( "/sdcard/fast_list" );
+  return d_get_relay_list_valid_until( FILESYSTEM_PREFIX "fast_list" );
 }
 
 static int d_set_relay_list_valid_until( time_t valid_until, const char* filename )
@@ -667,17 +667,17 @@ static int d_set_relay_list_valid_until( time_t valid_until, const char* filenam
 
 int d_set_staging_hsdir_relay_valid_until( time_t valid_until )
 {
-  return d_set_relay_list_valid_until( valid_until, "/sdcard/hsdir_list_stg" );
+  return d_set_relay_list_valid_until( valid_until, FILESYSTEM_PREFIX "hsdir_list_stg" );
 }
 
 int d_set_staging_cache_relay_valid_until( time_t valid_until )
 {
-  return d_set_relay_list_valid_until( valid_until, "/sdcard/cache_list_stg" );
+  return d_set_relay_list_valid_until( valid_until, FILESYSTEM_PREFIX "cache_list_stg" );
 }
 
 int d_set_staging_fast_relay_valid_until( time_t valid_until )
 {
-  return d_set_relay_list_valid_until( valid_until, "/sdcard/fast_list_stg" );
+  return d_set_relay_list_valid_until( valid_until, FILESYSTEM_PREFIX "fast_list_stg" );
 }
 
 static int d_get_relay_list_count( const char* filename )
@@ -699,21 +699,21 @@ static int d_get_relay_list_count( const char* filename )
 
 int d_load_hsdir_relay_count()
 {
-  hsdir_relay_count = d_get_relay_list_count( "/sdcard/hsdir_list" );
+  hsdir_relay_count = d_get_relay_list_count( FILESYSTEM_PREFIX "hsdir_list" );
 
   return hsdir_relay_count;
 }
 
 int d_load_cache_relay_count()
 {
-  cache_relay_count = d_get_relay_list_count( "/sdcard/cache_list" );
+  cache_relay_count = d_get_relay_list_count( FILESYSTEM_PREFIX "cache_list" );
 
   return cache_relay_count;
 }
 
 int d_load_fast_relay_count()
 {
-  fast_relay_count = d_get_relay_list_count( "/sdcard/fast_list" );
+  fast_relay_count = d_get_relay_list_count( FILESYSTEM_PREFIX "fast_list" );
 
   return fast_relay_count;
 }
@@ -722,64 +722,64 @@ int d_finalize_staged_relay_lists()
 {
   struct stat st;
 
-  if ( stat( "/sdcard/hsdir_list", &st ) == 0 )
+  if ( stat( FILESYSTEM_PREFIX "hsdir_list", &st ) == 0 )
   {
-    if ( unlink( "/sdcard/hsdir_list" ) < 0 )
+    if ( unlink( FILESYSTEM_PREFIX "hsdir_list" ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink /sdcard/hsdir_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 #endif
 
       return -1;
     }
   }
 
-  if ( stat( "/sdcard/cache_list", &st ) == 0 )
+  if ( stat( FILESYSTEM_PREFIX "cache_list", &st ) == 0 )
   {
-    if ( unlink( "/sdcard/cache_list" ) < 0 )
+    if ( unlink( FILESYSTEM_PREFIX "cache_list" ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink /sdcard/cache_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
 #endif
 
       return -1;
     }
   }
 
-  if ( stat( "/sdcard/fast_list", &st ) == 0 )
+  if ( stat( FILESYSTEM_PREFIX "fast_list", &st ) == 0 )
   {
-    if ( unlink( "/sdcard/fast_list" ) < 0 )
+    if ( unlink( FILESYSTEM_PREFIX "fast_list" ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink /sdcard/fast_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
 #endif
 
       return -1;
     }
   }
 
-  if ( rename( "/sdcard/hsdir_list_stg", "/sdcard/hsdir_list" ) < 0 )
+  if ( rename( FILESYSTEM_PREFIX "hsdir_list_stg", FILESYSTEM_PREFIX "hsdir_list" ) < 0 )
   {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename /sdcard/hsdir_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 #endif
 
       return -1;
   }
 
-  if ( rename( "/sdcard/cache_list_stg", "/sdcard/cache_list" ) < 0 )
+  if ( rename( FILESYSTEM_PREFIX "cache_list_stg", FILESYSTEM_PREFIX "cache_list" ) < 0 )
   {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename /sdcard/cache_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
 #endif
 
       return -1;
   }
 
-  if ( rename( "/sdcard/fast_list_stg", "/sdcard/fast_list" ) < 0 )
+  if ( rename( FILESYSTEM_PREFIX "fast_list_stg", FILESYSTEM_PREFIX "fast_list" ) < 0 )
   {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename /sdcard/fast_list, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
 #endif
 
       return -1;

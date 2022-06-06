@@ -10,6 +10,7 @@
 #define MINITOR_CHUTNEY_ADDRESS 0x7602a8c0
 #define MINITOR_CHUTNEY_ADDRESS_STR "192.168.2.118"
 #define MINITOR_CHUTNEY_DIR_PORT 7000
+#define FILESYSTEM_PREFIX "/sdcard/"
 
 extern const char* tor_authorities[];
 extern int tor_authorities_count;

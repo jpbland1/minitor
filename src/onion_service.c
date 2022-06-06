@@ -16,53 +16,6 @@
 #include "../h/models/relay.h"
 #include "../h/models/revision_counter.h"
 
-/*
-void v_handle_onion_service( void* pv_parameters )
-{
-  time_t now;
-  unsigned int hsdir_interval;
-  OnionService* onion_service = (OnionService*)pv_parameters;
-  OnionMessage* onion_message;
-
-  while ( 1 )
-  {
-    if ( xQueueReceive( onion_service->rx_queue, &onion_message, 1000 * 60 / portTICK_PERIOD_MS ) == pdTRUE )
-    {
-      switch ( onion_message->type ) {
-        case ONION_CELL:
-          if ( d_onion_service_handle_cell( onion_service, (Cell*)onion_message->data ) < 0 ) {
-  #ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle a cell on circuit: %.8x", ( (Cell*)onion_message->data )->circ_id );
-  #endif
-          }
-
-          free_cell( (Cell*)onion_message->data );
-
-          break;
-        case SERVICE_TCP_DATA:
-          if ( d_onion_service_handle_local_tcp_data( onion_service, (ServiceTcpTraffic*)onion_message->data ) < 0 ) {
-  #ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle local tcp traffic on circuit %.8x and stream %d", ( (ServiceTcpTraffic*)onion_message->data )->circ_id, ( (ServiceTcpTraffic*)onion_message->data )->stream_id );
-  #endif
-          }
-
-          if ( ( (ServiceTcpTraffic*)onion_message->data )->length > 0 ) {
-            free( ( (ServiceTcpTraffic*)onion_message->data )->data );
-          }
-
-          break;
-        case SERVICE_COMMAND:
-        case PACKED_CELL:
-          break;
-      }
-
-      free( onion_message->data );
-      free( onion_message );
-    }
-  }
-}
-*/
-
 void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTraffic* tcp_traffic )
 {
   int i;
@@ -79,9 +32,6 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTra
 
   if ( tcp_traffic->length == 0 )
   {
-
-    ESP_LOGE( MINITOR_TAG, "\nSENDING RELAY_END\n" );
-
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_END;
     ( (PayloadRelay*)unpacked_cell.payload )->length = 1;
     ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEnd ) );
@@ -845,95 +795,6 @@ finish:
   return ret;
 }
 
-/*
-int d_binary_search_hsdir_index( unsigned char* hash, HsDirIndexNode** index_array, int index_length ) {
-  int left = 0;
-  int mid = 0;
-  int right = index_length - 1;
-  int res;
-
-  while ( left <= right ) {
-    mid = left + ( right - left ) / 2;
-
-    res = memcmp( hash, index_array[mid]->hash, 32 );
-
-    mid++;
-
-    if ( res == 0 ) {
-      break;
-    } else if ( res > 0 ) {
-      left = mid;
-    } else {
-      mid--;
-      right = mid - 1;
-    }
-  }
-
-  return mid;
-}
-*/
-
-/*
-static DoublyLinkedOnionRelayList* px_get_relays_by_hash( uint8_t* id_hash, int desired_count, DoublyLinkedOnionRelayList* used_relays, int next )
-{
-  int i;
-  DoublyLinkedOnionRelay* db_tmp_relay;
-  DoublyLinkedOnionRelayList* relay_list = malloc( sizeof( DoublyLinkedOnionRelayList ) );
-  relay_list->length = 0;
-  relay_list->head = NULL;
-  relay_list->tail = NULL;
-
-  for ( i = 0; i < desired_count; i++ )
-  {
-    db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-
-    db_tmp_relay->relay = NULL;
-    db_tmp_relay->relay = px_get_hsdir_relay_by_id_hash( id_hash, i, used_relays, next );
-
-    if ( db_tmp_relay->relay == NULL )
-    {
-      free( db_tmp_relay );
-
-      ESP_LOGE( MINITOR_TAG, "Failed to get hsdir relay by id_hash" );
-      goto cleanup;
-    }
-
-    v_add_relay_to_list( db_tmp_relay, relay_list );
-
-    db_tmp_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-    db_tmp_relay->relay = malloc( sizeof( OnionRelay ) );
-
-    memcpy( db_tmp_relay->relay->identity, relay_list->tail->relay->identity, ID_LENGTH );
-
-    v_add_relay_to_list( db_tmp_relay, used_relays );
-  }
-
-  return relay_list;
-
-cleanup:
-  db_tmp_relay = relay_list->head;
-
-  for ( i = 0; i < relay_list->length; i++ )
-  {
-    free( db_tmp_relay->relay );
-
-    if ( i == relay_list->length - 1 )
-    {
-      free( db_tmp_relay );
-    }
-    else
-    {
-      db_tmp_relay = db_tmp_relay->next;
-      free( db_tmp_relay->previous );
-    }
-  }
-
-  free( relay_list );
-
-  return NULL;
-}
-*/
-
 static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
 {
   int i;
@@ -997,18 +858,6 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     wc_Sha3_256_Final( &reusable_sha3, hs_index );
 
-    {
-      ESP_LOGE( MINITOR_TAG, "" );
-      ESP_LOGE( MINITOR_TAG, "hs_index:" );
-
-      for ( j = 0; j < WC_SHA3_256_DIGEST_SIZE; j++ )
-      {
-        ESP_LOGE( MINITOR_TAG, "%.2x", hs_index[j] );
-      }
-
-      ESP_LOGE( MINITOR_TAG, "" );
-    }
-
     to_store = hsdir_spread_store;
 
     hsdir_index_list = px_get_responsible_hsdir_relays_by_hs_index( hs_index, hsdir_spread_store, next, target_relays );
@@ -1037,29 +886,6 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
       v_add_relay_to_list( hsdir_relay_node, target_relays );
 
-      ESP_LOGE( MINITOR_TAG, "Target identity: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x",
-        hsdir_relay_node->relay->identity[0],
-        hsdir_relay_node->relay->identity[1],
-        hsdir_relay_node->relay->identity[2],
-        hsdir_relay_node->relay->identity[3],
-        hsdir_relay_node->relay->identity[4],
-        hsdir_relay_node->relay->identity[5],
-        hsdir_relay_node->relay->identity[6],
-        hsdir_relay_node->relay->identity[7],
-        hsdir_relay_node->relay->identity[8],
-        hsdir_relay_node->relay->identity[9],
-        hsdir_relay_node->relay->identity[10],
-        hsdir_relay_node->relay->identity[11],
-        hsdir_relay_node->relay->identity[12],
-        hsdir_relay_node->relay->identity[13],
-        hsdir_relay_node->relay->identity[14],
-        hsdir_relay_node->relay->identity[15],
-        hsdir_relay_node->relay->identity[16],
-        hsdir_relay_node->relay->identity[17],
-        hsdir_relay_node->relay->identity[18],
-        hsdir_relay_node->relay->identity[19]
-      );
-
       hsdir_relay_node = next_hsdir_relay_node;
 
       to_store--;
@@ -1086,200 +912,8 @@ cleanup:
   return target_relays;
 }
 
-/*
-int d_send_descriptors( unsigned char* descriptor_text, int descriptor_length, DoublyLinkedOnionRelayList* target_relays )
+static char* pc_ipv4_to_string( unsigned int address )
 {
-  int ret = 0;
-  int i;
-  int j;
-  OnionRelay* target_relay;
-  OnionRelay* start_node;
-  DoublyLinkedOnionRelay* target_dl_relay;
-  DoublyLinkedOnionRelay* tmp_dl_relay;
-
-  start_node = px_get_random_hsdir_relay( 1, target_relays, NULL );
-
-  target_dl_relay = target_relays->head;
-
-  while ( target_dl_relay != NULL )
-  {
-    onion_message = malloc( sizeof( OnionMessage ) );
-    onion_message->type = INIT_CIRCUIT;
-    onion_message->data = malloc( sizeof( CreateCircuitRequest ) );
-
-    ((CreateCircuitRequest*)onion_message->data)->length = 3;
-    ((CreateCircuitRequest*)onion_message->data)->target_status = CIRCUIT_HSDIR_BEGIN_DIR;
-    ((CreateCircuitRequest*)onion_message->data)->dl_service = dl_service;
-    ((CreateCircuitRequest*)onion_message->data)->start_relay = start_node;
-    ((CreateCircuitRequest*)onion_message->data)->destination_relay = target_dl_relay->relay;
-  }
-
-  publish_circuit = malloc( sizeof( OnionCircuit ) );
-
-  memset( publish_circuit, 0, sizeof( OnionCircuit ) );
-
-  publish_circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
-
-  db_target_relay = target_relays->head;
-
-  for ( i = 0; i < target_relays->length; i++ )
-  {
-    if ( publish_circuit->or_connection != NULL )
-    {
-      tmp_relay_node = publish_circuit->relay_list.head;
-
-      for ( j = 0; j < publish_circuit->relay_list.length; j++ )
-      {
-        if ( memcmp( tmp_relay_node->relay->identity, db_target_relay->relay->identity, ID_LENGTH ) == 0 || j == publish_circuit->relay_list.length - 1 )
-        {
-          if ( j == 0 )
-          {
-            ESP_LOGE( MINITOR_TAG, "First matches, destroying circuit" );
-
-            if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
-            {
-#ifdef DEBUG_MINITOR
-              ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
-#endif
-            }
-
-            publish_circuit->or_connection = NULL;
-          }
-          else
-          {
-            ESP_LOGE( MINITOR_TAG, "Truncating to length %d", j );
-
-            if ( d_truncate_onion_circuit( publish_circuit, j ) < 0 )
-            {
-#ifdef DEBUG_MINITOR
-              ESP_LOGE( MINITOR_TAG, "Failed to truncate publish circuit" );
-#endif
-
-              if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
-              {
-#ifdef DEBUG_MINITOR
-                ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
-#endif
-              }
-
-              publish_circuit->or_connection = NULL;
-
-              break;
-            }
-
-            ESP_LOGE( MINITOR_TAG, "Trying to extend to %d", db_target_relay->relay->or_port );
-
-            target_relay = malloc( sizeof( OnionRelay ) );
-            memcpy( target_relay, db_target_relay->relay, sizeof( OnionRelay ) );
-
-            if ( d_extend_onion_circuit_to( publish_circuit, 3, target_relay ) < 0 )
-            {
-#ifdef DEBUG_MINITOR
-              ESP_LOGE( MINITOR_TAG, "Failed to extend publish circuit" );
-#endif
-
-              if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
-              {
-#ifdef DEBUG_MINITOR
-                ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
-#endif
-              }
-
-              publish_circuit->or_connection = NULL;
-              ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
-              goto next;
-            }
-          }
-
-          break;
-        }
-
-        tmp_relay_node = tmp_relay_node->next;
-      }
-    }
-
-    while ( publish_circuit->or_connection == NULL )
-    {
-      ESP_LOGE( MINITOR_TAG, "Trying to build new connection" );
-      target_relay = malloc( sizeof( OnionRelay ) );
-      memcpy( target_relay, db_target_relay->relay, sizeof( OnionRelay ) );
-
-      if ( start_node != NULL )
-      {
-        if ( d_build_onion_circuit_to( publish_circuit, 1, start_node ) < 0 )
-        {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to build publish circuit to start node" );
-#endif
-          publish_circuit->or_connection = NULL;
-        }
-        else if ( d_extend_onion_circuit_to( publish_circuit, 3, target_relay ) < 0 )
-        {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to extend publish circuit from start node: %d %d %d", publish_circuit->relay_list.head->relay->or_port, publish_circuit->relay_list.head->next->relay->or_port, publish_circuit->relay_list.head->next->next->relay->or_port );
-#endif
-
-          if ( d_destroy_onion_circuit( publish_circuit ) < 0 )
-          {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
-#endif
-          }
-
-          start_node = NULL;
-          publish_circuit->or_connection = NULL;
-          ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
-          goto next;
-        }
-
-        start_node = NULL;
-      }
-      else if ( d_build_onion_circuit_to( publish_circuit, 3, target_relay ) < 0 )
-      {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to build publish circuit" );
-#endif
-
-        publish_circuit->or_connection = NULL;
-        ESP_LOGE( MINITOR_TAG, "Failed to extend to target, moving on" );
-        goto next;
-      }
-    }
-
-    if ( d_post_descriptor( descriptor_text, descriptor_length, publish_circuit ) < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to post descriptor" );
-#endif
-
-      ret = -1;
-      goto finish;
-    }
-
-next:
-    db_target_relay = db_target_relay->next;
-  }
-
-  if ( publish_circuit->or_connection != NULL && d_destroy_onion_circuit( publish_circuit ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to destroy publish circuit" );
-#endif
-  }
-
-finish:
-  free( start_node );
-
-  vQueueDelete( publish_circuit->rx_queue );
-  free( publish_circuit );
-
-  ESP_LOGE( MINITOR_TAG, "Done sending descriptors" );
-
-  return ret;
-}
-*/
-
-static char* pc_ipv4_to_string( unsigned int address ) {
   int i;
   int length = 0;
   char* result = malloc( sizeof( char ) * 16 );
@@ -1318,203 +952,6 @@ static char* pc_ipv4_to_string( unsigned int address ) {
   return result;
 }
 
-/*
-int d_post_descriptor( unsigned char* descriptor_text, int descriptor_length, OnionCircuit* publish_circuit )
-{
-  char* REQUEST;
-  char* ipv4_string;
-  const char* REQUEST_CONST = "POST /tor/hs/3/publish HTTP/1.0\r\n"
-    "Host: \r\n"
-    "User-Agent: esp-idf/1.0 esp3266\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: "
-    ;
-  const char* header_end = "\r\n\r\n";
-
-  int total_tx_length = 0;
-  int http_header_length;
-  int tx_limit;
-  // buffer thath holds data returned from the socket
-  char content_length[10] = { 0 };
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
-
-  ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
-  REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) ) );
-
-  memcpy( REQUEST, REQUEST_CONST, 39 );
-  strcpy( REQUEST + 39, ipv4_string );
-  strcpy( REQUEST + 39 + strlen( ipv4_string ), REQUEST_CONST + 39 );
-
-  free( ipv4_string );
-
-  ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
-  ESP_LOGE( MINITOR_TAG, "descriptor has length %d", descriptor_length );
-
-  unpacked_cell.circ_id = publish_circuit->circ_id;
-  unpacked_cell.command = RELAY;
-  ESP_LOGE( MINITOR_TAG, "Trying to malloc payload" );
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
-
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_BEGIN_DIR;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 0;
-
-  packed_cell = pack_and_free( &unpacked_cell );
-
-  ESP_LOGE( MINITOR_TAG, "Trying to send relay" );
-
-  if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
-#endif
-
-    return -1;
-  }
-
-  if ( d_recv_cell( publish_circuit, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL, NULL ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_CONNECTED cell" );
-#endif
-
-    return -1;
-  }
-
-  if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_CONNECTED )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Didn't get RELAY_CONNECTED back" );
-#endif
-
-    free_cell( &unpacked_cell );
-
-    return -1;
-  }
-
-  free_cell( &unpacked_cell );
-
-  sprintf( content_length, "%d", descriptor_length );
-
-  http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
-  tx_limit = http_header_length + descriptor_length;
-
-  unpacked_cell.command = RELAY;
-
-  while ( total_tx_length < tx_limit )
-  {
-    unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
-    ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
-    ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-    // TODO possibly need to set the stream_id, wasn't clear in torspec
-    ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
-    ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-
-    if ( tx_limit - total_tx_length < RELAY_PAYLOAD_LEN ) {
-      ( (PayloadRelay*)unpacked_cell.payload )->length = tx_limit - total_tx_length;
-    } else {
-      ( (PayloadRelay*)unpacked_cell.payload )->length = RELAY_PAYLOAD_LEN;
-    }
-
-    ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
-
-    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * ( (PayloadRelay*)unpacked_cell.payload )->length );
-
-    if ( total_tx_length == 0 ) {
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
-      total_tx_length += strlen( REQUEST );
-
-      free( REQUEST );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, content_length, strlen( content_length ) );
-      total_tx_length += strlen( content_length );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, header_end, strlen( header_end ) );
-      total_tx_length += strlen( header_end );
-
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + total_tx_length, descriptor_text, ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length );
-      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length - total_tx_length;
-    }
-    else
-    {
-      memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, descriptor_text + total_tx_length - http_header_length, ( (PayloadRelay*)unpacked_cell.payload )->length );
-      total_tx_length += ( (PayloadRelay*)unpacked_cell.payload )->length;
-    }
-
-    //for ( i = 0; i < ( (PayloadRelay*)unpacked_cell.payload )->length; i++ ) {
-      //putchar( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload[i] );
-    //}
-
-    //putchar( '\n' );
-
-    packed_cell = pack_and_free( &unpacked_cell );
-
-    if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
-#endif
-
-      return -1;
-    }
-  }
-
-  if ( d_recv_cell( publish_circuit, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL, NULL ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_DATA cell" );
-#endif
-
-    return -1;
-  }
-
-  ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
-  ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
-
-  ESP_LOGE( MINITOR_TAG, "%.*s\n", ( (PayloadRelay*)unpacked_cell.payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload );
-
-  free_cell( &unpacked_cell );
-
-  //ESP_LOGE( MINITOR_TAG, "Trying to recv RELAY_END cell" );
-
-  //if ( d_recv_cell( publish_circuit, &unpacked_cell, CIRCID_LEN, &publish_circuit->relay_list, NULL, NULL ) < 0 )
-  //{
-//#ifdef DEBUG_MINITOR
-    //ESP_LOGE( MINITOR_TAG, "Failed to recv RELAY_END cell" );
-//#endif
-
-    //return -1;
-  //}
-
-  //ESP_LOGE( MINITOR_TAG, "cell command %d", unpacked_cell.command );
-  //ESP_LOGE( MINITOR_TAG, "relay command %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
-
-  //free_cell( &unpacked_cell );
-
-  return 0;
-}
-*/
-
-// depricated
-/*
-void v_binary_insert_hsdir_index( HsDirIndexNode* node, HsDirIndexNode** index_array, int index_length ) {
-  int i;
-  int mid = d_binary_search_hsdir_index( node->hash, index_array, index_length );
-
-  for ( i = index_length - 1; i >= mid; i-- ) {
-    index_array[i + 1] = index_array[i];
-
-    if ( i != 0 ) {
-      index_array[i] = index_array[i - 1];
-    }
-  }
-
-  index_array[mid] = node;
-}
-*/
-
 int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter )
 {
   int ret = 0;
@@ -1537,7 +974,6 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
     "descriptor-signing-key-cert\n"
     "-----BEGIN ED25519 CERT-----\n"
     ;
-    //"*******************************************************************************************************************************************************************************************"
   const char* outer_layer_template_1 =
     "-----END ED25519 CERT-----\n"
     "revision-counter "
@@ -1550,7 +986,6 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
     "-----END MESSAGE-----\n"
     ;
   const char* outer_layer_template_4 =
-    //"signature **************************************************************************************"
     "signature "
     ;
 
@@ -1804,23 +1239,6 @@ int d_generate_first_plaintext( char* filename )
   Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   char tmp_buff[58];
-
-  /*
-  const char* first_layer_template =
-    "desc-auth-type x25519\n"
-    "desc-auth-ephemeral-key *******************************************\n"
-    ;
-  const char* auth_client_template =
-    "auth-client *********** ********************** **********************\n"
-    ;
-  const char* begin_encrypted =
-    "encrypted\n"
-    "-----BEGIN MESSAGE-----\n"
-    ;
-  const char* end_encrypted =
-    "-----END MESSAGE-----"
-    ;
-  */
 
   const char* first_layer_template =
     "desc-auth-type x25519\n"
@@ -2285,25 +1703,6 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
   const char* begin_ed_s = "-----BEGIN ED25519 CERT-----\n";
   const char* end_ed_s = "-----END ED25519 CERT-----\n";
 
-  /*
-  const char* introduction_point_template =
-    "introduction-point ******************************************\n"
-    "onion-key ntor *******************************************\n"
-    "auth-key\n"
-    // TODO this is a crosscert with the descriptor signing key as the main key and the intoduction point authentication key as the mandatory extension
-    "-----BEGIN ED25519 CERT-----\n"
-    "*******************************************************************************************************************************************************************************************"
-    "-----END ED25519 CERT-----\n"
-    // TODO this is the public cruve25519 key used to encrypt the introduction request
-    "enc-key ntor *******************************************\n"
-    "enc-key-cert\n"
-    // TODO this is a crosscert with the descriptor signing key as the main key and the the ed25519 equivilent of the above key used as the mandatory extension
-    "-----BEGIN ED25519 CERT-----\n"
-    "*******************************************************************************************************************************************************************************************"
-    "-----END ED25519 CERT-----\n"
-    ;
-    */
-
   fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC );
 
   if ( fd < 0 )
@@ -2567,7 +1966,8 @@ finish:
   return ret;
 }
 
-void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers ) {
+void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed_link_specifiers )
+{
   // set the specifier count
   packed_link_specifiers[0] = 2;
 
@@ -3238,13 +2638,8 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     goto finish;
   }
 
-  ESP_LOGE( MINITOR_TAG, "pre ip string malloc" );
-  heap_caps_check_integrity_all( 1 );
-
   ipv4_string = pc_ipv4_to_string( publish_circuit->relay_list.head->relay->address );
 
-  ESP_LOGE( MINITOR_TAG, "pre request malloc" );
-  heap_caps_check_integrity_all( 1 );
   REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) + strlen( content_length ) ) );
 
   /*
@@ -3260,9 +2655,6 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
   unpacked_cell.command = RELAY;
   unpacked_cell.circ_id = publish_circuit->circ_id;
-
-  ESP_LOGE( MINITOR_TAG, "pre first payload malloc" );
-  heap_caps_check_integrity_all( 1 );
 
   unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
   ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
@@ -3333,9 +2725,6 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
       break;
     }
 
-
-    ESP_LOGE( MINITOR_TAG, "pre second payload malloc" );
-    heap_caps_check_integrity_all( 1 );
     unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
     ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
     ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
@@ -3448,8 +2837,6 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
-    ESP_LOGE( MINITOR_TAG, "intro port %d", tmp_circuit->relay_list.tail->relay->or_port );
-
     intro_circuits[i] = tmp_circuit;
     tmp_circuit = tmp_circuit->next;
   }
@@ -3541,7 +2928,7 @@ int d_push_hsdir( OnionService* service )
   {
     // null terminated
     // /sdcard/abcdefghij_desc_0\0
-    strcpy( desc_file, "/sdcard/" );
+    strcpy( desc_file, FILESYSTEM_PREFIX );
     memcpy( desc_file + 8, service->hostname, 10 );
     desc_file[18] = 0;
     strcat( desc_file, "_desc_" );
@@ -3550,7 +2937,6 @@ int d_push_hsdir( OnionService* service )
 
     // generate second layer plaintext
     succ = d_generate_second_plaintext( desc_file, intro_circuits, valid_after, &descriptor_signing_key );
-    //succ = tmp_d_generate_second_plaintext( desc_file, intro_circuits, valid_after, &descriptor_signing_key );
 
     if ( succ < 0 )
     {
@@ -3596,8 +2982,6 @@ int d_push_hsdir( OnionService* service )
       revision_counter
     );
 
-    //free( reusable_plaintext );
-
     if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
@@ -3618,8 +3002,6 @@ int d_push_hsdir( OnionService* service )
       return -1;
     }
 
-    //free( reusable_ciphertext );
-
     // encrypt first layer plaintext
     succ = d_encrypt_descriptor_plaintext(
       desc_file,
@@ -3630,8 +3012,6 @@ int d_push_hsdir( OnionService* service )
       reusable_sha3_sum,
       revision_counter
     );
-
-    //free( reusable_plaintext );
 
     if ( succ < 0 )
     {
@@ -3651,8 +3031,6 @@ int d_push_hsdir( OnionService* service )
       revision_counter
     );
 
-    //free( reusable_ciphertext );
-
     if ( succ < 0 )
     {
 #ifdef DEBUG_MINITOR
@@ -3668,42 +3046,8 @@ int d_push_hsdir( OnionService* service )
     start_relay = px_get_random_fast_relay( 1, service->target_relays[i], NULL, NULL );
     v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, i, 0, start_relay, service->target_relays[i]->head->relay, NULL );
 
-    /*
-    if ( succ < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send descriptor to hsdir hosts" );
-#endif
-
-      return -1;
-    }
-    */
-
     strcpy( service->hs_descs[i], desc_file );
-
-    //service->hs_descs[i] = reusable_plaintext;
-    //service->hs_desc_lengths[i] = reusable_text_length;
-    //free( reusable_plaintext );
   }
-
-  /*
-  for ( i = 0; i < 2; i++ )
-  {
-    dl_relay = target_relays[i]->head;
-
-    while ( dl_relay != NULL )
-    {
-      next_relay = dl_relay->next;
-
-      free( dl_relay );
-
-      dl_relay = next_relay;
-    }
-  }
-
-  free( target_relays[0] );
-  free( target_relays[1] );
-  */
 
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_ed25519_free( &blinded_keys[0] );
@@ -3749,12 +3093,10 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
     next_relay = dl_relay->next;
 
     // TODO this free call triggered a store prohibited exception
-    ESP_LOGE( MINITOR_TAG, "dl_relay pointer %p", dl_relay );
     free( dl_relay );
 
     dl_relay = next_relay;
   }
 
   free( service->target_relays[desc_index] );
-  //free( service->hs_descs[desc_index] );
 }

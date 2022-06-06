@@ -1372,7 +1372,7 @@ static int d_download_consensus()
 
 #ifndef MINITOR_CHUTNEY
   // check if our current consensus is still fresh, no need to re-download
-  fd = open( "/sdcard/consensus", O_RDONLY );
+  fd = open( FILESYSTEM_PREFIX "consensus", O_RDONLY );
 
   if ( fd >= 0 )
   {
@@ -1424,7 +1424,7 @@ static int d_download_consensus()
               if ( err < 0 )
               {
 #ifdef DEBUG_MINITOR
-                ESP_LOGE( MINITOR_TAG, "Failed to lseek /sdcard/consensus, errno: %d", errno );
+                ESP_LOGE( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 #endif
 
                 close( fd );
@@ -1551,10 +1551,10 @@ static int d_download_consensus()
     return -1;
   }
 
-  if ( ( fd = open( "/sdcard/consensus", O_CREAT | O_TRUNC ) ) < 0 )
+  if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_CREAT | O_TRUNC ) ) < 0 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
+    ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 #endif
 
     shutdown( sock_fd, 0 );
@@ -1644,10 +1644,10 @@ static int d_download_consensus()
       // first write chunck to consensus to file
       do
       {
-        if ( ( fd = open( "/sdcard/consensus", O_WRONLY | O_APPEND ) ) < 0 )
+        if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_WRONLY | O_APPEND ) ) < 0 )
         {
 #ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
+          ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 #endif
 
           continue;
@@ -1657,7 +1657,7 @@ static int d_download_consensus()
 
         if ( err != ( rx_length - i ) ) {
 #ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/consensus, errno: %d", errno );
+          ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 #endif
 
           close( fd );
@@ -1876,330 +1876,6 @@ static int d_parse_single_relay( int fd, OnionRelay* canidate_relay ) {
   return 0;
 }
 
-/*
-static int d_parse_downloaded_consensus( NetworkConsensus** result_network_consensus )
-{
-  time_t now;
-  time_t tp_start_time;
-  int valid_delay;
-  int i = 0;
-  int j;
-  int fd;
-  int ret = 0;
-  int voting_interval;
-  FetchDescriptorState fetch_states[3];
-  OnionRelay* tmp_relay;
-  struct pollfd fetch_poll[3];
-  int final_relay_hit = 0;
-  int parse_succ;
-  int poll_succ;
-  int running_fetches = 0;
-  int total_parsed = 0;
-
-  memset( fetch_states, 0, sizeof( fetch_states ) );
-
-  for ( i = 0; i < 3; i++ )
-  {
-    fetch_poll[i].fd = -1;
-  }
-
-  if ( ( fd = open( "/sdcard/consensus", O_RDONLY ) ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/consensus, errno: %d", errno );
-#endif
-
-    return -1;
-  }
-
-  if ( *result_network_consensus == NULL )
-  {
-    *result_network_consensus = malloc( sizeof( NetworkConsensus ) );
-  }
-
-  (*result_network_consensus)->method = 0;
-  (*result_network_consensus)->valid_after = 0;
-  (*result_network_consensus)->fresh_until = 0;
-  (*result_network_consensus)->valid_until = 0;
-
-#ifdef MINITOR_CHUTNEY
-  (*result_network_consensus)->hsdir_interval = 8;
-#else
-  (*result_network_consensus)->hsdir_interval = HSDIR_INTERVAL_DEFAULT;
-#endif
-
-  (*result_network_consensus)->hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
-  (*result_network_consensus)->hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
-
-  if ( d_parse_network_consensus_from_file( fd, *result_network_consensus ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to parse network consensus from file" );
-#endif
-
-    ret = -1;
-    goto finish;
-  }
-
-#ifndef MINITOR_CHUTNEY
-  if ( d_get_hsdir_list_valid_until() == (*result_network_consensus)->valid_until )
-  {
-    ESP_LOGE( MINITOR_TAG, "hsdir_list already setup and valid" );
-
-    if ( d_load_hsdir_relays_from_file() < 0 )
-    {
-      ESP_LOGE( MINITOR_TAG, "Failed to load relays from file" );
-      ret = -1;
-    }
-    else
-    {
-      // BEGIN mutex for the network consensus
-      xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-      network_consensus.method = (*result_network_consensus)->method;
-      network_consensus.valid_after = (*result_network_consensus)->valid_after;
-      network_consensus.fresh_until = (*result_network_consensus)->fresh_until;
-      network_consensus.valid_until = (*result_network_consensus)->valid_until;
-
-      memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
-      memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
-
-      xSemaphoreGive( network_consensus_mutex );
-      // END mutex for the network consensus
-
-      next_network_consensus = NULL;
-    }
-
-    goto finish;
-  }
-#endif
-
-  if ( d_reset_hsdir_relay_tree_file() < 0 )
-  {
-    ret = -1;
-    goto finish;
-  }
-
-  if ( d_reset_hsdir_list() < 0 )
-  {
-    ret = -1;
-    goto finish;
-  }
-
-  (*result_network_consensus)->time_period = d_get_hs_time_period( (*result_network_consensus)->fresh_until, (*result_network_consensus)->valid_after, (*result_network_consensus)->hsdir_interval );
-
-  // sizeof pointer, not the actual struct
-  insert_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
-
-  xTaskCreatePinnedToCore(
-    v_handle_crypto_and_insert,
-    "H_CRYPTO_INSERT",
-    3072,
-    (void*)(*result_network_consensus),
-    8,
-    NULL,
-    1
-  );
-
-  do
-  {
-    // while there are still relays left
-    while ( final_relay_hit == 0 )
-    {
-      // find a fetch state that has less than 3 relays in it
-      for ( i = 0; i < 3; i++ )
-      {
-        if ( fetch_states[i].num_relays < 3 )
-        {
-          break;
-        }
-      }
-
-      // if we couldn't find a non-full fetch, then bail out and just focus on polling
-      if ( i >= 3 )
-      {
-        break;
-      }
-
-      parse_succ = d_parse_single_relay( fd, &fetch_states[i].relays[fetch_states[i].num_relays] );
-
-#ifdef MINITOR_CHUTNEY
-      ESP_LOGE( MINITOR_TAG, "Parsed relay: %d", ++total_parsed );
-#endif
-
-      // we either have a new relay or have hit the last relay and need to run our free fetch with the 1-2 relays in it
-      if ( parse_succ >= 0 )
-      {
-        if ( fetch_states[i].relays[fetch_states[i].num_relays].hsdir == 1 || parse_succ != 0 )
-        {
-          // got a new relay, increment num_relays
-          if ( parse_succ == 0 )
-          {
-            fetch_states[i].num_relays++;
-          }
-          else
-          {
-            final_relay_hit = 1;
-          }
-
-          // we either have 3 or have more than 1 and hit the final relay in consensus where ret != 0
-          if ( fetch_states[i].num_relays == 3 || ( final_relay_hit == 1 && fetch_states[i].num_relays > 0 ) )
-          {
-            while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
-            {
-              ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
-            }
-
-            fetch_poll[i].fd = fetch_states[i].sock_fd;
-            fetch_poll[i].events = POLLIN;
-            running_fetches++;
-          }
-        }
-      }
-      else
-      {
-        ret = -1;
-        goto finish;
-      }
-    }
-
-    for ( j = 0; j < 3; j++ )
-    {
-#ifdef MINITOR_CHUTNEY
-      ESP_LOGE( MINITOR_TAG, "About to poll: %d with num_relays: %d", fetch_poll[j].fd, fetch_states[j].num_relays );
-#endif
-    }
-
-    // if we hit the final relay or have no more fetches to fill, wait forever
-    if ( final_relay_hit == 1 || i >= 3 )
-    {
-#ifdef MINITOR_CHUTNEY
-      ESP_LOGE( MINITOR_TAG, "Waiting forever on poll" );
-#endif
-
-      poll_succ = poll( fetch_poll, 3, -1 );
-    }
-    // otherwise just peek so we can keep on building fetches
-    else
-    {
-      poll_succ = poll( fetch_poll, 3, 0 );
-    }
-
-    if ( poll_succ > 0 )
-    {
-      for ( i = 0; i < 3; i++ )
-      {
-        if ( ( fetch_poll[i].revents & POLLIN ) == POLLIN )
-        {
-          // we're going to assume that once a socket is ready to read, we can read the entire thing
-          if ( d_finish_descriptor_fetch( &fetch_states[i] ) < 0 )
-          {
-            ESP_LOGE( MINITOR_TAG, "Failed to finish fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
-
-            while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
-            {
-              ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
-            }
-
-            fetch_poll[i].fd = fetch_states[i].sock_fd;
-            fetch_poll[i].events = POLLIN;
-          }
-          else
-          {
-            // send the fetched relays off to the insert task
-            for ( j = 0; j < fetch_states[i].num_relays; j++ )
-            {
-              tmp_relay = malloc( sizeof( OnionRelay ) );
-
-              memcpy( tmp_relay, &fetch_states[i].relays[j], sizeof( OnionRelay ) );
-              xQueueSendToBack( insert_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
-            }
-
-            fetch_poll[i].fd = -1;
-            memset( &fetch_states[i], 0, sizeof( FetchDescriptorState ) );
-            running_fetches--;
-          }
-        }
-      }
-    }
-  } while ( final_relay_hit == 0 || running_fetches > 0 );
-
-  tmp_relay = NULL;
-  xQueueSendToBack( insert_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
-
-  // take the semaphore so we know the crypto and insert task finished
-  ret = xSemaphoreTake( crypto_insert_finish, 1000 * 5 / portTICK_PERIOD_MS );
-
-  if ( ret != pdTRUE )
-  {
-    xSemaphoreGive( crypto_insert_finish );
-
-    ret = -1;
-    goto finish;
-  }
-
-  xSemaphoreGive( crypto_insert_finish );
-
-  vQueueDelete( insert_relays_queue );
-
-  ret = 0;
-  valid_delay = 0;
-
-  if ( d_finalize_hsdir_relays_file() < 0 || d_set_hsdir_list_valid_until( (*result_network_consensus)->valid_until ) < 0 )
-  {
-    ret = -1;
-    goto finish;
-  }
-
-  time( &now );
-
-  if ( (*result_network_consensus)->valid_after > now )
-  {
-    valid_delay = 1000 * ( (*result_network_consensus)->valid_after - now ) / portTICK_PERIOD_MS;
-  }
-
-  if ( valid_delay != 0 )
-  {
-    ESP_LOGE( MINITOR_TAG, "Triggering consensus switch in %lu seconds", ( (*result_network_consensus)->valid_after - now ) );
-    next_network_consensus = *result_network_consensus;
-
-    xTimerChangePeriod( consensus_valid_timer, valid_delay, portMAX_DELAY );
-    xTimerStart( consensus_valid_timer, portMAX_DELAY );
-  }
-
-  if ( valid_delay == 0 )
-  {
-    // BEGIN mutex for the network consensus
-    xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-    network_consensus.method = (*result_network_consensus)->method;
-    network_consensus.valid_after = (*result_network_consensus)->valid_after;
-    network_consensus.fresh_until = (*result_network_consensus)->fresh_until;
-    network_consensus.valid_until = (*result_network_consensus)->valid_until;
-
-    memcpy( network_consensus.previous_shared_rand, (*result_network_consensus)->previous_shared_rand, 32 );
-    memcpy( network_consensus.shared_rand, (*result_network_consensus)->shared_rand, 32 );
-
-    xSemaphoreGive( network_consensus_mutex );
-    // END mutex for the network consensus
-
-    next_network_consensus = NULL;
-  }
-
-finish:
-  if ( close( fd ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/consensus, errno: %d", errno );
-#endif
-
-    return -1;
-  }
-
-  return ret;
-}
-*/
-
 int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_interval )
 {
   time_t voting_interval;
@@ -2208,7 +1884,6 @@ int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_inte
   int rotation_offset;
   int time_period;
 
-  ESP_LOGE( MINITOR_TAG, "fresh_until: %ld, valid_after: %ld, hsdir_interval: %d", fresh_until, valid_after, hsdir_interval );
   voting_interval = fresh_until - valid_after;
   rotation_offset = SHARED_RANDOM_N_ROUNDS * voting_interval / 60;
 
@@ -2216,15 +1891,12 @@ int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_inte
   srv_start_time = valid_after - ( ( ( ( valid_after / voting_interval ) ) % ( SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES ) ) * voting_interval );
   tp_start_time = ( srv_start_time / 60 - rotation_offset + hsdir_interval ) * 60;
 
-  ESP_LOGE( MINITOR_TAG, "Roation offset: %d", rotation_offset );
   time_period = ( valid_after / 60 - rotation_offset ) / hsdir_interval;
 
   if ( valid_after < srv_start_time || valid_after >= tp_start_time )
   {
     time_period--;
   }
-
-  ESP_LOGE( MINITOR_TAG, "Time period used: %d", time_period );
 
   return time_period;
 }

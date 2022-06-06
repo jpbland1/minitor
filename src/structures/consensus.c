@@ -85,7 +85,6 @@ OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index )
 
   for ( i = 0; i < index; i++ )
   {
-    ESP_LOGE( MINITOR_TAG, "Target %d has point %p", i, dl_relay->relay );
     dl_relay = dl_relay->next;
   }
 

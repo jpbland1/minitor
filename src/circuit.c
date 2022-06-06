@@ -1862,7 +1862,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   wc_InitRsaKey( initiator_rsa_auth_key, NULL );
 
   // rsa identity key doesn't exist, create it and save it
-  if ( stat( "/sdcard/identity_rsa_key", &st ) == -1 )
+  if ( stat( FILESYSTEM_PREFIX "identity_rsa_key", &st ) == -1 )
   {
     // make and save the identity key to the file system
     wolf_succ = wc_MakeRsaKey( &initiator_rsa_identity_key, 1024, 65537, rng );
@@ -1887,10 +1887,10 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    if ( ( fd = open( "/sdcard/identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1899,7 +1899,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( write( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1908,7 +1908,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1917,10 +1917,10 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   }
   else
   {
-    if ( ( fd = open( "/sdcard/identity_rsa_key", O_RDONLY ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_RDONLY ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1929,7 +1929,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( read( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1938,7 +1938,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 #endif
 
       goto fail;
@@ -1975,7 +1975,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   wc_InitCert( &initiator_rsa_identity_cert );
 
   // rsa identity cert doesn't exist, create it and save it
-  if ( stat( "/sdcard/identity_rsa_cert_der", &st ) == -1 )
+  if ( stat( FILESYSTEM_PREFIX "identity_rsa_cert_der", &st ) == -1 )
   {
     // TODO randomize these
     strncpy( initiator_rsa_identity_cert.subject.country, "US", CTC_NAME_SIZE );
@@ -2000,10 +2000,10 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    if ( ( fd = open( "/sdcard/identity_rsa_cert_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_cert_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2012,7 +2012,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( write( fd, initiator_rsa_identity_cert_der, sizeof( unsigned char ) * ( *initiator_rsa_identity_cert_der_size ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2021,7 +2021,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2046,10 +2046,10 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 
     wolfSSL_X509_free( certificate );
 
-    if ( ( fd = open( "/sdcard/identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2058,7 +2058,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( write( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * ( *initiator_rsa_identity_key_der_size ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2067,7 +2067,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2076,10 +2076,10 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   }
   else
   {
-    if ( ( fd = open( "/sdcard/identity_rsa_cert_der", O_RDONLY ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_cert_der", O_RDONLY ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2088,7 +2088,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( ( *initiator_rsa_identity_cert_der_size = read( fd, initiator_rsa_identity_cert_der, sizeof( unsigned char ) * 2048 ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2097,16 +2097,16 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_cert_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 #endif
 
       goto fail;
     }
 
-    if ( ( fd = open( "/sdcard/identity_rsa_key_der", O_RDONLY ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_RDONLY ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2115,7 +2115,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( ( *initiator_rsa_identity_key_der_size = read( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * 2048 ) ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;
@@ -2124,7 +2124,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close /sdcard/identity_rsa_key_der, errno: %d", errno );
+      ESP_LOGE( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 #endif
 
       goto fail;

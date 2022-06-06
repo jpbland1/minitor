@@ -173,10 +173,6 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit )
     {
       if ( circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( CORE_TAG, "hsdir begin rebuild" );
-#endif
-
         if ( circuit->relay_list.built_length >= 2 )
         {
           circuit->target_relay_index++;
