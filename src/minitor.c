@@ -7,7 +7,6 @@
 
 #include "../include/config.h"
 #include "../include/minitor.h"
-#include "../h/models/db.h"
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
@@ -132,15 +131,6 @@ int d_minitor_INIT()
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
-
-  if ( d_initialize_database() < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't setup minitor sqlite3 database" );
-#endif
-
-    return -1;
-  }
 
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )
   {

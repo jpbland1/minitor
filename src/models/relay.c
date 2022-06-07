@@ -8,12 +8,10 @@
 
 #include "esp_log.h"
 #include "user_settings.h"
-#include "driver/spi_master.h"
 
 #include "../../include/config.h"
 #include "../../h/constants.h"
 #include "../../h/consensus.h"
-#include "../../h/models/issi.h"
 #include "../../h/models/relay.h"
 
 uint32_t hsdir_relay_count = 0;

@@ -7,7 +7,6 @@
 
 #include "../include/config.h"
 #include "../h/core.h"
-#include "../h/models/db.h"
 #include "../h/models/relay.h"
 #include "../h/consensus.h"
 #include "../h/circuit.h"

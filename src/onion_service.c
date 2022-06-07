@@ -2590,8 +2590,6 @@ int d_begin_hsdir( OnionCircuit* publish_circuit )
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  ESP_LOGE( MINITOR_TAG, "Trying to send relay" );
-
   if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR

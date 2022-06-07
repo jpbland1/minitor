@@ -13,9 +13,7 @@
 #include "../h/constants.h"
 #include "../h/consensus.h"
 #include "../h/encoding.h"
-#include "../h/models/db.h"
 #include "../h/models/relay.h"
-#include "../h/models/network_consensus.h"
 
 // TODO change back to 0 when issi ram is operating in quad mode
 int hsdir_tree_occupied = 1;
@@ -1939,35 +1937,7 @@ int d_fetch_consensus_info()
   int voting_interval;
   time_t next_srv_time;
 
-  // TODO the return value of null is ambigious, it could be null because there isn't a row or
-  // it could be because the database is messed up, we need to be able to distinguish
-  //result_network_consensus = px_get_network_consensus();
-  //time( &now );
-
-  //if ( result_network_consensus == NULL || result_network_consensus->fresh_until <= now )
-  //{
-    if ( d_download_consensus() < 0 )
-    {
-      ret = -1;
-      goto finish;
-    }
-  //}
-
-/*
-  if ( d_parse_downloaded_consensus( &result_network_consensus ) < 0 )
-  {
-    ret = -1;
-    goto finish;
-  }
-*/
-
-  if ( d_destroy_consensus() < 0 )
-  {
-    ret = -1;
-    goto finish;
-  }
-
-  if ( d_create_consensus( &network_consensus ) < 0 )
+  if ( d_download_consensus() < 0 )
   {
     ret = -1;
     goto finish;
