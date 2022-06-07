@@ -6,8 +6,8 @@ To get a minitor capable devboard, visit shop.3layer.dev [click here](https://sh
 Install on Linux or else.  
 Minitor currently only runs on the esp32 and requires the esp-idf to be installed. It uses freeRTOS to run concurrently and requires wolfSSL to handle the cryptography.  
 First, install and setup the esp-idf [click here](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html).  
-Once you have run the export command from esp-idf `. ./esp-idf/export.sh` clone this repository into your components folder `git clone https://git.triplelayerdevelopment.com/minitor.git/`.  
-Do the same for the wolfSSL component `git clone https://git.triplelayerdevelopment.com/wolfssl.git/`.  
+Once you have sourced the export script from the esp-idf `. ./esp-idf/export.sh` clone this repository into your components folder `git clone https://github.com/jpbland1/Minitor`.  
+Do the same for the wolfSSL component `git clone https://github.com/jpbland1/wolfssl`.  
 Minitor requires a filesystem and an up to date time system, in this snippet we use an sdcard and ntp client provided by the esp-idf:  
 ```
 #include "driver/sdspi_host.h"
@@ -78,11 +78,11 @@ Minitor requires a filesystem and an up to date time system, in this snippet we 
     localtime_r( &now, &time_info );
   } while ( time_info.tm_year < (2016 - 1900) );
 ```
-The path you mounted the filesystem, `/sdcard/` in this snippet must be set as `FILESYSTEM_PREFIX` in `minitor/include.h`  
+The path you mounted the sdcard to the filesystem, `/sdcard/` in this snippet MUST match `FILESYSTEM_PREFIX` in `minitor/include.h`  
 ```
 #define FILESYSTEM_PREFIX "/sdcard/"
 ```
-Finally, include Minitor and run these commands in your main application:  
+Finally, include Minitor in your main task and call these functions 
 ```
 #include "minitor.h"
 ...
@@ -101,7 +101,11 @@ Finally, include Minitor and run these commands in your main application:
     ESP_LOGE( TAG, "Failed to setup hidden service" );
   }
 ```
-And presto, an onion service will be setup and will proxy a web server running on the esp32 on localhost port 8080 to port 80 of the onion service.  
+When `d\_minitor\_INIT()` is called, all the necessary global variables, queues, semaphores and files will be created to run minitor, and the Tor network consensus documents will be fetched.  
+The fetch process usually takes around 300 seconds but can vary based on the number of Tor nodes online.  
+Once Minitor has the consensus documents, they are saved on the file system and don't need to be re-fetched until they expire, meaning you can restart the esp32 without having to wait again.  
+When `d_setup_onion_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory )` is called, Minitor will then setup the hidden service and run in the background, the main task may continue on but the onion service won't be ready to connect until it has finished sending its hidden service descriptors, which typically takes a few minutes.  
+When finished, an onion service will be setup and will proxy a web server running on the esp32 on localhost port `local_port` to port `exit_port` of the onion service.  
 It will print the address of the onion service to the console but if you miss it or are running headless the onion address will be saved to the sdcard at `/sdcard/test_service/hostname`.  
 This example assumes your sd card is mounted at /sdcard/ and a web server is running on localhost 8080 but you can adjust the parameters as you need.  
 If you want an example project that already has the sdcard and web server, run `git clone --recurse-submodules https://git.triplelayerdevelopment.com/code-me-not.git/` which clones the code-me-not project. code-me-not is a program that lets you control the esp32's pins from a web interface without writing any code and by default it runs a hidden service.  
