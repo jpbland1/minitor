@@ -108,7 +108,7 @@ When `d_setup_onion_service( unsigned short local_port, unsigned short exit_port
 When finished, an onion service will be setup and will proxy a web server running on the esp32 on localhost port `local_port` to port `exit_port` of the onion service.  
 It will print the address of the onion service to the console but if you miss it or are running headless the onion address will be saved to the sdcard at `/sdcard/test_service/hostname`.  
 This example assumes your sd card is mounted at /sdcard/ and a web server is running on localhost 8080 but you can adjust the parameters as you need.  
-If you want an example project that already has the sdcard and web server, run `git clone --recurse-submodules https://git.triplelayerdevelopment.com/code-me-not.git/` which clones the code-me-not project. code-me-not is a program that lets you control the esp32's pins from a web interface without writing any code and by default it runs a hidden service.  
+If you want an example project that already has the sdcard and web server, run `git clone --recurse-submodules https://github.com/jpbland1/code-me-not` which clones the code-me-not project. code-me-not is a program that lets you control the esp32's pins from a web interface without writing any code and by default it runs an onion service.  
 
 # Running with Chutney
 If you are contribuing to Minitor (<3) you will need to run Chutney [click here](https://github.com/torproject/chutney).  
