@@ -2,7 +2,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "esp_log.h"
+
 #include "../../include/config.h"
+#include "../../h/constants.h"
 
 int d_roll_revision_counter()
 {
@@ -36,6 +39,16 @@ int d_roll_revision_counter()
 #ifdef MINITOR_CHUTNEY
       ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "rev_counter" );
 #endif
+
+      count = -1;
+      goto finish;
+    }
+
+    if ( lseek( fd, 0, SEEK_SET ) != 0 )
+    {
+  #ifdef MINITOR_CHUTNEY
+      ESP_LOGE( MINITOR_TAG, "Failed to seek " FILESYSTEM_PREFIX "rev_counter" );
+  #endif
 
       count = -1;
       goto finish;
