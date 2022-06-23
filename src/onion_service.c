@@ -2085,6 +2085,7 @@ void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* 
   lm_add( input_plus_1, input, one );
   lm_invert( inverse_input_plus_1, input_plus_1 );
   lm_mul( output, input_minus_1, inverse_input_plus_1 );
+
   output[31] = (!!sign_bit) << 7;
 }
 
@@ -2224,6 +2225,7 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   unsigned char reusable_sha512_sum[WC_SHA512_DIGEST_SIZE];
   unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
   unsigned char tmp_priv_key[ED25519_PRV_KEY_SIZE];
+  unsigned char reduced_priv_key[64] = { 0 };
   unsigned char out_priv_key[ED25519_PRV_KEY_SIZE];
   unsigned char tmp_64_array[8];
   unsigned char zero[32] = { 0 };
@@ -2292,7 +2294,10 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   reusable_sha3_sum[31] &= 63;
   reusable_sha3_sum[31] |= 64;
 
-  sc_muladd( out_priv_key, tmp_priv_key, reusable_sha3_sum, zero );
+  memcpy( reduced_priv_key, tmp_priv_key, 32 );
+
+  sc_reduce( reduced_priv_key );
+  sc_muladd( out_priv_key, reduced_priv_key, reusable_sha3_sum, zero );
 
   wc_Sha512Update( &reusable_sha512, (unsigned char*)"Derive temporary signing key hash input", strlen( "Derive temporary signing key hash input" ) );
   wc_Sha512Update( &reusable_sha512, tmp_priv_key + 32, 32 );
@@ -3081,11 +3086,12 @@ int d_push_hsdir( OnionService* service )
     // send outer descriptor wrapper to the correct HSDIR nodes
     //succ = d_build_hsdir_circuits( reusable_plaintext + HS_DESC_SIG_PREFIX_LENGTH, reusable_text_length, target_relays[i] );
     //v_build_hsdir_circuits( service, target_relays[i], i );
-    start_relay = px_get_random_fast_relay( 1, service->target_relays[i], NULL, NULL );
-    v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, i, 0, start_relay, service->target_relays[i]->head->relay, NULL );
 
     strcpy( service->hs_descs[i], desc_file );
   }
+
+  start_relay = px_get_random_fast_relay( 1, service->target_relays[0], NULL, NULL );
+  v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, 0, 0, start_relay, service->target_relays[0]->head->relay, NULL );
 
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_ed25519_free( &blinded_keys[0] );
@@ -3104,6 +3110,10 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
 
   if ( service->hsdir_sent == service->hsdir_to_send )
   {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Hidden service ready at: %s", service->hostname );
+#endif
+
     v_set_hsdir_timer( service->hsdir_timer );
 
     i = d_get_standby_count();

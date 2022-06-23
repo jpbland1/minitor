@@ -75,6 +75,16 @@ static void v_cleanup_connection( DlConnection* dl_connection )
     xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
   }
 
+  if ( dl_connection->packed_versions != NULL )
+  {
+    free( dl_connection->packed_versions );
+  }
+
+  if ( dl_connection->packed_certs != NULL )
+  {
+    free( dl_connection->packed_certs );
+  }
+
   connections_poll[dl_connection->poll_index].fd = -1;
 
   shutdown( dl_connection->sock_fd, 0 );
@@ -428,8 +438,6 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
     return NULL;
   }
-
-  ESP_LOGE( CONN_TAG, "xMinitorWolfSSL_Context: %p", xMinitorWolfSSL_Context );
 
   ssl = wolfSSL_new( xMinitorWolfSSL_Context );
 

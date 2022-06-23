@@ -18,6 +18,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdlib.h>
 #include <string.h>
+#include "esp_log.h"
 
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/aes.h"

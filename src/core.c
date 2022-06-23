@@ -85,7 +85,6 @@ void v_set_hsdir_timer( TimerHandle_t hsdir_timer )
     ESP_LOGE( CORE_TAG, "Setting hsdir timer to normal time %lu seconds", ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) );
     xTimerChangePeriod( hsdir_timer, ( 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) + 500 ) / portTICK_PERIOD_MS, portMAX_DELAY );
   }
-
 #else
   // start the hsdir_timer at 60-120 minutes, may be too long for clock accurracy
   xTimerChangePeriod( hsdir_timer, 1000 * 60 * ( ( esp_random() % 60 ) + 60 ) / portTICK_PERIOD_MS, portMAX_DELAY );
@@ -176,6 +175,7 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit )
 {
   int retry_length;
   OnionRelay* retry_end_relay = NULL;
+  OnionRelay* start_relay;
 
   // if a fully built rend circuit is destroyed, it's up to the client to restart
   if ( circuit->status != CIRCUIT_RENDEZVOUS )
@@ -195,12 +195,26 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit )
           circuit->target_relay_index++;
           circuit->service->hsdir_sent++;
 
-          if (
-            circuit->service->hsdir_sent == circuit->service->hsdir_to_send ||
-            circuit->target_relay_index == circuit->service->target_relays[circuit->desc_index]->length
-          )
+          if ( circuit->target_relay_index == circuit->service->target_relays[circuit->desc_index]->length )
           {
             v_cleanup_service_hs_data( circuit->service, circuit->desc_index );
+
+            if ( circuit->service->hsdir_sent != circuit->service->hsdir_to_send )
+            {
+              start_relay = px_get_random_fast_relay( 1, circuit->service->target_relays[circuit->desc_index + 1], NULL, NULL );
+
+              v_send_init_circuit(
+                3,
+                CIRCUIT_HSDIR_BEGIN_DIR,
+                circuit->service,
+                circuit->desc_index + 1,
+                0,
+                start_relay,
+                circuit->service->target_relays[circuit->desc_index + 1]->head->relay,
+                NULL
+              );
+            }
+
             goto circuit_destroy;
           }
 
@@ -222,6 +236,7 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit )
       }
       else
       {
+
         retry_length = circuit->relay_list.length;
         retry_end_relay = NULL;
       }
@@ -263,6 +278,7 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
   OnionService* working_service;
   OnionMessage* onion_message;
   OnionRelay* target_relay;
+  OnionRelay* start_relay;
   DoublyLinkedOnionRelay* dl_relay;
 
   circ_id = ((uint32_t)packed_cell[0]) << 24;
@@ -334,6 +350,8 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
 
       if ( d_router_created2( working_circuit, &unpacked_cell ) < 0 )
       {
+        // prevent destroy function from freeing the handshake key again
+        working_circuit->status = CIRCUIT_CREATE;
         goto circuit_rebuild;
       }
 
@@ -372,6 +390,8 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
       if ( d_router_extended2( working_circuit, working_circuit->relay_list.built_length, &unpacked_cell ) < 0 )
       {
         ESP_LOGE( CORE_TAG, "failed to process extended" );
+        // prevent destroy function from freeing the handshake key again
+        working_circuit->status = CIRCUIT_CREATE;
         goto circuit_rebuild;
       }
 
@@ -468,6 +488,8 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
           );
 
           free( working_circuit );
+
+          working_circuit = NULL;
         }
         else
         {
@@ -537,11 +559,7 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
       working_circuit->service->hsdir_sent++;
       working_circuit->target_relay_index++;
 
-      if
-      (
-        working_circuit->service->hsdir_sent == working_circuit->service->hsdir_to_send ||
-        working_circuit->target_relay_index == working_circuit->service->target_relays[working_circuit->desc_index]->length
-      )
+      if ( working_circuit->target_relay_index == working_circuit->service->target_relays[working_circuit->desc_index]->length)
       {
         v_cleanup_service_hs_data( working_circuit->service, working_circuit->desc_index );
 
@@ -552,6 +570,22 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
 
         xSemaphoreGive( circuits_mutex );
         // MUTEX GIVE
+
+        if ( working_circuit->service->hsdir_sent != working_circuit->service->hsdir_to_send )
+        {
+          start_relay = px_get_random_fast_relay( 1, working_circuit->service->target_relays[working_circuit->desc_index + 1], NULL, NULL );
+
+          v_send_init_circuit(
+            3,
+            CIRCUIT_HSDIR_BEGIN_DIR,
+            working_circuit->service,
+            working_circuit->desc_index + 1,
+            0,
+            start_relay,
+            working_circuit->service->target_relays[working_circuit->desc_index + 1]->head->relay,
+            NULL
+          );
+        }
 
         d_destroy_onion_circuit( working_circuit );
 
@@ -790,8 +824,9 @@ fail:
 
 static void v_handle_conn_ready( DlConnection* or_connection )
 {
+  int i = 0;
   OnionCircuit* ready_circuit;
-  OnionCircuit* next_circuit;
+  OnionCircuit* ready_circuits[20];
   OnionRelay* end_relay;
 
   // MUTEX TAKE
@@ -801,45 +836,25 @@ static void v_handle_conn_ready( DlConnection* or_connection )
 
   while ( ready_circuit != NULL )
   {
-    next_circuit = ready_circuit->next;
-
     if ( ready_circuit->or_connection == or_connection )
     {
-      if ( ready_circuit->status == CIRCUIT_CREATE && d_send_circuit_create( ready_circuit ) < 0 )
-      {
-        if ( ready_circuit->target_status == CIRCUIT_RENDEZVOUS || ready_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
-        {
-          end_relay = malloc( sizeof( OnionRelay ) );
-          memcpy( end_relay, ready_circuit->relay_list.tail->relay, sizeof( OnionRelay ) );
-        }
-        else
-        {
-          end_relay = NULL;
-        }
-
-        v_send_init_circuit(
-          ready_circuit->relay_list.length,
-          ready_circuit->target_status,
-          ready_circuit->service,
-          ready_circuit->desc_index,
-          ready_circuit->target_relay_index,
-          NULL,
-          end_relay,
-          ready_circuit->hs_crypto
-        );
-
-        v_remove_circuit_from_list( ready_circuit, &onion_circuits );
-
-        d_destroy_onion_circuit( ready_circuit );
-        free( ready_circuit );
-      }
+      ready_circuits[i] = ready_circuit;
+      i++;
     }
 
-    ready_circuit = next_circuit;
+    ready_circuit = ready_circuit->next;
   }
 
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
+
+  for ( i = i - 1; i >= 0; i-- )
+  {
+    if ( ready_circuits[i]->status == CIRCUIT_CREATE && d_send_circuit_create( ready_circuits[i] ) < 0 )
+    {
+      v_circuit_rebuild_or_destroy( ready_circuits[i] );
+    }
+  }
 }
 
 static void v_handle_scheduled_consensus()
@@ -1055,7 +1070,7 @@ void v_minitor_daemon( void* pv_parameters )
       vTaskDelete( NULL );
     }
 
-    //ESP_LOGE( MINITOR_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
+    ESP_LOGE( MINITOR_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
 
     switch ( onion_message->type )
     {

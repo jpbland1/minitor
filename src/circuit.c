@@ -367,17 +367,21 @@ int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionR
 int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* start_relay, OnionRelay* destination_relay )
 {
   int i;
+  uint8_t* start_identity = NULL;
+  uint8_t* destination_identity = NULL;
   DoublyLinkedOnionRelay* dl_relay;
 
   circuit->circ_id = ++circ_id_counter;
 
   if ( start_relay != NULL )
   {
+    start_identity = start_relay->identity;
     length--;
   }
 
   if ( destination_relay != NULL )
   {
+    destination_identity = start_relay->identity;
     length--;
   }
 
@@ -388,16 +392,16 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   {
     if ( i == 0 && start_relay == NULL )
     {
-      if ( d_get_suitable_relay( &circuit->relay_list, 1, start_relay->identity, destination_relay->identity ) )
+      if ( d_get_suitable_relay( &circuit->relay_list, 1, start_identity, destination_identity ) )
       {
-        return -1;
+        goto fail;
       }
     }
     else
     {
-      if ( d_get_suitable_relay( &circuit->relay_list, 0, start_relay->identity, destination_relay->identity ) )
+      if ( d_get_suitable_relay( &circuit->relay_list, 0, start_identity, destination_identity ) )
       {
-        return -1;
+        goto fail;
       }
     }
   }
@@ -436,6 +440,18 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   }
 
   return 0;
+fail:
+  if ( start_relay != NULL )
+  {
+    free( start_relay );
+  }
+
+  if ( destination_relay != NULL )
+  {
+    free( destination_relay );
+  }
+
+  return -1;
 }
 
 /*
@@ -662,6 +678,10 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
     wc_AesFree( &circuit->hs_crypto->hs_aes_forward );
     wc_AesFree( &circuit->hs_crypto->hs_aes_backward );
     free( circuit->hs_crypto );
+  }
+  else if ( circuit->status == CIRCUIT_CREATED || circuit->status == CIRCUIT_EXTENDED )
+  {
+    wc_curve25519_free( &circuit->create2_handshake_key );
   }
 
   if ( b_verify_or_connection( circuit->or_connection ) == true )
@@ -1146,6 +1166,7 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   wc_HmacUpdate( &reusable_hmac, secret_input, SECRET_INPUT_LENGTH );
   wc_HmacFinal( &reusable_hmac, working_auth_input );
   wc_HmacFree( &reusable_hmac );
+
   working_auth_input += WC_SHA256_DIGEST_SIZE;
 
   memcpy( working_auth_input, db_relay->relay->identity, ID_LENGTH );
@@ -1318,6 +1339,8 @@ int d_start_v3_handshake( DlConnection* or_connection )
 #endif
 
     free( or_connection->packed_versions );
+    or_connection->packed_versions = NULL;
+
     goto fail;
   }
 
@@ -1329,6 +1352,7 @@ int d_start_v3_handshake( DlConnection* or_connection )
 #endif
 
     free( or_connection->packed_versions );
+    or_connection->packed_versions = NULL;
 
     goto fail;
   }
@@ -1381,6 +1405,9 @@ int d_start_v3_handshake( DlConnection* or_connection )
     free( or_connection->packed_versions );
     free( or_connection->packed_certs );
 
+    or_connection->packed_versions = NULL;
+    or_connection->packed_certs = NULL;
+
     goto fail_certs;
   }
 
@@ -1417,9 +1444,11 @@ void v_process_versions( DlConnection* or_connection, uint8_t* packed_cell, int 
   // have to do this because of semaphore bug
   wc_Sha256Update( &or_connection->initiator_sha, or_connection->packed_versions, or_connection->versions_length );
   free( or_connection->packed_versions );
+  or_connection->packed_versions = NULL;
 
   wc_Sha256Update( &or_connection->initiator_sha, or_connection->packed_certs, or_connection->certs_length );
   free( or_connection->packed_certs );
+  or_connection->packed_certs = NULL;
 
   wc_Sha256Update( &or_connection->responder_sha, packed_cell, length );
 
@@ -1439,7 +1468,6 @@ int d_process_certs( DlConnection* or_connection, uint8_t* packed_cell, int leng
 
   unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
 
-  // TODO does this just return an existing reference or should I free?
   peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
 
   if ( peer_cert == NULL )
@@ -1452,6 +1480,8 @@ int d_process_certs( DlConnection* or_connection, uint8_t* packed_cell, int leng
   }
 
   succ = d_verify_certs( &unpacked_cell, peer_cert, &or_connection->responder_rsa_identity_key_der_size, or_connection->responder_rsa_identity_key_der );
+
+  wolfSSL_X509_free( peer_cert );
 
   free_cell( &unpacked_cell );
 
@@ -1499,7 +1529,6 @@ int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int 
   // free the packed cell
   free( packed_cell );
 
-  // TODO does this just return an existing reference or should I free?
   peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
 
   if ( peer_cert == NULL )
@@ -1594,6 +1623,8 @@ int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int 
   }
 
 finish:
+  wolfSSL_X509_free( peer_cert );
+
   free( or_connection->responder_rsa_identity_key_der );
   free( or_connection->initiator_rsa_identity_key_der );
 
