@@ -7,6 +7,7 @@
 extern SemaphoreHandle_t connections_mutex;
 extern DlConnection* connections;
 
+void v_cleanup_connection( DlConnection* dl_connection );
 int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circuit );
 int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t port );
 int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t* data, uint32_t length );

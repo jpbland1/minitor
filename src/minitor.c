@@ -113,7 +113,8 @@ int d_minitor_INIT()
   xTaskCreatePinnedToCore(
     v_minitor_daemon,
     "MINITOR_DAEMON",
-    8192,
+    7168,
+    //15000,
     NULL,
     7,
     NULL,
@@ -150,6 +151,7 @@ int d_minitor_INIT()
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
 
+  //if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_3_client_method() ) ) == NULL )
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )
   {
 #ifdef DEBUG_MINITOR

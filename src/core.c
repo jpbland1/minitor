@@ -268,10 +268,11 @@ circuit_destroy:
   free( circuit );
 }
 
-static void v_handle_packed_cell( uint8_t* packed_cell )
+static void v_handle_packed_cell( DlConnection* or_connection )
 {
   int succ;
   uint32_t circ_id;
+  uint8_t* packed_cell;
   Cell unpacked_cell;
   OnionCircuit* working_circuit;
   OnionCircuit* tmp_circuit;
@@ -280,6 +281,17 @@ static void v_handle_packed_cell( uint8_t* packed_cell )
   OnionRelay* target_relay;
   OnionRelay* start_relay;
   DoublyLinkedOnionRelay* dl_relay;
+
+  if ( b_verify_or_connection( or_connection ) == false )
+  {
+    return;
+  }
+
+  packed_cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
+
+  or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
+
+  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
 
   circ_id = ((uint32_t)packed_cell[0]) << 24;
   circ_id |= ((uint32_t)packed_cell[1]) << 16;
@@ -1057,6 +1069,107 @@ void v_handle_circuit_timeout()
   xTimerChangePeriod( timeout_timer, 1000 * min_left / portTICK_PERIOD_MS, portMAX_DELAY );
 }
 
+void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
+{
+  uint8_t* packed_cell;
+
+  if ( b_verify_or_connection( or_connection ) == false )
+  {
+    return;
+  }
+
+  packed_cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
+
+  or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
+
+  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
+
+  // MUTEX TAKE
+  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+
+  switch ( or_connection->status )
+  {
+    case CONNECTION_WANT_VERSIONS:
+      if ( packed_cell[2] != VERSIONS )
+      {
+        goto fail;
+      }
+
+      v_process_versions( or_connection, packed_cell, length );
+
+      or_connection->status = CONNECTION_WANT_CERTS;
+
+      break;
+    case CONNECTION_WANT_CERTS:
+      if 
+      (
+        packed_cell[4] != CERTS ||
+        d_process_certs( or_connection, packed_cell, length ) < 0
+      )
+      {
+        goto fail;
+      }
+
+      or_connection->status = CONNECTION_WANT_CHALLENGE;
+
+      break;
+    case CONNECTION_WANT_CHALLENGE:
+      if
+      (
+        packed_cell[4] != AUTH_CHALLENGE ||
+        d_process_challenge( or_connection, packed_cell, length ) < 0
+      )
+      {
+        goto fail;
+      }
+
+      or_connection->status = CONNECTION_WANT_NETINFO;
+
+      break;
+    case CONNECTION_WANT_NETINFO:
+      if
+      (
+        packed_cell[4] != NETINFO ||
+        d_process_netinfo( or_connection, packed_cell ) < 0
+      )
+      {
+        goto fail;
+      }
+
+      or_connection->status = CONNECTION_LIVE;
+
+      xSemaphoreGive( or_connection->access_mutex );
+      // MUTEX GIVE
+
+      v_handle_conn_ready( or_connection );
+
+      break;
+    case CONNECTION_LIVE:
+    default:
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( CORE_TAG, "Got an unknown connection status %d", or_connection->status );
+#endif
+      break;
+  }
+
+  if ( or_connection->status != CONNECTION_LIVE )
+  {
+    xSemaphoreGive( or_connection->access_mutex );
+    // MUTEX GIVE
+  }
+
+  return;
+
+fail:
+  // MUTEX TAKE
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+
+  v_cleanup_connection( or_connection );
+
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
+}
+
 void v_minitor_daemon( void* pv_parameters )
 {
   OnionMessage* onion_message;
@@ -1070,7 +1183,7 @@ void v_minitor_daemon( void* pv_parameters )
       vTaskDelete( NULL );
     }
 
-    ESP_LOGE( MINITOR_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
+    ESP_LOGE( CORE_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
 
     switch ( onion_message->type )
     {
@@ -1098,6 +1211,9 @@ void v_minitor_daemon( void* pv_parameters )
       case SERVICE_TCP_DATA:
         v_handle_service_tcp_data( onion_message->data );
         break;
+      case CONN_HANDSHAKE:
+        v_handle_conn_handshake( onion_message->data, onion_message->length );
+        break;
       case CONN_READY:
         v_handle_conn_ready( onion_message->data );
         break;
@@ -1112,5 +1228,7 @@ void v_minitor_daemon( void* pv_parameters )
     }
 
     free( onion_message );
+    
+    ESP_LOGE( CORE_TAG, "message processed" );
   }
 }

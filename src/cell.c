@@ -242,15 +242,14 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
   // limit will change
   int rx_limit = header_length;
   // we want to make it big enough for an entire cell to fit
-  unsigned char rx_buffer[CELL_LEN];
+  //unsigned char rx_buffer[CELL_LEN];
   // variable length of the cell if there is one
   unsigned short length = 0;
 
   // initially just make the packed cell big enough for a standard header,
   // we'll realloc it later
-  *packed_cell = malloc( sizeof( unsigned char ) * header_length );
-
-  // to be given by the task that wants us to read
+  *packed_cell = malloc( CELL_LEN );
+  //*packed_cell = malloc( header_length );
 
   while ( 1 )
   {
@@ -258,11 +257,11 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // the cell or the length of the header
     if ( rx_limit - rx_length_total > CELL_LEN )
     {
-      rx_length = wolfSSL_recv( ssl, rx_buffer, CELL_LEN, 0 );
+      rx_length = wolfSSL_recv( ssl, *packed_cell + rx_length_total, CELL_LEN, 0 );
     }
     else
     {
-      rx_length = wolfSSL_recv( ssl, rx_buffer, rx_limit - rx_length_total, 0 );
+      rx_length = wolfSSL_recv( ssl, *packed_cell + rx_length_total, rx_limit - rx_length_total, 0 );
     }
 
     // if rx_length is 0 then we've hit an error and should return -1
@@ -279,12 +278,8 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
     // put the contents of the rx_buffer into the packed cell and increment the
     // rx_length_total
-    memcpy( *packed_cell + rx_length_total, rx_buffer, rx_length );
+    //memcpy( *packed_cell + rx_length_total, rx_buffer, rx_length );
     rx_length_total += rx_length;
-    /* for ( i = 0; i < rx_length; i++ ) { */
-      /* (*packed_cell)[rx_length_total] = rx_buffer[i]; */
-      /* rx_length_total++; */
-    /* } */
 
     // if the total number of bytes we've read in is the fixed header length,
     // check for a versions variable length cell, if we have one, extend the
@@ -295,7 +290,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
       {
         header_length = circ_id_length + 3;
         rx_limit = header_length;
-        *packed_cell = realloc( *packed_cell, header_length );
+        //*packed_cell = realloc( *packed_cell, header_length );
       }
     }
 
@@ -315,8 +310,10 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
         rx_limit = CELL_LEN;
       }
 
-      // realloc the cell to the correct size
-      *packed_cell = realloc( *packed_cell, rx_limit );
+      if ( rx_limit > CELL_LEN )
+      {
+        *packed_cell = realloc( *packed_cell, rx_limit );
+      }
     }
 
     // if we've hit the rx_limit then we're done recv-ing the packed cell,

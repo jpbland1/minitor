@@ -56,10 +56,10 @@ typedef struct DlConnection
   Sha256 initiator_sha;
   Sha256 responder_sha;
   RsaKey initiator_rsa_auth_key;
-  uint8_t* packed_versions;
-  int versions_length;
-  uint8_t* packed_certs;
-  int certs_length;
+  bool has_versions;
+  uint32_t cell_ring_start;
+  uint32_t cell_ring_end;
+  uint8_t* cell_ring_buf[20];
 } DlConnection;
 
 void v_add_connection_to_list( DlConnection* connection, DlConnection** list );

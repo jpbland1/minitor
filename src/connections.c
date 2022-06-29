@@ -57,8 +57,9 @@ static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX
   return 0;
 }
 
-static void v_cleanup_connection( DlConnection* dl_connection )
+void v_cleanup_connection( DlConnection* dl_connection )
 {
+  int i;
   OnionMessage* onion_message;
 
   // we only need to inform the core daemon if an or connection
@@ -72,17 +73,15 @@ static void v_cleanup_connection( DlConnection* dl_connection )
     wolfSSL_shutdown( dl_connection->ssl );
     wolfSSL_free( dl_connection->ssl );
 
+    for ( i = 0; i < 20; i++ )
+    {
+      if ( dl_connection->cell_ring_buf[i] != NULL )
+      {
+        free( dl_connection->cell_ring_buf[i] );
+      }
+    }
+
     xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
-  }
-
-  if ( dl_connection->packed_versions != NULL )
-  {
-    free( dl_connection->packed_versions );
-  }
-
-  if ( dl_connection->packed_certs != NULL )
-  {
-    free( dl_connection->packed_certs );
   }
 
   connections_poll[dl_connection->poll_index].fd = -1;
@@ -103,109 +102,53 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
   uint8_t* packed_cell;
   OnionMessage* onion_message;
 
-  if ( or_connection->status == CONNECTION_WANT_VERSIONS )
+  if ( ( or_connection->cell_ring_end + 1 ) % 20 == or_connection->cell_ring_start )
   {
-    // MUTEX TAKE
-    xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+    succ = -1;
+    goto finish;
+  }
 
+  // MUTEX TAKE
+  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+
+  if ( or_connection->has_versions == false )
+  {
     succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, LEGACY_CIRCID_LEN );
 
-    xSemaphoreGive( or_connection->access_mutex );
-    // MUTEX GIVE
-
-    if ( succ <= 0 || packed_cell[2] != VERSIONS )
-    {
-      succ = -1;
-      goto finish;
-    }
-
-    v_process_versions( or_connection, packed_cell, succ );
-
-    or_connection->status = CONNECTION_WANT_CERTS;
+    or_connection->has_versions = true;
   }
   else
   {
-    // MUTEX TAKE
-    xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-
     succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
-
-    xSemaphoreGive( or_connection->access_mutex );
-    // MUTEX GIVE
-
-    if ( succ <= 0 )
-    {
-      goto finish;
-    }
-
-    switch ( or_connection->status )
-    {
-      case CONNECTION_WANT_CERTS:
-        if 
-        (
-          packed_cell[4] != CERTS ||
-          d_process_certs( or_connection, packed_cell, succ ) < 0
-        )
-        {
-          succ = -1;
-          goto finish;
-        }
-
-        or_connection->status = CONNECTION_WANT_CHALLENGE;
-
-        break;
-      case CONNECTION_WANT_CHALLENGE:
-        if
-        (
-          packed_cell[4] != AUTH_CHALLENGE ||
-          d_process_challenge( or_connection, packed_cell, succ ) < 0
-        )
-        {
-          succ = -1;
-          goto finish;
-        }
-
-        or_connection->status = CONNECTION_WANT_NETINFO;
-
-        break;
-      case CONNECTION_WANT_NETINFO:
-        if
-        (
-          packed_cell[4] != NETINFO ||
-          d_process_netinfo( or_connection, packed_cell ) < 0
-        )
-        {
-          succ = -1;
-          goto finish;
-        }
-
-        or_connection->status = CONNECTION_LIVE;
-
-        onion_message = malloc( sizeof( OnionMessage ) );
-
-        onion_message->type = CONN_READY;
-        onion_message->data = or_connection;
-
-        xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
-
-        break;
-      case CONNECTION_LIVE:
-        onion_message = malloc( sizeof( OnionMessage ) );
-
-        onion_message->type = PACKED_CELL;
-        onion_message->data = packed_cell;
-
-        xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
-
-        break;
-      case CONNECTION_WANT_VERSIONS:
-      default:
-        ESP_LOGE( CONN_TAG, "Unhandled connection status: %d", or_connection->status );
-        succ = -1;
-
-        break;
-    }
   }
+
+  xSemaphoreGive( or_connection->access_mutex );
+  // MUTEX GIVE
+
+  if ( succ <= 0 )
+  {
+    succ = -1;
+    goto finish;
+  }
+
+  or_connection->cell_ring_buf[or_connection->cell_ring_end] = packed_cell;
+
+  onion_message = malloc( sizeof( OnionMessage ) );
+  onion_message->data = or_connection;
+  onion_message->length = succ;
+
+  if ( or_connection->status == CONNECTION_LIVE )
+  {
+    onion_message->type = PACKED_CELL;
+  }
+  else
+  {
+    onion_message->type = CONN_HANDSHAKE;
+  }
+
+  or_connection->cell_ring_end = ( or_connection->cell_ring_end + 1 ) % 20;
+
+  xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
 
 finish:
   return succ;
@@ -278,9 +221,9 @@ static void v_connections_daemon( void* pv_parameters )
 
   while ( 1 )
   {
-    succ = poll( connections_poll, 16, 1000 * 3 );
+    succ = poll( connections_poll, 16, 500 );
 
-    if ( succ <= 0 || uxQueueMessagesWaiting( core_task_queue ) >= 15 )
+    if ( succ <= 0 )
     {
 #ifdef DEBUG_MINITOR
       if ( succ < 0 )
@@ -288,6 +231,11 @@ static void v_connections_daemon( void* pv_parameters )
         ESP_LOGE( CONN_TAG, "Failed to poll local connections" );
       }
 #endif
+    }
+
+    if ( uxQueueMessagesWaiting( core_task_queue ) >= 15 )
+    {
+      continue;
     }
 
     // MUTEX TAKE
@@ -305,7 +253,6 @@ static void v_connections_daemon( void* pv_parameters )
         ready_connections[i] = dl_connection;
         i++;
       }
-
       // need to send local connection timeout to the core task
       // as a 0 length tcp event
       else if ( dl_connection->is_or == 0 && now > dl_connection->last_action && now - dl_connection->last_action >= 5 )
@@ -368,25 +315,7 @@ static void v_connections_daemon( void* pv_parameters )
           break;
         }
 
-        /*
-        if ( ready_connections[i]->is_or == 0 )
-        {
-          if ( lwip_ioctl( ready_connections[i]->sock_fd, FIONREAD, &readable_bytes ) < 0 )
-          {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( CONN_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
-#endif
-            break;
-          }
-        }
-        else
-        {
-          readable_bytes -= succ;
-        }
-        */
-
         readable_bytes -= succ;
-
       } while (
         ( ready_connections[i]->is_or == 0 && readable_bytes > 0 ) ||
         ( ready_connections[i]->is_or == 1 && ( readable_bytes >= CELL_LEN || ( ready_connections[i]->status == CONNECTION_WANT_CERTS && readable_bytes >= 0 ) ) )
@@ -453,7 +382,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     return NULL;
   }
 
-  wolfSSL_set_verify( ssl, SSL_VERIFY_PEER, d_ignore_ca_callback );
+  wolfSSL_set_verify( ssl, SSL_VERIFY_NONE, NULL );
   wolfSSL_KeepArrays( ssl );
 
   if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS )
@@ -534,7 +463,8 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     xTaskCreatePinnedToCore(
       v_connections_daemon,
       "CONNECTIONS_DAEMON",
-      4096,
+      //2048,
+      3072,
       NULL,
       6,
       &connections_daemon_task_handle,
@@ -688,7 +618,8 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
     xTaskCreatePinnedToCore(
       v_connections_daemon,
       "CONNECTIONS_DAEMON",
-      4096,
+      //2048,
+      3072,
       NULL,
       6,
       &connections_daemon_task_handle,

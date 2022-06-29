@@ -1323,23 +1323,18 @@ int d_start_v3_handshake( DlConnection* or_connection )
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  or_connection->packed_versions = packed_cell;
-  or_connection->versions_length = LEGACY_CIRCID_LEN + 3 + unpacked_cell.length;
-  //wc_Sha256Update( &or_connection->initiator_sha, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length );
+  wc_Sha256Update( &or_connection->initiator_sha, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length );
 
   // send the versions cell
   wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length, 0 );
 
-  //free( packed_cell );
+  free( packed_cell );
 
   if ( wolf_succ <= 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send versions cell, error code: %d", wolfSSL_get_error( or_connection->ssl, wolf_succ ) );
 #endif
-
-    free( or_connection->packed_versions );
-    or_connection->packed_versions = NULL;
 
     goto fail;
   }
@@ -1350,9 +1345,6 @@ int d_start_v3_handshake( DlConnection* or_connection )
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to generate rsa certificates" );
 #endif
-
-    free( or_connection->packed_versions );
-    or_connection->packed_versions = NULL;
 
     goto fail;
   }
@@ -1387,26 +1379,17 @@ int d_start_v3_handshake( DlConnection* or_connection )
 
   packed_cell = pack_and_free( &unpacked_cell );
 
-  or_connection->packed_certs = packed_cell;
-  or_connection->certs_length = CIRCID_LEN + 3 + unpacked_cell.length;
-
-  //wc_Sha256Update( &or_connection->initiator_sha, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length );
+  wc_Sha256Update( &or_connection->initiator_sha, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length );
 
   wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 );
 
-  //free( packed_cell );
+  free( packed_cell );
 
   if ( wolf_succ <= 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send certs cell, error code: %d", wolfSSL_get_error( or_connection->ssl, wolf_succ ) );
 #endif
-
-    free( or_connection->packed_versions );
-    free( or_connection->packed_certs );
-
-    or_connection->packed_versions = NULL;
-    or_connection->packed_certs = NULL;
 
     goto fail_certs;
   }
@@ -1441,20 +1424,10 @@ fail:
 
 void v_process_versions( DlConnection* or_connection, uint8_t* packed_cell, int length )
 {
-  // have to do this because of semaphore bug
-  wc_Sha256Update( &or_connection->initiator_sha, or_connection->packed_versions, or_connection->versions_length );
-  free( or_connection->packed_versions );
-  or_connection->packed_versions = NULL;
-
-  wc_Sha256Update( &or_connection->initiator_sha, or_connection->packed_certs, or_connection->certs_length );
-  free( or_connection->packed_certs );
-  or_connection->packed_certs = NULL;
-
   wc_Sha256Update( &or_connection->responder_sha, packed_cell, length );
 
   // TODO check that our versions are compatable, not neccessary in chutney
 
-  // free the packed cell
   free( packed_cell );
 }
 

@@ -26,6 +26,7 @@ typedef enum OnionMessageType
 {
   PACKED_CELL,
   SERVICE_TCP_DATA,
+  CONN_HANDSHAKE,
   CONN_READY,
   CONN_CLOSE,
   INIT_SERVICE,
