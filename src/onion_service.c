@@ -37,37 +37,35 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTraffic* tcp_traffic )
 {
   int i;
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* relay_cell;
 
-  unpacked_cell.circ_id = tcp_traffic->circ_id;
-  unpacked_cell.command = RELAY;
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  relay_cell = malloc( MINITOR_CELL_LEN );
 
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = tcp_traffic->stream_id;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
+  relay_cell->circ_id = tcp_traffic->circ_id;
+  relay_cell->command = RELAY;
+
+  relay_cell->payload.relay.recognized = 0;
+  relay_cell->payload.relay.stream_id = tcp_traffic->stream_id;
+  relay_cell->payload.relay.digest = 0;
 
   if ( tcp_traffic->length == 0 )
   {
-    ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_END;
-    ( (PayloadRelay*)unpacked_cell.payload )->length = 1;
-    ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEnd ) );
-
-    ( (RelayPayloadEnd*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->reason = REASON_DONE;
+    relay_cell->payload.relay.relay_command = RELAY_END;
+    relay_cell->payload.relay.length = 1;
+    relay_cell->payload.relay.destroy_code = REASON_DONE;
   }
   else
   {
-    ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
-    ( (PayloadRelay*)unpacked_cell.payload )->length = (unsigned short)tcp_traffic->length;
-    ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
+    relay_cell->payload.relay.relay_command = RELAY_DATA;
+    relay_cell->payload.relay.length = (uint16_t)tcp_traffic->length;
+    memcpy( relay_cell->payload.relay.data, tcp_traffic->data, tcp_traffic->length );
 
-    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = tcp_traffic->data;
+    free( tcp_traffic->data );
   }
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  relay_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + relay_cell->payload.relay.length;
 
-  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, circuit->hs_crypto ) < 0 )
+  if ( d_send_relay_cell_and_free( circuit->or_connection, relay_cell, &circuit->relay_list, circuit->hs_crypto ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA" );
@@ -75,18 +73,23 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTra
   }
 }
 
-void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
+void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, SemaphoreHandle_t access_mutex )
 {
-  switch( unpacked_cell->command )
+  switch( relay_cell->command )
   {
     case RELAY:
-      switch( ( (PayloadRelay*)unpacked_cell->payload )->command )
+      switch( relay_cell->payload.relay.relay_command )
       {
         // TODO when a relay_begin comes in, create a task to block on the local tcp stream
         case RELAY_BEGIN:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_BEGIN!" );
 
-          if ( d_onion_service_handle_relay_begin( circuit, unpacked_cell ) < 0 )
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
+
+          if ( d_onion_service_handle_relay_begin( circuit, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
@@ -100,10 +103,10 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
           if
           (
             d_forward_to_local_connection(
-              unpacked_cell->circ_id,
-              ( (PayloadRelay*)unpacked_cell->payload )->stream_id,
-              ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->payload,
-              ( (PayloadRelay*)unpacked_cell->payload )->length
+              relay_cell->circ_id,
+              relay_cell->payload.relay.stream_id,
+              relay_cell->payload.relay.data,
+              relay_cell->payload.relay.length
             ) < 0
           )
           {
@@ -115,13 +118,24 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
           break;
         case RELAY_END:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_END!" );
-          v_cleanup_local_connection( unpacked_cell->circ_id, ( (PayloadRelay*)unpacked_cell->payload )->stream_id );
+
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
+
+          v_cleanup_local_connection( relay_cell->circ_id, relay_cell->payload.relay.stream_id );
 
           break;
         case RELAY_TRUNCATED:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_TRUNCATED!" );
 
-          if ( d_onion_service_handle_relay_truncated( circuit, unpacked_cell ) < 0 )
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
+
+          if ( d_onion_service_handle_relay_truncated( circuit, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_END cell" );
@@ -134,7 +148,7 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
           break;
         // when an intro request comes in, respond to it
         case RELAY_COMMAND_INTRODUCE2:
-          if ( d_onion_service_handle_introduce_2( circuit, unpacked_cell ) < 0 )
+          if ( d_onion_service_handle_introduce_2( circuit, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
@@ -144,7 +158,7 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
           break;
         default:
 #ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Unequiped to handle relay command %d", ( (PayloadRelay*)unpacked_cell->payload )->command );
+          ESP_LOGE( MINITOR_TAG, "Unequiped to handle relay command %d", relay_cell->payload.relay.relay_command );
 #endif
       }
 
@@ -152,64 +166,129 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* unpacked_cell )
     // TODO when a destroy comes in close and clean the circuit and local tcp stream
     default:
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Unequiped to handle cell command %d", unpacked_cell->command );
+      ESP_LOGE( MINITOR_TAG, "Unequiped to handle cell command %d", relay_cell->command );
 #endif
+  }
+
+  if ( access_mutex != NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
   }
 }
 
-int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* unpacked_cell )
+int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* begin_cell )
 {
-  Cell unpacked_connected_cell;
-  unsigned char* packed_cell;
+  int i;
+  int ret = 0;
+  Cell* connected_cell;
+  char* addr;
+  uint16_t port = 0;
 
-  if ( ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != rend_circuit->service->exit_port && ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port != 443 )
+  addr = malloc( strlen( (char*)begin_cell->payload.relay.data ) + 1 );
+
+  strcpy( addr, (char*)begin_cell->payload.relay.data );
+
+  for ( i = 0; i < strlen( addr ); i++ )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "request was for the wrong port: %d, looking for: %d", ( (RelayPayloadBegin*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->port, rend_circuit->service->exit_port );
-#endif
-
-    return -1;
+    if ( addr[i] == ':' )
+    {
+      // increment past the ':' before port parse starts
+      for ( i = i + 1; i < strlen( addr ); i++ )
+      {
+        port *= 10;
+        port += addr[i] - '0';
+      }
+    }
   }
 
-  if ( d_create_local_connection( unpacked_cell->circ_id, ( (PayloadRelay*)unpacked_cell->payload )->stream_id, rend_circuit->service->local_port ) < 0 )
+  if ( port == 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "failed to find RELAY_BEGIN port" );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  if ( port != rend_circuit->service->exit_port && port != 443 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "request was for the wrong port: %d, looking for: %d", port, rend_circuit->service->exit_port );
+#endif
+
+    ret = -1;
+    goto finish;
+  }
+
+  if ( d_create_local_connection( begin_cell->circ_id, begin_cell->payload.relay.stream_id, rend_circuit->service->local_port ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "couldn't create local connection" );
 #endif
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
-  unpacked_connected_cell.circ_id = unpacked_cell->circ_id;
-  unpacked_connected_cell.command = RELAY;
-  unpacked_connected_cell.payload = malloc( sizeof( PayloadRelay ) );
+  // re-aquire our connection lock
+  // MUTEX TAKE
+  ESP_LOGE( MINITOR_TAG, "pre service take" );
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  ESP_LOGE( MINITOR_TAG, "post service take" );
 
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->command = RELAY_CONNECTED;
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->stream_id = ( (PayloadRelay*)unpacked_cell->payload )->stream_id;
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_connected_cell.payload )->length = 0;
+  if ( b_verify_or_connection( rend_circuit->or_connection ) == false )
+  {
+    xSemaphoreGive( connections_mutex );
+    // MUTEX GIVE
 
-  packed_cell = pack_and_free( &unpacked_connected_cell );
+    ret = -1;
+    goto finish;
+  }
 
-  if ( d_send_packed_relay_cell_and_free( rend_circuit->or_connection, packed_cell, &rend_circuit->relay_list, rend_circuit->hs_crypto ) < 0 )
+  // MUTEX TAKE
+  xSemaphoreTake( connection_access_mutex[rend_circuit->or_connection->mutex_index], portMAX_DELAY );
+
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
+
+  connected_cell = malloc( MINITOR_CELL_LEN );
+
+  connected_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE;
+  connected_cell->circ_id = begin_cell->circ_id;
+  connected_cell->command = RELAY;
+
+  connected_cell->payload.relay.relay_command = RELAY_CONNECTED;
+  connected_cell->payload.relay.recognized = 0;
+  connected_cell->payload.relay.stream_id = begin_cell->payload.relay.stream_id;
+  connected_cell->payload.relay.digest = 0;
+  connected_cell->payload.relay.length = 0;
+
+  if ( d_send_relay_cell_and_free( rend_circuit->or_connection, connected_cell, &rend_circuit->relay_list, rend_circuit->hs_crypto ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_CONNECTED" );
 #endif
 
-    return -1;
+    ret = -1;
   }
 
-  return 0;
+  xSemaphoreGive( connection_access_mutex[rend_circuit->or_connection->mutex_index] );
+  // MUTEX GIVE
+
+finish:
+  free( addr );
+
+  return ret;
 }
 
-int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, Cell* unpacked_cell )
+int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, Cell* truncated_cell )
 {
   int i;
   DoublyLinkedOnionRelay* dl_relay;
 
-  v_cleanup_local_connections_by_circ_id( unpacked_cell->circ_id );
+  v_cleanup_local_connections_by_circ_id( truncated_cell->circ_id );
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -225,24 +304,27 @@ int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, Cell* un
   return 0;
 }
 
-int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpacked_cell )
+int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* introduce_cell )
 {
   int ret = 0;
   int i;
   int wolf_succ;
   time_t now;
+  uint8_t* introduce_p;
+  uint8_t* client_pk;
+  uint8_t num_specifiers;
+  uint8_t num_extensions;
   unsigned char auth_input_mac[MAC_LEN];
   WC_RNG rng;
   curve25519_key hs_handshake_key;
   curve25519_key client_handshake_key;
-  DecryptedIntroduce2 unpacked_introduce_data;
   DoublyLinkedRendezvousCookie* db_rendezvous_cookie;
   OnionRelay* rend_relay;
   HsCrypto* hs_crypto;
   OnionCircuit* rend_circuit;
   DoublyLinkedOnionRelay* dl_relay;
 
-  ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", unpacked_cell->circ_id );
+  ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", introduce_cell->circ_id );
 
   time( &now );
 
@@ -262,37 +344,51 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
 
   wc_InitRng( &rng );
 
-  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_type != EDSHA3 )
+  if ( introduce_cell->payload.relay.introduce2.auth_key_type != EDSHA3 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key type for RELAY_COMMAND_INTRODUCE2 was not EDSHA3" );
 #endif
 
     ret = -1;
-    goto clean_crypto;
+    goto finish;
   }
 
-  if ( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length != 32 )
+  if ( introduce_cell->payload.relay.introduce2.auth_key_length != 32 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key length for RELAY_COMMAND_INTRODUCE2 was not 32" );
 #endif
 
     ret = -1;
-    goto clean_crypto;
+    goto finish;
   }
 
-  if ( memcmp( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, intro_circuit->intro_crypto->auth_key.p, 32 ) != 0 )
+  if ( memcmp( introduce_cell->payload.relay.introduce2.auth_key, intro_circuit->intro_crypto->auth_key.p, 32 ) != 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Auth key for RELAY_COMMAND_INTRODUCE2 does not match" );
 #endif
 
     ret = -1;
-    goto clean_crypto;
+    goto finish;
   }
 
-  wolf_succ = wc_curve25519_import_public_ex( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, PK_PUBKEY_LEN, &client_handshake_key, EC25519_LITTLE_ENDIAN );
+  introduce_p = introduce_cell->payload.relay.introduce2.auth_key + 32;
+
+  num_extensions = introduce_p[0];
+
+  introduce_p++;
+
+  // skip over the extensions
+  for ( i = 0; i < num_extensions; i++ )
+  {
+    introduce_p += introduce_p[1] + 2;
+  }
+
+  client_pk = introduce_p;
+
+  wolf_succ = wc_curve25519_import_public_ex( client_pk, PK_PUBKEY_LEN, &client_handshake_key, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 )
   {
@@ -301,42 +397,34 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
 #endif
 
     ret = -1;
-    goto clean_crypto;
+    goto finish;
   }
 
+  // skip past the client_pk
+  introduce_p += PK_PUBKEY_LEN;
+
   // verify and decrypt
-  if ( d_verify_and_decrypt_introduce_2( intro_circuit->service, unpacked_cell, intro_circuit, &client_handshake_key ) < 0 )
+  if ( d_verify_and_decrypt_introduce_2( intro_circuit->service, introduce_cell, num_extensions, client_pk, introduce_p, intro_circuit, &client_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to verify and decrypt RELAY_COMMAND_INTRODUCE2" );
 #endif
 
     ret = -1;
-    goto clean_crypto;
-  }
-
-  // unpack the decrypted secction
-  if ( d_unpack_introduce_2_data( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, &unpacked_introduce_data ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to unpack RELAY_COMMAND_INTRODUCE2 decrypted data" );
-#endif
-
-    ret = -1;
-    goto clean_crypto;
+    goto finish;
   }
 
   db_rendezvous_cookie = intro_circuit->service->rendezvous_cookies.head;
 
   for ( i = 0; i < intro_circuit->service->rendezvous_cookies.length; i++ )
   {
-    if ( memcmp( db_rendezvous_cookie->rendezvous_cookie, unpacked_introduce_data.rendezvous_cookie, 20 ) == 0 )
+    if ( memcmp( db_rendezvous_cookie->rendezvous_cookie, ((DecryptedIntroduce2*)introduce_p)->rendezvous_cookie, 20 ) == 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Got a replay, silently dropping" );
 #endif
 
-      goto clean_introduce;
+      goto finish;
     }
 
     db_rendezvous_cookie = db_rendezvous_cookie->next;
@@ -346,7 +434,8 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
 
   db_rendezvous_cookie = malloc( sizeof( DoublyLinkedRendezvousCookie ) );
 
-  memcpy( db_rendezvous_cookie->rendezvous_cookie, unpacked_introduce_data.rendezvous_cookie, 20 );
+  // copy rendezvous cookie
+  memcpy( db_rendezvous_cookie->rendezvous_cookie, ((DecryptedIntroduce2*)introduce_p)->rendezvous_cookie, 20 );
 
   v_add_rendezvous_cookie_to_list( db_rendezvous_cookie, &intro_circuit->service->rendezvous_cookies );
 
@@ -359,14 +448,14 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
 #endif
 
     ret = -1;
-    goto clean_introduce;
+    goto finish;
   }
 
   hs_crypto = malloc( sizeof( HsCrypto ) );
 
   ESP_LOGE( MINITOR_TAG, "Finishing ntor handshake" );
 
-  if ( d_hs_ntor_handshake_finish( unpacked_cell, intro_circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
+  if ( d_hs_ntor_handshake_finish( introduce_cell, client_pk, intro_circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
@@ -375,7 +464,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
     free( hs_crypto );
 
     ret = -1;
-    goto clean_introduce;
+    goto finish;
   }
 
   // extend to the specified relay and send the handshake reply
@@ -383,25 +472,61 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
   rend_relay->address = 0;
   rend_relay->or_port = 0;
 
-  memcpy( rend_relay->ntor_onion_key, unpacked_introduce_data.onion_key, 32 );
+  num_extensions = ((DecryptedIntroduce2*)introduce_p)->num_extensions;
 
-  for ( i = 0; i < unpacked_introduce_data.specifier_count; i++ )
+  introduce_p = ((DecryptedIntroduce2*)introduce_p)->extensions;
+
+  // skip extensions
+  for ( i = 0; i < num_extensions; i++ )
   {
-    if ( unpacked_introduce_data.link_specifiers[i]->type == IPv4Link )
+    introduce_p += introduce_p[1] + 2;
+  }
+
+  // onion key type should be 1 for NTOR
+  if ( ((IntroOnionKey*)introduce_p)->onion_key_type != ONION_NTOR )
+  {
+    ESP_LOGE( MINITOR_TAG, "Failed to get KEY_NTOR for onion key type" );
+
+    ret = -1;
+    goto finish;
+  }
+
+  // onion key length should be 32
+  if ( ntohs( ((IntroOnionKey*)introduce_p)->onion_key_length ) != 32 )
+  {
+    ESP_LOGE( MINITOR_TAG, "Failed to get 32 for onion key length" );
+
+    ret = -1;
+    goto finish;
+  }
+
+  memcpy( rend_relay->ntor_onion_key, ((IntroOnionKey*)introduce_p)->onion_key, 32 );
+
+  // skip onion key section
+  introduce_p += 32 + 3;
+
+  num_specifiers = introduce_p[0];
+  introduce_p++;
+
+  for ( i = 0; i < num_specifiers; i++ )
+  {
+    if ( ((LinkSpecifier*)introduce_p)->type == IPv4Link )
     {
       // comes in big endian, lwip wants it little endian
-      rend_relay->address |= (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[0];
-      rend_relay->address |= ( (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[1] ) << 8;
-      rend_relay->address |= ( (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[2] ) << 16;
-      rend_relay->address |= ( (unsigned int)unpacked_introduce_data.link_specifiers[i]->specifier[3] ) << 24;
+      rend_relay->address |= ((LinkSpecifier*)introduce_p)->specifier[0];
+      rend_relay->address |= ((uint32_t)((LinkSpecifier*)introduce_p)->specifier[1]) << 8;
+      rend_relay->address |= ((uint32_t)((LinkSpecifier*)introduce_p)->specifier[2]) << 16;
+      rend_relay->address |= ((uint32_t)((LinkSpecifier*)introduce_p)->specifier[3]) << 24;
 
-      rend_relay->or_port |= ( (unsigned short)unpacked_introduce_data.link_specifiers[i]->specifier[4] ) << 8;
-      rend_relay->or_port |= (unsigned short)unpacked_introduce_data.link_specifiers[i]->specifier[5];
+      rend_relay->or_port |= ((uint16_t)((LinkSpecifier*)introduce_p)->specifier[4]) << 8;
+      rend_relay->or_port |= ((uint16_t)((LinkSpecifier*)introduce_p)->specifier[5]);
     }
-    else if ( unpacked_introduce_data.link_specifiers[i]->type == LEGACYLink )
+    else if ( ((LinkSpecifier*)introduce_p)->type == LEGACYLink )
     {
-      memcpy( rend_relay->identity, unpacked_introduce_data.link_specifiers[i]->specifier, ID_LENGTH );
+      memcpy( rend_relay->identity, ((LinkSpecifier*)introduce_p)->specifier, ID_LENGTH );
     }
+
+    introduce_p += ((LinkSpecifier*)introduce_p)->length + 2;
   }
 
   // MUTEX TAKE
@@ -422,7 +547,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
 
-  memcpy( hs_crypto->rendezvous_cookie, unpacked_introduce_data.rendezvous_cookie, 20 );
+  memcpy( hs_crypto->rendezvous_cookie, db_rendezvous_cookie->rendezvous_cookie, 20 );
   memcpy( hs_crypto->point, hs_handshake_key.p.point, PK_PUBKEY_LEN );
   memcpy( hs_crypto->auth_input_mac, auth_input_mac, MAC_LEN );
 
@@ -473,18 +598,9 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* unpac
     }
   }
 
-  /*
-  // make a new standby circuit regardless
-  v_send_init_circuit( 1, CIRCUIT_STANDBY, NULL, 0, 0, NULL, NULL, NULL );
-  */
+  time( &( intro_circuit->service->rend_timestamp ) );
 
-  time( &now );
-  intro_circuit->service->rend_timestamp = now;
-
-clean_introduce:
-  v_free_introduce_2_data( &unpacked_introduce_data );
-
-clean_crypto:
+finish:
   wc_FreeRng( &rng );
 
   wc_curve25519_free( &client_handshake_key );
@@ -495,27 +611,26 @@ clean_crypto:
 
 int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac )
 {
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* rend_cell;
 
-  unpacked_cell.circ_id = rend_circuit->circ_id;
-  unpacked_cell.command = RELAY;
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  rend_cell = malloc( MINITOR_CELL_LEN );
 
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_COMMAND_RENDEZVOUS1;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 20 + PK_PUBKEY_LEN + MAC_LEN;
-  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadCommandRendezvous1 ) );
+  rend_cell->circ_id = rend_circuit->circ_id;
+  rend_cell->command = RELAY;
 
-  memcpy( ( (RelayPayloadCommandRendezvous1*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->rendezvous_cookie, rendezvous_cookie, 20 );
-  memcpy( ( (RelayPayloadCommandRendezvous1*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_info.public_key, hs_pub_key, PK_PUBKEY_LEN );
-  memcpy( ( (RelayPayloadCommandRendezvous1*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_info.auth, auth_input_mac, MAC_LEN );
+  rend_cell->payload.relay.relay_command = RELAY_COMMAND_RENDEZVOUS1;
+  rend_cell->payload.relay.recognized = 0;
+  rend_cell->payload.relay.stream_id = 0;
+  rend_cell->payload.relay.digest = 0;
+  rend_cell->payload.relay.length = 20 + PK_PUBKEY_LEN + MAC_LEN;
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  rend_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + rend_cell->payload.relay.length;
 
-  if ( d_send_packed_relay_cell_and_free( rend_circuit->or_connection, packed_cell, &rend_circuit->relay_list, NULL ) < 0 )
+  memcpy( rend_cell->payload.relay.rend2.rendezvous_cookie, rendezvous_cookie, 20 );
+  memcpy( rend_cell->payload.relay.rend2.public_key, hs_pub_key, PK_PUBKEY_LEN );
+  memcpy( rend_cell->payload.relay.rend2.auth, auth_input_mac, MAC_LEN );
+
+  if ( d_send_relay_cell_and_free( rend_circuit->or_connection, rend_cell, &rend_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send the RELAY_COMMAND_RENDEZVOUS1 cell" );
@@ -527,10 +642,19 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezv
   return 0;
 }
 
-int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* client_handshake_key )
+int d_verify_and_decrypt_introduce_2(
+  OnionService* onion_service,
+  Cell* introduce_cell,
+  uint8_t num_extensions,
+  uint8_t* client_pk,
+  uint8_t* encrypted_data,
+  OnionCircuit* intro_circuit,
+  curve25519_key* client_handshake_key
+)
 {
   int ret = 0;
   int i;
+  int encrypted_length;
   unsigned int idx;
   int wolf_succ;
   Aes aes_key;
@@ -544,6 +668,8 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
   unsigned char* hs_keys = malloc( sizeof( unsigned char ) * ( AES_256_KEY_SIZE + WC_SHA3_256_DIGEST_SIZE ) );
   int64_t reusable_length;
   unsigned char reusable_length_buffer[8];
+
+  encrypted_length = introduce_cell->payload.relay.length - (uint16_t)( encrypted_data - introduce_cell->payload.relay.data + MAC_LEN );
 
   wc_AesInit( &aes_key, NULL, INVALID_DEVID );
   wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
@@ -564,11 +690,11 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
 
   working_intro_secret_hs_input += 32;
 
-  memcpy( working_intro_secret_hs_input, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length );
+  memcpy( working_intro_secret_hs_input, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
 
-  working_intro_secret_hs_input += ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length;
+  working_intro_secret_hs_input += introduce_cell->payload.relay.introduce2.auth_key_length;
 
-  memcpy( working_intro_secret_hs_input, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, 32 );
+  memcpy( working_intro_secret_hs_input, client_pk, 32 );
 
   working_intro_secret_hs_input += 32;
 
@@ -581,10 +707,14 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
   // TODO compute info
   memcpy( info, HS_PROTOID_EXPAND, HS_PROTOID_EXPAND_LENGTH );
 
-  for ( i = 0; i < 2; i++ ) {
-    if ( i == 0 ) {
+  for ( i = 0; i < 2; i++ )
+  {
+    if ( i == 0 )
+    {
       memcpy( info + HS_PROTOID_EXPAND_LENGTH, onion_service->current_sub_credential, WC_SHA3_256_DIGEST_SIZE );
-    } else {
+    }
+    else
+    {
       memcpy( info + HS_PROTOID_EXPAND_LENGTH, onion_service->previous_sub_credential, WC_SHA3_256_DIGEST_SIZE );
     }
 
@@ -595,12 +725,6 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
     wc_Shake256_Final( &reusable_shake, hs_keys, AES_256_KEY_SIZE + WC_SHA3_256_DIGEST_SIZE );
 
     // verify the mac
-    /* ESP_LOGE( MINITOR_TAG, "Introduce Keys" ); */
-
-    /* for ( j = 0; j < AES_256_KEY_SIZE + WC_SHA3_256_DIGEST_SIZE; j++ ) { */
-      /* ESP_LOGE( MINITOR_TAG, "%.2x", hs_keys[j] ); */
-    /* } */
-
     reusable_length = WC_SHA256_DIGEST_SIZE;
     reusable_length_buffer[0] = (unsigned char)( reusable_length >> 56 );
     reusable_length_buffer[1] = (unsigned char)( reusable_length >> 48 );
@@ -613,33 +737,36 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
 
     wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 8 );
     wc_Sha3_256_Update( &reusable_sha3, hs_keys + AES_256_KEY_SIZE, WC_SHA3_256_DIGEST_SIZE );
-    wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->legacy_key_id, 20 );
+    wc_Sha3_256_Update( &reusable_sha3, introduce_cell->payload.relay.introduce2.legacy_key_id, 20 );
 
-    reusable_length_buffer[0] = (unsigned char)( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_type );
+    reusable_length_buffer[0] = introduce_cell->payload.relay.introduce2.auth_key_type;
 
     wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 1 );
 
-    reusable_length_buffer[0] = (unsigned char)( ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length >> 8 );
-    reusable_length_buffer[1] = (unsigned char)( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length;
+    reusable_length_buffer[0] = (uint8_t)( introduce_cell->payload.relay.introduce2.auth_key_length >> 8 );
+    reusable_length_buffer[1] = (uint8_t)introduce_cell->payload.relay.introduce2.auth_key_length;
 
     wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 2 );
-    wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length );
-    wc_Sha3_256_Update( &reusable_sha3, &( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->extension_count, 1 );
+    wc_Sha3_256_Update( &reusable_sha3, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
+    wc_Sha3_256_Update( &reusable_sha3, &num_extensions, 1 );
 
-    ESP_LOGE( MINITOR_TAG, "extension_count: %d", ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->extension_count );
+    ESP_LOGE( MINITOR_TAG, "extension_count: %d", num_extensions );
 
-    wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, PK_PUBKEY_LEN );
-    wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_length );
+    wc_Sha3_256_Update( &reusable_sha3, client_pk, PK_PUBKEY_LEN );
+    wc_Sha3_256_Update( &reusable_sha3, encrypted_data, encrypted_length );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
 
-    if ( memcmp( reusable_sha3_sum, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->mac, WC_SHA3_256_DIGEST_SIZE ) == 0 ) {
+    // compare the mac
+    if ( memcmp( reusable_sha3_sum, introduce_cell->payload.relay.data + introduce_cell->payload.relay.length - MAC_LEN, WC_SHA3_256_DIGEST_SIZE ) == 0 )
+    {
       ESP_LOGE( MINITOR_TAG, "Got a match" );
       i = 0;
       break;
     }
   }
 
-  if ( i >= 2 ) {
+  if ( i >= 2 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "The mac of the RELAY_COMMAND_INTRODUCE2 cell does not match our calculations" );
 #endif
@@ -651,9 +778,10 @@ int d_verify_and_decrypt_introduce_2( OnionService* onion_service, Cell* unpacke
   // decrypt the encrypted section
   wc_AesSetKeyDirect( &aes_key, hs_keys, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
 
-  wolf_succ = wc_AesCtrEncrypt( &aes_key, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_data, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->encrypted_length );
+  wolf_succ = wc_AesCtrEncrypt( &aes_key, encrypted_data, encrypted_data, encrypted_length );
 
-  if ( wolf_succ < 0 ) {
+  if ( wolf_succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY_COMMAND_INTRODUCE2 encrypted data, error code: %d", wolf_succ );
 #endif
@@ -672,7 +800,15 @@ finish:
   return ret;
 }
 
-int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit, curve25519_key* hs_handshake_key, curve25519_key* client_handshake_key, HsCrypto* hs_crypto, unsigned char* auth_input_mac )
+int d_hs_ntor_handshake_finish(
+  Cell* introduce_cell,
+  uint8_t* client_pk,
+  OnionCircuit* intro_circuit,
+  curve25519_key* hs_handshake_key,
+  curve25519_key* client_handshake_key,
+  HsCrypto* hs_crypto,
+  uint8_t* auth_input_mac
+)
 {
   int ret = 0;
   unsigned int idx;
@@ -726,13 +862,13 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
 
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  memcpy( working_rend_secret_hs_input, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length );
-  working_rend_secret_hs_input += ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length;
+  memcpy( working_rend_secret_hs_input, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
+  working_rend_secret_hs_input += introduce_cell->payload.relay.introduce2.auth_key_length;
 
   memcpy( working_rend_secret_hs_input, intro_circuit->intro_crypto->encrypt_key.p.point, CURVE25519_KEYSIZE );
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  memcpy( working_rend_secret_hs_input, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, PK_PUBKEY_LEN );
+  memcpy( working_rend_secret_hs_input, client_pk, PK_PUBKEY_LEN );
   working_rend_secret_hs_input += PK_PUBKEY_LEN;
 
   memcpy( working_rend_secret_hs_input, hs_handshake_key->p.point, CURVE25519_KEYSIZE );
@@ -775,10 +911,10 @@ int d_hs_ntor_handshake_finish( Cell* unpacked_cell, OnionCircuit* intro_circuit
 
   wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 8 );
   wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-  wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->auth_key_length );
+  wc_Sha3_256_Update( &reusable_sha3, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
   wc_Sha3_256_Update( &reusable_sha3, intro_circuit->intro_crypto->encrypt_key.p.point, CURVE25519_KEYSIZE );
   wc_Sha3_256_Update( &reusable_sha3, hs_handshake_key->p.point, CURVE25519_KEYSIZE );
-  wc_Sha3_256_Update( &reusable_sha3, ( (RelayPayloadIntroduce1*)( (PayloadRelay*)unpacked_cell->payload )->relay_payload )->client_pk, CURVE25519_KEYSIZE );
+  wc_Sha3_256_Update( &reusable_sha3, client_pk, CURVE25519_KEYSIZE );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID, HS_PROTOID_LENGTH );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"Server", strlen( "Server" ) );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID_MAC, HS_PROTOID_MAC_LENGTH );
@@ -2011,7 +2147,8 @@ void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed
   memcpy( packed_link_specifiers + 11, relay->identity, ID_LENGTH );
 }
 
-int d_generate_packed_crosscert( char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after ) {
+int d_generate_packed_crosscert( char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after )
+{
   int res = 0;
 
   unsigned int idx;
@@ -2099,8 +2236,8 @@ int d_router_establish_intro( OnionCircuit* circuit )
   WC_RNG rng;
   Sha3 reusable_sha3;
   unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* establish_cell;
+  uint8_t* establish_cell_p;
   unsigned char* prefixed_cell;
   const char* prefix_str = "Tor establish-intro cell v1";
 
@@ -2130,32 +2267,31 @@ int d_router_establish_intro( OnionCircuit* circuit )
     goto finish;
   }
 
-  unpacked_cell.circ_id = circuit->circ_id;
-  unpacked_cell.command = RELAY;
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  establish_cell = malloc( MINITOR_CELL_LEN );
 
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_COMMAND_ESTABLISH_INTRO;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN + 2 + ED25519_SIG_SIZE;
-  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadEstablishIntro ) );
+  establish_cell->circ_id = circuit->circ_id;
+  establish_cell->command = RELAY;
 
-  ( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->type = ESTABLISH_INTRO_CURRENT;
-  ( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro = malloc( sizeof( EstablishIntroCurrent ) );
+  establish_cell->payload.relay.relay_command = RELAY_COMMAND_ESTABLISH_INTRO;
+  establish_cell->payload.relay.recognized = 0;
+  establish_cell->payload.relay.stream_id = 0;
+  establish_cell->payload.relay.digest = 0;
+  establish_cell->payload.relay.length = 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN + 2 + ED25519_SIG_SIZE;
 
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key_type = EDSHA3;
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key_length = ED25519_PUB_KEY_SIZE;
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key = malloc( sizeof( unsigned char ) * ED25519_PUB_KEY_SIZE );
-  memcpy( ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->auth_key, tmp_pub_key, ED25519_PUB_KEY_SIZE );
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->extension_count = 0;
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->signature_length = ED25519_SIG_SIZE;
-  ( (EstablishIntroCurrent*)( (RelayPayloadEstablishIntro*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->establish_intro )->signature = NULL;
+  establish_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + establish_cell->payload.relay.length;
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  establish_cell->payload.relay.establish_intro.auth_key_type = EDSHA3;
 
-  ESP_LOGE( MINITOR_TAG, "%lld", ordered_digest_length );
-  ESP_LOGE( MINITOR_TAG, "%lld", (int64_t)DIGEST_LEN );
+  // make it network so that our signature is correct
+  establish_cell->payload.relay.establish_intro.auth_key_length = htons( ED25519_PUB_KEY_SIZE );
+  memcpy( establish_cell->payload.relay.establish_intro.auth_key, tmp_pub_key, ED25519_PUB_KEY_SIZE );
+
+  // skip over auth key
+  establish_cell_p = establish_cell->payload.relay.establish_intro.auth_key + ED25519_PUB_KEY_SIZE;
+
+  // set num extensions to 0
+  establish_cell_p[0] = 0;
+  establish_cell_p++;
 
   ordered_digest_length_buffer[0] = (unsigned char)( ordered_digest_length >> 56 );
   ordered_digest_length_buffer[1] = (unsigned char)( ordered_digest_length >> 48 );
@@ -2166,21 +2302,34 @@ int d_router_establish_intro( OnionCircuit* circuit )
   ordered_digest_length_buffer[6] = (unsigned char)( ordered_digest_length >> 8 );
   ordered_digest_length_buffer[7] = (unsigned char)ordered_digest_length;
 
-  /* wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)&ordered_digest_length, 8 ); */
+  // set the key to the pre shared keying material
   wc_Sha3_256_Update( &reusable_sha3, ordered_digest_length_buffer, sizeof( ordered_digest_length_buffer ) );
   wc_Sha3_256_Update( &reusable_sha3, circuit->relay_list.tail->relay_crypto->nonce, DIGEST_LEN );
-  wc_Sha3_256_Update( &reusable_sha3, packed_cell + 5 + 11, 3 + ED25519_PUB_KEY_SIZE + 1 );
-  wc_Sha3_256_Final( &reusable_sha3, packed_cell + 5 + 11 + 3 + ED25519_PUB_KEY_SIZE + 1 );
 
+  // now hash the cell contents so far
+  wc_Sha3_256_Update( &reusable_sha3, establish_cell->payload.relay.data, 3 + ED25519_PUB_KEY_SIZE + 1 );
+
+  // set the handshake_auth
+  wc_Sha3_256_Final( &reusable_sha3, establish_cell_p );
+
+  establish_cell_p += MAC_LEN;
+
+  // set the signature length
+  ((uint16_t*)establish_cell_p)[0] = ED25519_SIG_SIZE;
+
+  establish_cell_p += 2;
+
+  // make a temporary cell and prefix the prefix_str to it
   prefixed_cell = malloc( sizeof( unsigned char ) * ( strlen( prefix_str ) + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN ) );
   memcpy( prefixed_cell, prefix_str, strlen( prefix_str ) );
-  memcpy( prefixed_cell + strlen( prefix_str ), packed_cell + 5 + 11, 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN );
+  memcpy( prefixed_cell + strlen( prefix_str ), establish_cell->payload.relay.data, 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN );
 
   idx = ED25519_SIG_SIZE;
+
   wolf_succ = wc_ed25519_sign_msg(
     prefixed_cell,
     strlen( prefix_str ) + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN,
-    packed_cell + 5 + 11 + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN + 2,
+    establish_cell_p,
     &idx,
     &circuit->intro_crypto->auth_key
   );
@@ -2193,13 +2342,15 @@ int d_router_establish_intro( OnionCircuit* circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to generate establish intro signature, error code: %d", wolf_succ );
 #endif
 
+    free( establish_cell );
+
     ret = -1;
     goto finish;
   }
 
   ESP_LOGE( MINITOR_TAG, "Sending establish intro to %d", circuit->relay_list.tail->relay->or_port );
 
-  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( circuit->or_connection, establish_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
@@ -2598,22 +2749,22 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
 int d_begin_hsdir( OnionCircuit* publish_circuit )
 {
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* begin_cell;
 
-  unpacked_cell.circ_id = publish_circuit->circ_id;
-  unpacked_cell.command = RELAY;
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  begin_cell = malloc( MINITOR_CELL_LEN );
 
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_BEGIN_DIR;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 0;
+  begin_cell->circ_id = publish_circuit->circ_id;
+  begin_cell->command = RELAY;
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  begin_cell->payload.relay.relay_command = RELAY_BEGIN_DIR;
+  begin_cell->payload.relay.recognized = 0;
+  begin_cell->payload.relay.stream_id = 1;
+  begin_cell->payload.relay.digest = 0;
+  begin_cell->payload.relay.length = 0;
 
-  if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
+  begin_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE;
+
+  if ( d_send_relay_cell_and_free( publish_circuit->or_connection, begin_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
@@ -2646,8 +2797,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
   //unsigned char* descriptor_text = publish_circuit->service->hs_descs[publish_circuit->desc_index] + HS_DESC_SIG_PREFIX_LENGTH;
   int desc_fd;
   char desc_buff[RELAY_PAYLOAD_LEN];
-  Cell unpacked_cell;
-  uint8_t* packed_cell;
+  Cell* data_cell;
   int succ;
 
   desc_fd = open( publish_circuit->service->hs_descs[publish_circuit->desc_index], O_RDONLY );
@@ -2702,34 +2852,24 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
   //http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
 
-  unpacked_cell.command = RELAY;
-  unpacked_cell.circ_id = publish_circuit->circ_id;
+  data_cell = malloc( MINITOR_CELL_LEN );
 
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  // TODO possibly need to set the stream_id, wasn't clear in torspec
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = RELAY_PAYLOAD_LEN;
+  data_cell->command = RELAY;
+  data_cell->circ_id = publish_circuit->circ_id;
 
-  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
+  data_cell->payload.relay.relay_command = RELAY_DATA;
+  data_cell->payload.relay.recognized = 0;
+  data_cell->payload.relay.stream_id = 1;
+  data_cell->payload.relay.digest = 0;
+  data_cell->payload.relay.length = RELAY_PAYLOAD_LEN;
 
-  ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * ( (PayloadRelay*)unpacked_cell.payload )->length );
+  data_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + data_cell->payload.relay.length;
 
-  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, REQUEST, strlen( REQUEST ) );
+  memcpy( data_cell->payload.relay.data, REQUEST, strlen( REQUEST ) );
   http_header_length = strlen( REQUEST );
   free( REQUEST );
 
-/*
-  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, content_length, strlen( content_length ) );
-  http_header_length += strlen( content_length );
-
-  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, header_end, strlen( header_end ) );
-  http_header_length += strlen( header_end );
-*/
-
-  succ = read( desc_fd, desc_buff, RELAY_PAYLOAD_LEN - http_header_length );
+  succ = read( desc_fd, data_cell->payload.relay.data + http_header_length, RELAY_PAYLOAD_LEN - http_header_length );
 
   if ( succ != RELAY_PAYLOAD_LEN - http_header_length )
   {
@@ -2737,15 +2877,13 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 #endif
 
+    free( data_cell );
+
     ret = -1;
     goto finish;
   }
 
-  memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload + http_header_length, desc_buff, succ );
-
-  packed_cell = pack_and_free( &unpacked_cell );
-
-  if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( publish_circuit->or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
@@ -2757,7 +2895,17 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
   do
   {
-    succ = read( desc_fd, desc_buff, RELAY_PAYLOAD_LEN );
+    data_cell = malloc( MINITOR_CELL_LEN );
+
+    data_cell->command = RELAY;
+    data_cell->circ_id = publish_circuit->circ_id;
+
+    data_cell->payload.relay.relay_command = RELAY_DATA;
+    data_cell->payload.relay.recognized = 0;
+    data_cell->payload.relay.stream_id = 1;
+    data_cell->payload.relay.digest = 0;
+
+    succ = read( desc_fd, data_cell->payload.relay.data, RELAY_PAYLOAD_LEN );
 
     if ( succ < 0 )
     {
@@ -2765,32 +2913,24 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
       ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 #endif
 
+      free( data_cell );
+
       ret = -1;
       goto finish;
     }
 
     if ( succ == 0 )
     {
+      free( data_cell );
+
       break;
     }
 
-    unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
-    ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_DATA;
-    ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-    // TODO possibly need to set the stream_id, wasn't clear in torspec
-    ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 1;
-    ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-    ( (PayloadRelay*)unpacked_cell.payload )->length = succ;
+    data_cell->payload.relay.length = succ;
 
-    ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadData ) );
+    data_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + data_cell->payload.relay.length;
 
-    ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload = malloc( sizeof( unsigned char ) * succ );
-
-    memcpy( ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload, desc_buff, succ );
-
-    packed_cell = pack_and_free( &unpacked_cell );
-
-    if ( d_send_packed_relay_cell_and_free( publish_circuit->or_connection, packed_cell, &publish_circuit->relay_list, NULL ) < 0 )
+    if ( d_send_relay_cell_and_free( publish_circuit->or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );

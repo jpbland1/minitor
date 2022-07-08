@@ -24,7 +24,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 typedef enum OnionMessageType
 {
-  PACKED_CELL,
+  TOR_CELL,
   SERVICE_TCP_DATA,
   CONN_HANDSHAKE,
   CONN_READY,

@@ -79,309 +79,20 @@ static unsigned int ud_get_cert_date( unsigned char* date_buffer, int date_size 
   return 0;
 }
 
-/*
-int d_setup_init_rend_circuits( int circuit_count )
-{
-  int res = 0;
-
-  int i;
-  DoublyLinkedOnionCircuit* linked_circuit;
-  DoublyLinkedOnionCircuit* standby_node;
-  OnionRelay* unique_relay;
-  OrConnection* working_or_connection;
-
-  for ( i = 0; i < circuit_count; i++ )
-  {
-    linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-    linked_circuit->circuit = malloc( sizeof( OnionCircuit ) );
-    linked_circuit->circuit->task_handle = NULL;
-    linked_circuit->circuit->forward_queue = NULL;
-    linked_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
-
-    do
-    {
-      unique_relay = px_get_random_hsdir_relay( 1, NULL, NULL );
-
-      standby_node = standby_rend_circuits.head;
-
-      while ( standby_node != NULL )
-      {
-        if ( memcmp( standby_node->circuit->relay_list.tail->relay->identity, unique_relay->identity, ID_LENGTH ) == 0 )
-        {
-          free( unique_relay );
-          unique_relay = NULL;
-          break;
-        }
-
-        standby_node = standby_node->next;
-      }
-
-      // MUTEX TAKE
-      xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-      working_or_connection = or_connections.head;
-
-      for ( i = 0; i < or_connections.length; i++ )
-      {
-        if ( working_or_connection->address == unique_relay->address && working_or_connection->port == unique_relay->or_port )
-        {
-          free( unique_relay );
-          unique_relay = NULL;
-          break;
-        }
-
-        working_or_connection = working_or_connection->next;
-      }
-
-      xSemaphoreGive( or_connections_mutex );
-      // MUTEX TAKE
-    } while ( unique_relay == NULL );
-
-    switch ( d_build_onion_circuit_to( linked_circuit->circuit, 1, unique_relay ) )
-    {
-      case -1:
-        i--;
-        vQueueDelete( linked_circuit->circuit->rx_queue );
-        free( linked_circuit->circuit );
-        free( linked_circuit );
-        break;
-      case -2:
-        i = circuit_count;
-        vQueueDelete( linked_circuit->circuit->rx_queue );
-        free( linked_circuit->circuit );
-        free( linked_circuit );
-        break;
-      case 0:
-        linked_circuit->circuit->status = CIRCUIT_STANDBY;
-
-        // spawn a task to block on the tls buffer and put the data into the rx_queue
-        xTaskCreatePinnedToCore(
-          v_handle_circuit,
-          "HANDLE_CIRCUIT",
-          4096,
-          (void*)(linked_circuit->circuit),
-          8,
-          &linked_circuit->circuit->task_handle,
-          tskNO_AFFINITY
-        );
-
-        ESP_LOGE( MINITOR_TAG, "\nd_setup_init_rend_circuits taking rend mutex" );
-        // BEGIN mutex for standby circuits
-        xSemaphoreTake( standby_rend_circuits_mutex, portMAX_DELAY );
-
-        v_add_circuit_to_list( linked_circuit, &standby_rend_circuits );
-
-        xSemaphoreGive( standby_rend_circuits_mutex );
-        // END mutex for standby circuits
-        ESP_LOGE( MINITOR_TAG, "\nd_setup_init_rend_circuits gave rend mutex" );
-
-        res++;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return res;
-}
-*/
-
-/*
-// create three hop circuits that can quickly be turned into introduction points
-int d_setup_init_circuits( int circuit_count )
-{
-  int res = 0;
-  int i;
-  int want_guard = 1;
-  DoublyLinkedOnionCircuit* linked_circuit;
-  DoublyLinkedOnionCircuit* standby_node;
-  OnionRelay* unique_final_relay;
-  OnionRelay* guard_relay;
-
-  for ( i = 0; i < circuit_count; i++ )
-  {
-    linked_circuit = malloc( sizeof( DoublyLinkedOnionCircuit ) );
-    linked_circuit->circuit = malloc( sizeof( OnionCircuit ) );
-    linked_circuit->circuit->task_handle = NULL;
-    linked_circuit->circuit->forward_queue = NULL;
-    linked_circuit->circuit->rx_queue = xQueueCreate( 2, sizeof( OnionMessage* ) );
-
-    if ( want_guard == 1 )
-    {
-      guard_relay = px_get_random_hsdir_relay( 1, NULL, NULL );
-      want_guard = 0;
-    }
-
-    do
-    {
-      ESP_LOGE( MINITOR_TAG, "in unique loop" );
-      unique_final_relay = px_get_random_hsdir_relay( 0, NULL, guard_relay->identity );
-      ESP_LOGE( MINITOR_TAG, "%p", unique_final_relay );
-
-      standby_node = standby_circuits.head;
-
-      while ( standby_node != NULL )
-      {
-        if ( memcmp( standby_node->circuit->relay_list.tail->relay->identity, unique_final_relay->identity, ID_LENGTH ) == 0 )
-        {
-          free( unique_final_relay );
-          unique_final_relay = NULL;
-          break;
-        }
-
-        standby_node = standby_node->next;
-      }
-    } while ( unique_final_relay == NULL );
-
-    // build the circuits from the same guard relay
-    if ( d_build_onion_circuit_to( linked_circuit->circuit, 1, guard_relay ) < 0 )
-    {
-      goto fail;
-    }
-    // extend to the target relay
-    else if ( d_extend_onion_circuit_to( linked_circuit->circuit, 3, unique_final_relay ) < 0 )
-    {
-      goto fail;
-    }
-    // if nothing went wrong, start the handle task
-    else
-    {
-      linked_circuit->circuit->status = CIRCUIT_STANDBY;
-
-      // spawn a task to block on the tls buffer and put the data into the rx_queue
-      xTaskCreatePinnedToCore(
-        v_handle_circuit,
-        "HANDLE_CIRCUIT",
-        4096,
-        (void*)(linked_circuit->circuit),
-        8,
-        &linked_circuit->circuit->task_handle,
-        tskNO_AFFINITY
-      );
-
-      // BEGIN mutex for standby circuits
-      xSemaphoreTake( standby_circuits_mutex, portMAX_DELAY );
-
-      v_add_circuit_to_list( linked_circuit, &standby_circuits );
-
-      xSemaphoreGive( standby_circuits_mutex );
-      // END mutex for standby circuits
-
-      res++;
-    }
-
-continue;
-fail:
-    i--;
-    want_guard = 1;
-    vQueueDelete( linked_circuit->circuit->rx_queue );
-    free( linked_circuit->circuit );
-    free( linked_circuit );
-  }
-
-  return res;
-}
-*/
-
-/*
-// create a tor circuit
-int d_build_random_onion_circuit( OnionCircuit* circuit, int circuit_length ) {
-  if ( d_prepare_random_onion_circuit( circuit, circuit_length, NULL ) < 0 ) {
-    return -1;
-  }
-
-  return d_build_onion_circuit( circuit );
-}
-*/
-
-/*
-int d_build_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay )
-{
-  DoublyLinkedOnionRelay* db_relay;
-
-  ESP_LOGE( MINITOR_TAG, "Preparing" );
-  if ( d_prepare_random_onion_circuit( circuit, circuit_length - 1, destination_relay->identity ) < 0 )
-  {
-    free( destination_relay );
-
-    return -1;
-  }
-
-  db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  db_relay->relay = destination_relay;
-
-  v_add_relay_to_list( db_relay, &circuit->relay_list );
-
-  ESP_LOGE( MINITOR_TAG, "Building" );
-  return d_build_onion_circuit( circuit );
-}
-*/
-
-/*
-int d_extend_onion_circuit_to( OnionCircuit* circuit, int circuit_length, OnionRelay* destination_relay )
+int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* start_relay, OnionRelay* end_relay )
 {
   int i;
-  DoublyLinkedOnionRelay* node;
-
-  if ( d_get_suitable_onion_relays( &circuit->relay_list, circuit_length - 1, destination_relay->identity ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to get suitable relays to extend to" );
-#endif
-
-    return -1;
-  }
-
-  node = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  node->relay = destination_relay;
-
-  v_add_relay_to_list( node, &circuit->relay_list );
-
-  //if ( d_fetch_descriptor_info( circuit ) < 0 ) {
-//#ifdef DEBUG_MINITOR
-    //ESP_LOGE( MINITOR_TAG, "Failed to fetch descriptors" );
-//#endif
-
-    //return -1;
-  //}
-
-  node = circuit->relay_list.head;
-
-  // TODO possibly better to make d_build_onion_circuit capable of doing this instead of doing it here
-  for ( i = circuit->relay_list.built_length; i < circuit->relay_list.length; i++ ) {
-    // make an extend cell and send it to the hop
-    if ( d_router_extend2( circuit, i ) < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with relay %d", i + 1 );
-#endif
-
-      return -1;
-    }
-
-    circuit->relay_list.built_length++;
-  }
-
-  return 0;
-}
-*/
-
-int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* start_relay, OnionRelay* destination_relay )
-{
-  int i;
-  uint8_t* start_identity = NULL;
-  uint8_t* destination_identity = NULL;
   DoublyLinkedOnionRelay* dl_relay;
 
   circuit->circ_id = ++circ_id_counter;
 
   if ( start_relay != NULL )
   {
-    start_identity = start_relay->identity;
     length--;
   }
 
-  if ( destination_relay != NULL )
+  if ( end_relay != NULL )
   {
-    destination_identity = start_relay->identity;
     length--;
   }
 
@@ -392,16 +103,53 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   {
     if ( i == 0 && start_relay == NULL )
     {
-      if ( d_get_suitable_relay( &circuit->relay_list, 1, start_identity, destination_identity ) )
+      if ( end_relay != NULL )
       {
-        goto fail;
+        if ( d_get_suitable_relay( &circuit->relay_list, 1, NULL, end_relay->identity ) )
+        {
+          goto fail;
+        }
+      }
+      else
+      {
+        if ( d_get_suitable_relay( &circuit->relay_list, 1, NULL, NULL ) )
+        {
+          goto fail;
+        }
       }
     }
     else
     {
-      if ( d_get_suitable_relay( &circuit->relay_list, 0, start_identity, destination_identity ) )
+      if ( start_relay != NULL )
       {
-        goto fail;
+        if ( end_relay != NULL )
+        {
+          if ( d_get_suitable_relay( &circuit->relay_list, 0, start_relay->identity, end_relay->identity ) )
+          {
+            goto fail;
+          }
+        }
+        else
+        {
+          if ( d_get_suitable_relay( &circuit->relay_list, 0, start_relay->identity, NULL ) )
+          {
+            goto fail;
+          }
+        }
+      }
+      else if ( end_relay != NULL )
+      {
+        if ( d_get_suitable_relay( &circuit->relay_list, 0, NULL, end_relay->identity ) )
+        {
+          goto fail;
+        }
+      }
+      else
+      {
+        if ( d_get_suitable_relay( &circuit->relay_list, 0, NULL, NULL ) )
+        {
+          goto fail;
+        }
       }
     }
   }
@@ -430,11 +178,11 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   }
 
   // append the destination_relay to the list
-  if ( destination_relay != NULL )
+  if ( end_relay != NULL )
   {
 
     dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-    dl_relay->relay = destination_relay;
+    dl_relay->relay = end_relay;
 
     v_add_relay_to_list( dl_relay, &circuit->relay_list );
   }
@@ -446,37 +194,13 @@ fail:
     free( start_relay );
   }
 
-  if ( destination_relay != NULL )
+  if ( end_relay != NULL )
   {
-    free( destination_relay );
+    free( end_relay );
   }
 
   return -1;
 }
-
-/*
-int d_prepare_random_onion_circuit( OnionCircuit* circuit, int circuit_length, unsigned char* exclude )
-{
-  // find 3 suitable relays from our directory information
-  //circuit->status = CIRCUIT_BUILDING;
-
-  ESP_LOGE( MINITOR_TAG, "Taking circ_id_mutex" );
-  // BEGIN mutex for circ_id
-  xSemaphoreTake( circ_id_mutex, portMAX_DELAY );
-
-  circuit->circ_id = ++circ_id_counter;
-
-  ESP_LOGE( MINITOR_TAG, "Giving circ_id_mutex" );
-  xSemaphoreGive( circ_id_mutex );
-  // END mutex for circ_id
-
-  circuit->relay_list.length = 0;
-  circuit->relay_list.built_length = 0;
-
-  ESP_LOGE( MINITOR_TAG, "d_get_suitable_onion_relays" );
-  return d_get_suitable_onion_relays( &circuit->relay_list, circuit_length, exclude );
-}
-*/
 
 int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uint8_t* exclude_start, uint8_t* exclude_end )
 {
@@ -541,92 +265,23 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
   return 0;
 }
 
-/*
-int d_build_onion_circuit( OnionCircuit* circuit )
-{
-  int i;
-
-  if ( d_attach_connection( circuit->relay_list.head->relay->address, circuit->relay_list.head->relay->or_port, circuit ) != 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to connect to the first relay" );
-#endif
-
-    goto clean_circuit;
-  }
-
-  if ( d_router_create2( circuit ) < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to CREATE2 with first relay" );
-#endif
-
-    goto clean_connection;
-  }
-
-  circuit->relay_list.built_length++;
-
-  for ( i = 1; i < circuit->relay_list.length; i++ )
-  {
-    // make an extend cell and send it to the hop
-    if ( d_router_extend2( circuit, i ) < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to EXTEND2 with relay %d", i + 1 );
-#endif
-
-      d_destroy_onion_circuit( circuit );
-
-      return -1;
-    }
-
-    circuit->relay_list.built_length++;
-  }
-
-  return 0;
-
-clean_connection:
-  // MUTEX TAKE
-  xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-  if ( b_verify_or_connection( circuit->or_connection, &or_connections ) == 1 )
-  {
-    v_dettach_connection( circuit );
-  }
-
-  xSemaphoreGive( or_connections_mutex );
-  // MUTEX GIVE
-
-clean_circuit:
-  d_unmark_hsdir_relay_as_guard( circuit->relay_list.head->relay->identity );
-
-  while ( circuit->relay_list.length )
-  {
-    v_pop_relay_from_list_back( &circuit->relay_list );
-  }
-
-  return -1;
-}
-*/
-
 // destroy a tor circuit
 int d_destroy_onion_circuit( OnionCircuit* circuit )
 {
   int i;
-  Cell unpacked_cell = {
-    .circ_id = circuit->circ_id,
-    .command = DESTROY,
-    .payload = malloc( sizeof( PayloadDestroy ) ),
-  };
-  unsigned char* packed_cell;
+  Cell* destroy_cell;
   DoublyLinkedOnionRelay* tmp_relay_node;
 
-  ( (PayloadDestroy*)unpacked_cell.payload )->destroy_code = NO_DESTROY_CODE;
+  destroy_cell = malloc( MINITOR_CELL_LEN );
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  // length is header plus 1 for destroy code
+  destroy_cell->length = FIXED_CELL_HEADER_SIZE + 1;
+  destroy_cell->command = DESTROY;
+  destroy_cell->circ_id = circuit->circ_id;
+  destroy_cell->payload.destroy_code = NO_DESTROY_CODE;
 
   // send a destroy cell to the first hop
-  if ( d_send_packed_cell_and_free( circuit->or_connection, packed_cell ) < 0 )
+  if ( d_send_cell_and_free( circuit->or_connection, destroy_cell ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send DESTROY cell" );
@@ -646,7 +301,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
       free( tmp_relay_node->relay_crypto );
     }
 
-    ESP_LOGE( MINITOR_TAG, "Freeing relay: %d", i );
+    ESP_LOGE( MINITOR_TAG, "Freeing relay: %d %d", i, tmp_relay_node->relay->or_port );
     free( tmp_relay_node->relay );
 
     if ( i == circuit->relay_list.length - 1 )
@@ -659,6 +314,8 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
       free( tmp_relay_node->previous );
     }
   }
+
+  ESP_LOGE( MINITOR_TAG, "Freed with target status %d", circuit->target_status );
 
   circuit->relay_list.length = 0;
   circuit->relay_list.built_length = 0;
@@ -684,11 +341,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
     wc_curve25519_free( &circuit->create2_handshake_key );
   }
 
-  if ( b_verify_or_connection( circuit->or_connection ) == true )
-  {
-    // detach from the connection
-    v_dettach_connection( circuit->or_connection );
-  }
+  v_dettach_connection( circuit->or_connection );
 
   return 0;
 }
@@ -696,12 +349,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
 int d_router_truncate( OnionCircuit* circuit, int new_length )
 {
   int i;
-  Cell unpacked_cell = {
-    .circ_id = circuit->circ_id,
-    .command = RELAY,
-    .payload = malloc( sizeof( PayloadRelay ) ),
-  };
-  unsigned char* packed_cell;
+  Cell* truncate_cell;
   DoublyLinkedOnionRelay* tmp_relay_node;
 
   if ( circuit->relay_list.length == new_length )
@@ -710,20 +358,10 @@ int d_router_truncate( OnionCircuit* circuit, int new_length )
     ESP_LOGE( MINITOR_TAG, "Circuit is already at length" );
 #endif
 
-    free_cell( &unpacked_cell );
-
     return -1;
   }
 
   circuit->relay_early_count++;
-
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_TRUNCATE;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 0;
-
-  packed_cell = pack_and_free( &unpacked_cell );
 
   tmp_relay_node = circuit->relay_list.tail;
 
@@ -749,8 +387,22 @@ int d_router_truncate( OnionCircuit* circuit, int new_length )
   circuit->relay_list.length = new_length;
   circuit->relay_list.built_length = new_length;
 
+  truncate_cell = malloc( MINITOR_CELL_LEN );
+
+  // fixed header, relay header and 1 for destroy code
+  truncate_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + 1;
+  truncate_cell->command = RELAY;
+  truncate_cell->circ_id = circuit->circ_id;
+
+  truncate_cell->payload.relay.relay_command = RELAY_TRUNCATE;
+  truncate_cell->payload.relay.recognized = 0;
+  truncate_cell->payload.relay.stream_id = 0;
+  truncate_cell->payload.relay.digest = 0;
+  truncate_cell->payload.relay.length = 1;
+  truncate_cell->payload.relay.destroy_code = NO_DESTROY_CODE;
+
   // send a destroy cell to the first hop
-  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( circuit->or_connection, truncate_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_TRUNCATE cell" );
@@ -762,84 +414,15 @@ int d_router_truncate( OnionCircuit* circuit, int new_length )
   return 0;
 }
 
-/*
-// we are now in the server read state
-void v_handle_circuit( void* pv_parameters )
-{
-  int succ;
-  uint8_t* packed_cell;
-  OnionCircuit* onion_circuit = (OnionCircuit*)pv_parameters;
-  Cell* unpacked_cell;
-  OnionMessage* onion_message;
-
-  while ( 1 )
-  {
-    unpacked_cell = malloc( sizeof( Cell ) );
-
-    succ = xQueueReceive( onion_circuit->rx_queue, &onion_message, portMAX_DELAY );
-
-    if ( succ == pdFALSE || onion_message == NULL )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "rx_queue was shut down, rebuild connection or tear down circuit" );
-#endif
-
-      vTaskDelete( NULL );
-    }
-
-    packed_cell = onion_message->data;
-
-    if ( onion_circuit->status == CIRCUIT_RENDEZVOUS )
-    {
-      succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &onion_circuit->relay_list, onion_circuit->hs_crypto, &unpacked_cell->recv_index );
-    }
-    else
-    {
-      succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &onion_circuit->relay_list, NULL, &unpacked_cell->recv_index );
-    }
-
-    if ( succ  < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to decrypt packed cell" );
-#endif
-
-      free( onion_message->data );
-      free( onion_message );
-      free( unpacked_cell );
-
-      continue;
-    }
-
-    // set the unpacked cell and return success
-    unpack_and_free( unpacked_cell, packed_cell, CIRCID_LEN );
-
-    // TODO should determine if we need to destroy the circuit on a NULL queue
-    if ( unpacked_cell->command == PADDING || onion_circuit->forward_queue == NULL )
-    {
-      free_cell( unpacked_cell );
-      free( unpacked_cell );
-      free( onion_message );
-    }
-    else
-    {
-      onion_message->type = ONION_CELL;
-      onion_message->data = unpacked_cell;
-
-      xQueueSendToBack( onion_circuit->forward_queue, (void*)(&onion_message), portMAX_DELAY );
-    }
-  }
-}
-*/
-
 int d_router_extend2( OnionCircuit* circuit, int node_index )
 {
   int i;
   int wolf_succ;
   WC_RNG rng;
   DoublyLinkedOnionRelay* target_relay;
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* extend2_cell;
+  LinkSpecifier* working_specifier;
+  Create2* create2;
 
   wc_curve25519_init( &circuit->create2_handshake_key );
   wc_InitRng( &rng );
@@ -863,59 +446,58 @@ int d_router_extend2( OnionCircuit* circuit, int node_index )
     target_relay = target_relay->next;
   }
 
+  extend2_cell = malloc( MINITOR_CELL_LEN );
+
   // construct link specifiers
-  unpacked_cell.circ_id = circuit->circ_id;
-  unpacked_cell.command = RELAY_EARLY;
-  unpacked_cell.payload = malloc( sizeof( PayloadRelay ) );
+  extend2_cell->circ_id = circuit->circ_id;
+  extend2_cell->command = RELAY_EARLY;
+  extend2_cell->payload.relay.relay_command = RELAY_EXTEND2;
+  extend2_cell->payload.relay.recognized = 0;
+  extend2_cell->payload.relay.stream_id = 0;
+  extend2_cell->payload.relay.digest = 0;
+  extend2_cell->payload.relay.length = 35 + ID_LENGTH + H_LENGTH + G_LENGTH;
 
-  ( (PayloadRelay*)unpacked_cell.payload )->command = RELAY_EXTEND2;
-  ( (PayloadRelay*)unpacked_cell.payload )->recognized = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->stream_id = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->digest = 0;
-  ( (PayloadRelay*)unpacked_cell.payload )->length = 35 + ID_LENGTH + H_LENGTH + G_LENGTH;
-  ( (PayloadRelay*)unpacked_cell.payload )->relay_payload = malloc( sizeof( RelayPayloadExtend2 ) );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->specifier_count = 2;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers = malloc( sizeof( LinkSpecifier* ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->specifier_count );
+  // fixed header, relay header, relay body length
+  extend2_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + extend2_cell->payload.relay.length;
 
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0] = malloc( sizeof( LinkSpecifier ) );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->type = IPv4Link;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->length = 6;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->length );
+  extend2_cell->payload.relay.extend2.num_specifiers = 2;
 
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[3] = (unsigned char)( target_relay->relay->address >> 24 );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[2] = (unsigned char)( target_relay->relay->address >> 16 );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[1] = (unsigned char)( target_relay->relay->address >> 8 );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[0] = (unsigned char)target_relay->relay->address;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[4] = (unsigned char)target_relay->relay->or_port >> 8;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[0]->specifier[5] = (unsigned char)target_relay->relay->or_port;
+  working_specifier = extend2_cell->payload.relay.extend2.link_specifiers;
 
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1] = malloc( sizeof( LinkSpecifier ) );
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->type = LEGACYLink;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->length = ID_LENGTH;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->specifier = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->length );
+  working_specifier->type = IPv4Link;
+  working_specifier->length = 6;
+  working_specifier->specifier[0] = (uint8_t)target_relay->relay->address;
+  working_specifier->specifier[1] = (uint8_t)(target_relay->relay->address >> 8);
+  working_specifier->specifier[2] = (uint8_t)(target_relay->relay->address >> 16);
+  working_specifier->specifier[3] = (uint8_t)(target_relay->relay->address >> 24);
+  working_specifier->specifier[4] = (uint8_t)(target_relay->relay->or_port >> 8);
+  working_specifier->specifier[5] = (uint8_t)target_relay->relay->or_port;
 
-  memcpy( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->link_specifiers[1]->specifier, target_relay->relay->identity, ID_LENGTH );
+  working_specifier = (uint8_t*)working_specifier + 2 + 6;
+
+  working_specifier->type = LEGACYLink;
+  working_specifier->length = ID_LENGTH;
+  memcpy( working_specifier->specifier, target_relay->relay->identity, ID_LENGTH );
+
+  create2 = (uint8_t*)working_specifier + 2 + ID_LENGTH;
+
+  create2->handshake_type = NTOR;
+  create2->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
 
   // construct our side of the handshake
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_type = NTOR;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
-  ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_length );
-
-  if ( d_ntor_handshake_start( ( (RelayPayloadExtend2*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->handshake_data, target_relay->relay, &circuit->create2_handshake_key ) < 0 )
+  if ( d_ntor_handshake_start( create2->handshake_data, target_relay->relay, &circuit->create2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
 
-    free_cell( &unpacked_cell );
+    free( extend2_cell );
 
     goto fail;
   }
 
-  packed_cell = pack_and_free( &unpacked_cell );
-
   // send the EXTEND2 cell
-  if ( d_send_packed_relay_cell_and_free( circuit->or_connection, packed_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( circuit->or_connection, extend2_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
@@ -934,7 +516,6 @@ fail:
 
 int d_router_extended2( OnionCircuit* circuit, int node_index, Cell* extended2_cell )
 {
-  int ret = 0;
   int i;
   DoublyLinkedOnionRelay* target_relay;
 
@@ -945,29 +526,39 @@ int d_router_extended2( OnionCircuit* circuit, int node_index, Cell* extended2_c
     target_relay = target_relay->next;
   }
 
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)( (PayloadRelay*)extended2_cell->payload )->relay_payload )->handshake_data, target_relay, &circuit->create2_handshake_key ) < 0 )
+  if ( d_ntor_handshake_finish( extended2_cell->payload.relay.extended2.handshake_data, target_relay, &circuit->create2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 #endif
 
-    ret = -1;
+    // destroy function will free the handshake key
+    return -1;
   }
 
   wc_curve25519_free( &circuit->create2_handshake_key );
 
-  return ret;
+  return 0;
 }
 
 int d_router_create2( OnionCircuit* circuit )
 {
   int wolf_succ;
   WC_RNG rng;
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  Cell* create2_cell;
 
   wc_curve25519_init( &circuit->create2_handshake_key );
-  wc_InitRng( &rng );
+
+  wolf_succ = wc_InitRng( &rng );
+
+  if ( wolf_succ != 0 )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to init rng %d", wolf_succ );
+#endif
+
+    goto cleanup;
+  }
 
   wolf_succ = wc_curve25519_make_key( &rng, 32, &circuit->create2_handshake_key );
 
@@ -982,29 +573,29 @@ int d_router_create2( OnionCircuit* circuit )
     goto cleanup;
   }
 
+  create2_cell = malloc( MINITOR_CELL_LEN );
+
   // make a create2 cell
-  unpacked_cell.circ_id = circuit->circ_id;
-  unpacked_cell.command = CREATE2;
-  unpacked_cell.payload = malloc( sizeof( PayloadCreate2 ) );
+  create2_cell->circ_id = circuit->circ_id;
+  create2_cell->command = CREATE2;
+  create2_cell->payload.create2.handshake_type = NTOR;
+  create2_cell->payload.create2.handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
 
-  ( (PayloadCreate2*)unpacked_cell.payload )->handshake_type = NTOR;
-  ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
-  ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data = malloc( sizeof( unsigned char ) * ( (PayloadCreate2*)unpacked_cell.payload )->handshake_length );
+  // fixed header, 2 for handshake_type, 2 for handshake_length and the handshake
+  create2_cell->length = FIXED_CELL_HEADER_SIZE + 2 + 2 + create2_cell->payload.create2.handshake_length;
 
-  if ( d_ntor_handshake_start( ( (PayloadCreate2*)unpacked_cell.payload )->handshake_data, circuit->relay_list.head->relay, &circuit->create2_handshake_key ) < 0 )
+  if ( d_ntor_handshake_start( create2_cell->payload.create2.handshake_data, circuit->relay_list.head->relay, &circuit->create2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to export create2_handshake_key into unpacked_cell" );
 #endif
 
-    free_cell( &unpacked_cell );
+    free( create2_cell );
 
     goto cleanup;
   }
 
-  packed_cell = pack_and_free( &unpacked_cell );
-
-  if ( d_send_packed_cell_and_free( circuit->or_connection, packed_cell ) < 0 )
+  if ( d_send_cell_and_free( circuit->or_connection, create2_cell ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send CREATE2 cell" );
@@ -1022,25 +613,25 @@ cleanup:
 }
 
 // outer caller will free the unpacked cell
-int d_router_created2( OnionCircuit* circuit, Cell* unpacked_cell )
+int d_router_created2( OnionCircuit* circuit, Cell* created2_cell )
 {
-  int ret = 0;
-
-  if ( d_ntor_handshake_finish( ( (PayloadCreated2*)unpacked_cell->payload )->handshake_data, circuit->relay_list.head, &circuit->create2_handshake_key ) < 0 )
+  if ( d_ntor_handshake_finish( created2_cell->payload.created2.handshake_data, circuit->relay_list.head, &circuit->create2_handshake_key ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to finish CREATED2 handshake" );
 #endif
 
-    ret = -1;
+    // create2_handshake_key is freed in destroy function
+    return -1;
   }
 
   wc_curve25519_free( &circuit->create2_handshake_key );
 
-  return ret;
+  return 0;
 }
 
-int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key ) {
+int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key )
+{
   int wolf_succ;
   unsigned int idx;
 
@@ -1061,7 +652,7 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
   return 0;
 }
 
-int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key )
+int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key )
 {
   int wolf_succ;
   unsigned int idx;
@@ -1092,7 +683,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
 
   wolf_succ = wc_curve25519_import_public_ex( handshake_data, G_LENGTH, &responder_handshake_public_key, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 ) {
+  if ( wolf_succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to import responder public key, error code %d", wolf_succ );
 #endif
@@ -1102,7 +694,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
 
   wolf_succ = wc_curve25519_import_public_ex( db_relay->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 ) {
+  if ( wolf_succ < 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to import ntor onion public key, error code %d", wolf_succ );
 #endif
@@ -1114,7 +707,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( key, &responder_handshake_public_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 || idx != 32 ) {
+  if ( wolf_succ < 0 || idx != 32 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute EXP(Y,x), error code %d", wolf_succ );
 #endif
@@ -1127,7 +721,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( key, &ntor_onion_key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 || idx != 32 ) {
+  if ( wolf_succ < 0 || idx != 32 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to compute EXP(B,x), error code %d", wolf_succ );
 #endif
@@ -1146,7 +741,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   idx = 32;
   wolf_succ = wc_curve25519_export_public_ex( key, working_secret_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ != 0 ) {
+  if ( wolf_succ != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to export handshake key into working_secret_input, error code: %d", wolf_succ );
 #endif
@@ -1181,7 +777,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   idx = 32;
   wolf_succ = wc_curve25519_export_public_ex( key, working_auth_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ != 0 ) {
+  if ( wolf_succ != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to export handshake key into working_auth_input, error code: %d", wolf_succ );
 #endif
@@ -1201,7 +798,8 @@ int d_ntor_handshake_finish( unsigned char* handshake_data, DoublyLinkedOnionRel
   wc_HmacFinal( &reusable_hmac, reusable_hmac_digest );
   wc_HmacFree( &reusable_hmac );
 
-  if ( memcmp( reusable_hmac_digest, handshake_data + G_LENGTH, WC_SHA256_DIGEST_SIZE ) != 0 ) {
+  if ( memcmp( reusable_hmac_digest, handshake_data + G_LENGTH, WC_SHA256_DIGEST_SIZE ) != 0 )
+  {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to match AUTH with our own digest" );
 #endif
@@ -1295,8 +893,9 @@ int d_start_v3_handshake( DlConnection* or_connection )
 {
   int i;
   int wolf_succ;
-  Cell unpacked_cell;
-  unsigned char* packed_cell;
+  CellShortVariable* versions_cell;
+  CellVariable* certs_cell;
+  TorCert* working_cert;
   unsigned char* initiator_rsa_identity_cert_der = malloc( sizeof( unsigned char ) * 2048 );
   int initiator_rsa_identity_cert_der_size;
   unsigned char* initiator_rsa_auth_cert_der = malloc( sizeof( unsigned char ) * 2048 );
@@ -1311,24 +910,23 @@ int d_start_v3_handshake( DlConnection* or_connection )
 
   wc_InitRng( &rng );
 
+  versions_cell = malloc( LEGACY_CIRCID_LEN + 3 + 4 );
+
   // make a versions cell
-  unpacked_cell.circ_id = 0;
-  unpacked_cell.command = VERSIONS;
-  unpacked_cell.length = 4;
-  unpacked_cell.payload = malloc( sizeof( PayloadVersions ) );
+  versions_cell->circ_id = 0;
+  versions_cell->command = VERSIONS;
+  versions_cell->length = 4;
+  versions_cell->payload.versions[0] = 3;
+  versions_cell->payload.versions[1] = 4;
 
-  ( (PayloadVersions*)unpacked_cell.payload )->versions = malloc( sizeof( unsigned short ) * 2 );
-  ( (PayloadVersions*)unpacked_cell.payload )->versions[0] = 3;
-  ( (PayloadVersions*)unpacked_cell.payload )->versions[1] = 4;
+  v_networkize_variable_short_cell( versions_cell );
 
-  packed_cell = pack_and_free( &unpacked_cell );
-
-  wc_Sha256Update( &or_connection->initiator_sha, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length );
+  wc_Sha256Update( &or_connection->initiator_sha, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4 );
 
   // send the versions cell
-  wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, LEGACY_CIRCID_LEN + 3 + unpacked_cell.length, 0 );
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4, 0 );
 
-  free( packed_cell );
+  free( versions_cell );
 
   if ( wolf_succ <= 0 )
   {
@@ -1350,40 +948,32 @@ int d_start_v3_handshake( DlConnection* or_connection )
   }
 
   // generate a certs cell of our own
-  unpacked_cell.circ_id = 0;
-  unpacked_cell.command = CERTS;
-  unpacked_cell.length = 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size;
-  unpacked_cell.payload = malloc( sizeof( PayloadCerts ) );
+  certs_cell = malloc( CIRCID_LEN + 3 + 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size );
 
-  ( (PayloadCerts*)unpacked_cell.payload )->cert_count = 2;
-  ( (PayloadCerts*)unpacked_cell.payload )->certs = malloc( sizeof( MinitorCert* ) * 2 );
+  certs_cell->circ_id = 0;
+  certs_cell->command = CERTS;
+  certs_cell->length = 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size;
+  certs_cell->payload.certs.num_certs = 2;
 
-  for ( i = 0; i < ( (PayloadCerts*)unpacked_cell.payload )->cert_count; i++ )
-  {
-    ( (PayloadCerts*)unpacked_cell.payload )->certs[i] = malloc( sizeof( MinitorCert ) );
-  }
+  working_cert = certs_cell->payload.certs.certs;
 
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_type = IDENTITY_CERT;
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_length = initiator_rsa_identity_cert_der_size;
+  working_cert->cert_type = IDENTITY_CERT;
+  working_cert->cert_length = initiator_rsa_identity_cert_der_size;
+  memcpy( working_cert->cert, initiator_rsa_identity_cert_der, working_cert->cert_length );
 
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert = malloc( sizeof( unsigned char ) * initiator_rsa_identity_cert_der_size );
+  working_cert = (uint8_t*)working_cert + 3 + working_cert->cert_length;
 
-  memcpy( ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert, initiator_rsa_identity_cert_der, ( (PayloadCerts*)unpacked_cell.payload )->certs[0]->cert_length );
+  working_cert->cert_type = RSA_AUTH_CERT;
+  working_cert->cert_length = initiator_rsa_auth_cert_der_size;
+  memcpy( working_cert->cert, initiator_rsa_auth_cert_der, working_cert->cert_length );
 
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_type = RSA_AUTH_CERT;
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_length = initiator_rsa_auth_cert_der_size;
+  v_networkize_variable_cell( certs_cell );
 
-  ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert = malloc( sizeof( unsigned char ) * initiator_rsa_auth_cert_der_size );
+  wc_Sha256Update( &or_connection->initiator_sha, (uint8_t*)certs_cell, CIRCID_LEN + 3 + 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size );
 
-  memcpy( ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert, initiator_rsa_auth_cert_der, ( (PayloadCerts*)unpacked_cell.payload )->certs[1]->cert_length );
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)certs_cell, CIRCID_LEN + 3 + 7 + initiator_rsa_auth_cert_der_size + initiator_rsa_identity_cert_der_size, 0 );
 
-  packed_cell = pack_and_free( &unpacked_cell );
-
-  wc_Sha256Update( &or_connection->initiator_sha, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length );
-
-  wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 );
-
-  free( packed_cell );
+  free( certs_cell );
 
   if ( wolf_succ <= 0 )
   {
@@ -1422,24 +1012,21 @@ fail:
   return -1;
 }
 
-void v_process_versions( DlConnection* or_connection, uint8_t* packed_cell, int length )
+void v_process_versions( DlConnection* or_connection, CellShortVariable* versions_cell, int length )
 {
-  wc_Sha256Update( &or_connection->responder_sha, packed_cell, length );
+  wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)versions_cell, length );
 
   // TODO check that our versions are compatable, not neccessary in chutney
-
-  free( packed_cell );
 }
 
-int d_process_certs( DlConnection* or_connection, uint8_t* packed_cell, int length )
+int d_process_certs( DlConnection* or_connection, CellVariable* certs_cell, int length )
 {
   int succ;
-  Cell unpacked_cell;
   WOLFSSL_X509* peer_cert;
 
-  wc_Sha256Update( &or_connection->responder_sha, packed_cell, length );
+  wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)certs_cell, length );
 
-  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
+  v_hostize_variable_cell( certs_cell );
 
   peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
 
@@ -1452,11 +1039,9 @@ int d_process_certs( DlConnection* or_connection, uint8_t* packed_cell, int leng
     goto fail;
   }
 
-  succ = d_verify_certs( &unpacked_cell, peer_cert, &or_connection->responder_rsa_identity_key_der_size, or_connection->responder_rsa_identity_key_der );
+  succ = d_verify_certs( certs_cell, peer_cert, &or_connection->responder_rsa_identity_key_der_size, or_connection->responder_rsa_identity_key_der );
 
   wolfSSL_X509_free( peer_cert );
-
-  free_cell( &unpacked_cell );
 
   // verify certs
   if ( succ < 0 )
@@ -1483,11 +1068,11 @@ fail:
   return -1;
 }
 
-int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int length )
+int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_cell, int length )
 {
-  WC_RNG rng;
   int ret = 0;
-  Cell unpacked_cell;
+  CellVariable* authenticate_cell;
+  WC_RNG rng;
   Sha256 reusable_sha;
   unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
   WOLFSSL_X509* peer_cert;
@@ -1497,10 +1082,7 @@ int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int 
   wc_InitRng( &rng );
   wc_InitSha256( &reusable_sha );
 
-  wc_Sha256Update( &or_connection->responder_sha, packed_cell, length );
-
-  // free the packed cell
-  free( packed_cell );
+  wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)challenge_cell, length );
 
   peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
 
@@ -1514,41 +1096,42 @@ int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int 
     goto finish;
   }
 
-  // generate answer for auth challenge
-  unpacked_cell.circ_id = 0;
-  unpacked_cell.command = AUTHENTICATE;
-  unpacked_cell.length = 4 + 352;
-  unpacked_cell.payload = malloc( sizeof( PayloadAuthenticate ) );
+  // VARIABLE_CELL_HEADER_SIZE, 4 for the auth_type and auth_length and 352 for the auth body
+  authenticate_cell = malloc( VARIABLE_CELL_HEADER_SIZE + 4 + 352 );
 
-  ( (PayloadAuthenticate*)unpacked_cell.payload )->auth_type = AUTH_ONE;
-  ( (PayloadAuthenticate*)unpacked_cell.payload )->auth_length = 352;
-  ( (PayloadAuthenticate*)unpacked_cell.payload )->authentication = malloc( sizeof( AuthenticationOne ) );
+  // generate answer for auth challenge
+  authenticate_cell->circ_id = 0;
+  authenticate_cell->command = AUTHENTICATE;
+  authenticate_cell->length = 4 + 352;
+
+  authenticate_cell->payload.authenticate.auth_type = AUTH_ONE;
+  authenticate_cell->payload.authenticate.auth_length = 352;
 
   // fill in type
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->type, "AUTH0001", 8 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.type, AUTH_ONE_TYPE_STRING, 8 );
 
   // create the hash of the clients identity key and fill the authenticate cell with it
   wc_Sha256Update( &reusable_sha, or_connection->initiator_rsa_identity_key_der, or_connection->initiator_rsa_identity_key_der_size );
   wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_id, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.client_id, reusable_sha_sum, 32 );
 
   // create the hash of the server's identity key and fill the authenticate cell with it
   wc_Sha256Update( &reusable_sha, or_connection->responder_rsa_identity_key_der, or_connection->responder_rsa_identity_key_der_size );
   wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_id, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_id, reusable_sha_sum, 32 );
 
   // create the hash of all server cells so far and fill the authenticate cell with it
   wc_Sha256Final( &or_connection->responder_sha, reusable_sha_sum );
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_log, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_log, reusable_sha_sum, 32 );
 
   // create the hash of all cilent cells so far and fill the authenticate cell with it
   wc_Sha256Final( &or_connection->initiator_sha, reusable_sha_sum );
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_log, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.client_log, reusable_sha_sum, 32 );
 
   // create a sha hash of the tls cert and copy it in
   wc_Sha256Update( &reusable_sha, peer_cert->derCert->buffer, peer_cert->derCert->length );
   wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_cert, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_cert, reusable_sha_sum, 32 );
 
   // set the hmac key to the master secret that was negotiated
   wc_HmacSetKey( &tls_secrets_hmac, WC_SHA256, or_connection->ssl->arrays->masterSecret, SECRET_LEN );
@@ -1564,27 +1147,21 @@ int d_process_challenge( DlConnection* or_connection, uint8_t* packed_cell, int 
   wolfSSL_FreeArrays( or_connection->ssl );
 
   // copy the tls secrets digest in
-  memcpy( ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->tls_secrets, reusable_sha_sum, 32 );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.tls_secrets, reusable_sha_sum, 32 );
+
   // fill the rand array
-  wc_RNG_GenerateBlock( &rng, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->rand, 24 );
-  // create the signature
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->type, 8 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_id, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_id, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_log, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->client_log, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->server_cert, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->tls_secrets, 32 );
-  wc_Sha256Update( &reusable_sha, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->rand, 24 );
+  wc_RNG_GenerateBlock( &rng, authenticate_cell->payload.authenticate.auth_1.rand, 24 );
+  // create the signature, exlucde the signature part of the structure
+  wc_Sha256Update( &reusable_sha, &(authenticate_cell->payload.authenticate.auth_1), sizeof( AuthenticationOne ) - 128 );
   wc_Sha256Final( &reusable_sha, reusable_sha_sum );
 
-  wc_RsaSSL_Sign( reusable_sha_sum, 32, ( (AuthenticationOne*)( (PayloadAuthenticate*)unpacked_cell.payload )->authentication )->signature, 128, &or_connection->initiator_rsa_auth_key, &rng );
+  wc_RsaSSL_Sign( reusable_sha_sum, 32, authenticate_cell->payload.authenticate.auth_1.signature, 128, &or_connection->initiator_rsa_auth_key, &rng );
 
-  packed_cell = pack_and_free( &unpacked_cell );
+  v_networkize_variable_cell( authenticate_cell );
 
-  wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, CIRCID_LEN + 3 + unpacked_cell.length, 0 );
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)authenticate_cell, VARIABLE_CELL_HEADER_SIZE + 4 + 352, 0 );
 
-  free( packed_cell );
+  free( authenticate_cell );
 
   if ( wolf_succ <= 0 )
   {
@@ -1612,69 +1189,82 @@ finish:
   return ret;
 }
 
-int d_process_netinfo( DlConnection* or_connection, uint8_t* packed_cell )
+int d_process_netinfo( DlConnection* or_connection, Cell* netinfo_cell )
 {
-  int ret = 0;
+  int i;
   int wolf_succ;
-  Cell unpacked_cell;
-  uint8_t* my_address;
-  uint8_t my_address_length;
-  uint8_t* other_address;
-  uint8_t other_address_length;
+  Cell* res_netinfo_cell;
+  uint8_t my_address[16];
+  int my_address_length;
+  uint8_t other_address[16];
+  int other_address_length = 0;
+  MyAddr* working_myaddr;
 
-  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
+  v_hostize_cell( netinfo_cell );
 
-  my_address_length = ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->length;
-  my_address = malloc( sizeof( unsigned char ) * my_address_length );
-  memcpy( my_address, ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address, my_address_length );
-
-  other_address_length = ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->length;
-  other_address = malloc( sizeof( unsigned char ) * other_address_length );
-  memcpy( other_address, ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address, other_address_length );
-
-  free_cell( &unpacked_cell );
-
-  unpacked_cell.circ_id = 0;
-  unpacked_cell.command = NETINFO;
-  unpacked_cell.payload = malloc( sizeof( PayloadNetInfo ) );
-
-  time( &( (PayloadNetInfo*)unpacked_cell.payload )->time );
-  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address = malloc( sizeof( Address ) );
-
-  if ( other_address_length == 4 )
-  {
-    ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address_type = IPv4;
-  }
-  else
-  {
-    ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address_type = IPv6;
-  }
-
-  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->length = other_address_length;
-  ( (PayloadNetInfo*)unpacked_cell.payload )->other_address->address = other_address;
-
-  ( (PayloadNetInfo*)unpacked_cell.payload )->address_count = 1;
-  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses = malloc( sizeof( Address* ) );
-  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0] = malloc( sizeof( Address ) );
+  my_address_length = netinfo_cell->payload.netinfo.addresses_4.otheraddr.length;
 
   if ( my_address_length == 4 )
   {
-    ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address_type = IPv4;
+    memcpy( my_address, netinfo_cell->payload.netinfo.addresses_4.otheraddr.address, my_address_length );
+
+    working_myaddr = netinfo_cell->payload.netinfo.addresses_4.myaddr.addresses;
+
+    for ( i = 0; i < netinfo_cell->payload.netinfo.addresses_4.myaddr.num_myaddr; i++ )
+    {
+      other_address_length = working_myaddr->length;
+
+      if ( other_address_length == 4 )
+      {
+        memcpy( other_address, working_myaddr->address, other_address_length );
+        break;
+      }
+      else
+      {
+        // TODO ipv6 support
+        other_address_length = -1;
+      }
+
+      working_myaddr = (uint8_t*)working_myaddr + 2 + working_myaddr->length;
+    }
   }
-  else
+
+  // TODO ipv6 support
+  if ( my_address_length != 4 || other_address_length == -1 )
   {
-    ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address_type = IPv6;
+    return -1;
   }
 
-  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->length = my_address_length;
-  ( (PayloadNetInfo*)unpacked_cell.payload )->my_addresses[0]->address = my_address;
+  ESP_LOGE( MINITOR_TAG, "port: %d", or_connection->port );
+  ESP_LOGE( MINITOR_TAG, "myaddr: %x %x %x %x, otheraddr: %x %x %x %x", my_address[0], my_address[1], my_address[2], my_address[3], other_address[0], other_address[1], other_address[2], other_address[3] );
 
-  // this will also free my_address and other_address
-  packed_cell = pack_and_free( &unpacked_cell );
+  res_netinfo_cell = malloc( MINITOR_CELL_LEN );
 
-  wolf_succ = wolfSSL_send( or_connection->ssl, packed_cell, CELL_LEN, 0 );
+  // fixed header, 4 for time, 6 for other addr, 1 for num addrs, 6 for my addr
+  res_netinfo_cell->length = FIXED_CELL_HEADER_SIZE + 4 + 6 + 1 + 6;
 
-  free( packed_cell );
+  res_netinfo_cell->circ_id = 0;
+  res_netinfo_cell->command = NETINFO;
+
+  time( &( res_netinfo_cell->payload.netinfo.time ) );
+
+  res_netinfo_cell->payload.netinfo.addresses_4.otheraddr.type = IPv4;
+  res_netinfo_cell->payload.netinfo.addresses_4.otheraddr.length = other_address_length;
+  memcpy( res_netinfo_cell->payload.netinfo.addresses_4.otheraddr.address, other_address, other_address_length );
+
+  res_netinfo_cell->payload.netinfo.addresses_4.myaddr.num_myaddr = 1;
+
+  working_myaddr = res_netinfo_cell->payload.netinfo.addresses_4.myaddr.addresses;
+
+  working_myaddr->type = IPv4;
+  working_myaddr->length = my_address_length;
+  memcpy( working_myaddr->address, my_address, my_address_length );
+
+  v_networkize_cell( res_netinfo_cell );
+
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)res_netinfo_cell + FIXED_CELL_OFFSET, CELL_LEN, 0 );
+
+  free( res_netinfo_cell );
 
   if ( wolf_succ <= 0 )
   {
@@ -1682,14 +1272,15 @@ int d_process_netinfo( DlConnection* or_connection, uint8_t* packed_cell )
     ESP_LOGE( MINITOR_TAG, "Failed to send NETINFO cell, error code: %d", wolfSSL_get_error( or_connection->ssl, wolf_succ ) );
 #endif
 
-    ret = -1;
+    return -1;
   }
 
-  return ret;
+  return 0;
 }
 
-int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der )
+int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der )
 {
+  int ret = 0;
   int i;
   time_t now;
   WOLFSSL_X509* certificate = NULL;
@@ -1700,41 +1291,48 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
   unsigned int idx;
   int wolf_succ;
   RsaKey responder_rsa_identity_key;
-  unsigned char* temp_array;
+  uint8_t temp_array[128];
+  TorCert* working_cert;
 
   wc_InitRsaKey( &responder_rsa_identity_key, NULL );
 
   // verify the certs
   time( &now );
 
-  for ( i = 0; i < ( (PayloadCerts*)certs_cell->payload )->cert_count; i++ )
+  working_cert = certs_cell->payload.certs.certs;
+
+  for ( i = 0; i < certs_cell->payload.certs.num_certs; i++ )
   {
-    if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type > IDENTITY_CERT )
+    if ( working_cert->cert_type > IDENTITY_CERT )
     {
       break;
     }
 
     certificate = wolfSSL_X509_load_certificate_buffer(
-      ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert,
-      ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_length,
+      working_cert->cert,
+      working_cert->cert_length,
       WOLFSSL_FILETYPE_ASN1 );
 
-    if ( certificate == NULL ) {
+    if ( certificate == NULL )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Invalid certificate" );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     cert_date = ud_get_cert_date( certificate->notBefore.data, certificate->notBefore.length );
 
-    if ( cert_date == 0 || cert_date > now ) {
+    if ( cert_date == 0 || cert_date > now )
+    {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Invalid not before time" );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     cert_date = ud_get_cert_date( certificate->notAfter.data, certificate->notAfter.length );
@@ -1745,10 +1343,11 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
       ESP_LOGE( MINITOR_TAG, "Invalid not after time" );
 #endif
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
-    if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == LINK_KEY )
+    if ( working_cert->cert_type == LINK_KEY )
     {
       link_key_certificate = certificate;
       link_key_count++;
@@ -1759,7 +1358,8 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         ESP_LOGE( MINITOR_TAG, "Too many LINK_KEYs" );
 #endif
 
-        return -1;
+        ret = -1;
+        goto finish;
       }
 
       if ( memcmp( certificate->pubKey.buffer, peer_cert->pubKey.buffer, certificate->pubKey.length ) != 0 )
@@ -1768,10 +1368,11 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         ESP_LOGE( MINITOR_TAG, "Failed to match LINK_KEY with tls key" );
 #endif
 
-        return -1;
+        ret = -1;
+        goto finish;
       }
     }
-    else if ( ( (PayloadCerts*)certs_cell->payload )->certs[i]->cert_type == IDENTITY_CERT )
+    else if ( working_cert->cert_type == IDENTITY_CERT )
     {
       identity_count++;
 
@@ -1781,7 +1382,8 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         ESP_LOGE( MINITOR_TAG, "Too many IDENTITY_CERTs" );
 #endif
 
-        return -1;
+        ret = -1;
+        goto finish;
       }
 
       idx = 0;
@@ -1793,13 +1395,12 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         ESP_LOGE( MINITOR_TAG, "Failed to parse IDENTITY_CERT, error code: %d", wolf_succ );
 #endif
 
-        return -1;
+        ret = -1;
+        goto finish;
       }
 
       memcpy( responder_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
       *responder_rsa_identity_key_der_size = certificate->pubKey.length;
-
-      temp_array = malloc( sizeof( unsigned char ) * 128 );
 
       // verify the signatures on the keys
       wolf_succ = wc_RsaSSL_Verify(
@@ -1816,7 +1417,8 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         ESP_LOGE( MINITOR_TAG, "Failed to verify LINK_KEY signature, error code: %d", wolf_succ );
 #endif
 
-          return -1;
+        ret = -1;
+        goto finish;
       }
 
       wolf_succ = wc_RsaSSL_Verify(
@@ -1827,18 +1429,19 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
         &responder_rsa_identity_key
       );
 
-      free( temp_array );
-
       if ( wolf_succ <= 0 )
       {
 #ifdef DEBUG_MINITOR
         ESP_LOGE( MINITOR_TAG, "Failed to verify IDENTITY_CERT signature, error code: %d", wolf_succ );
 #endif
 
-          return -1;
+        ret = -1;
+        goto finish;
       }
     }
 
+    // advance to next cert, 3 is for the type and length
+    working_cert = (uint8_t*)working_cert + working_cert->cert_length + 3;
   }
 
   if ( link_key_count == 0 )
@@ -1847,7 +1450,7 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
     ESP_LOGE( MINITOR_TAG, "No LINK_KEYs" );
 #endif
 
-    return -1;
+    ret = -1;
   }
 
   if ( identity_count == 0 )
@@ -1856,14 +1459,23 @@ int d_verify_certs( Cell* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rs
     ESP_LOGE( MINITOR_TAG, "No IDENTITY_CERTs" );
 #endif
 
-    return -1;
+    ret = -1;
+  }
+
+finish:
+  if ( identity_count > 0 )
+  {
+    wolfSSL_X509_free( certificate );
+  }
+
+  if ( link_key_count > 0 )
+  {
+    wolfSSL_X509_free( link_key_certificate );
   }
 
   wc_FreeRsaKey( &responder_rsa_identity_key );
-  wolfSSL_X509_free( certificate );
-  wolfSSL_X509_free( link_key_certificate );
 
-  return 0;
+  return ret;
 }
 
 int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng )

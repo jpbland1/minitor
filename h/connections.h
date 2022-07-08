@@ -5,6 +5,7 @@
 #include "./structures/connections.h"
 
 extern SemaphoreHandle_t connections_mutex;
+extern SemaphoreHandle_t connection_access_mutex[16];
 extern DlConnection* connections;
 
 void v_cleanup_connection( DlConnection* dl_connection );

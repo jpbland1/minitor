@@ -44,8 +44,10 @@ TaskHandle_t connections_daemon_task_handle;
 struct pollfd connections_poll[16];
 DlConnection* connections;
 SemaphoreHandle_t connections_mutex;
+SemaphoreHandle_t connection_access_mutex[16];
 
-static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store ) {
+static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store )
+{
   if ( store->error == ASN_NO_SIGNER_E ) {
     return SSL_SUCCESS;
   }
@@ -70,6 +72,7 @@ void v_cleanup_connection( DlConnection* dl_connection )
     onion_message = malloc( sizeof( OnionMessage ) );
     onion_message->type = CONN_CLOSE;
     onion_message->data = dl_connection;
+
     wolfSSL_shutdown( dl_connection->ssl );
     wolfSSL_free( dl_connection->ssl );
 
@@ -91,15 +94,13 @@ void v_cleanup_connection( DlConnection* dl_connection )
 
   v_remove_connection_from_list( dl_connection, &connections );
 
-  vSemaphoreDelete( dl_connection->access_mutex );
-
   free( dl_connection );
 }
 
 static int d_recv_on_or_connection( DlConnection* or_connection )
 {
   int succ;
-  uint8_t* packed_cell;
+  uint8_t* cell;
   OnionMessage* onion_message;
 
   if ( ( or_connection->cell_ring_end + 1 ) % 20 == or_connection->cell_ring_start )
@@ -108,22 +109,16 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
     goto finish;
   }
 
-  // MUTEX TAKE
-  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-
   if ( or_connection->has_versions == false )
   {
-    succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, LEGACY_CIRCID_LEN );
+    succ = d_recv_cell( or_connection->ssl, &cell, LEGACY_CIRCID_LEN );
 
     or_connection->has_versions = true;
   }
   else
   {
-    succ = d_recv_packed_cell( or_connection->ssl, &packed_cell, CIRCID_LEN );
+    succ = d_recv_cell( or_connection->ssl, &cell, CIRCID_LEN );
   }
-
-  xSemaphoreGive( or_connection->access_mutex );
-  // MUTEX GIVE
 
   if ( succ <= 0 )
   {
@@ -131,7 +126,7 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
     goto finish;
   }
 
-  or_connection->cell_ring_buf[or_connection->cell_ring_end] = packed_cell;
+  or_connection->cell_ring_buf[or_connection->cell_ring_end] = cell;
 
   onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->data = or_connection;
@@ -139,7 +134,7 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
 
   if ( or_connection->status == CONNECTION_LIVE )
   {
-    onion_message->type = PACKED_CELL;
+    onion_message->type = TOR_CELL;
   }
   else
   {
@@ -167,13 +162,7 @@ static int d_recv_on_local_connection( DlConnection* local_connection )
   ( (ServiceTcpTraffic*)onion_message->data )->stream_id = local_connection->stream_id;
   ( (ServiceTcpTraffic*)onion_message->data )->data = malloc( sizeof( uint8_t ) * RELAY_PAYLOAD_LEN );
 
-  // MUTEX TAKE
-  xSemaphoreTake( local_connection->access_mutex, portMAX_DELAY );
-
   succ = recv( local_connection->sock_fd, ( (ServiceTcpTraffic*)onion_message->data )->data, sizeof( uint8_t ) * RELAY_PAYLOAD_LEN, 0 );
-
-  xSemaphoreGive( local_connection->access_mutex );
-  // MUTEX GIVE
 
   if ( succ <= 0 )
   {
@@ -214,6 +203,7 @@ static void v_connections_daemon( void* pv_parameters )
   int succ;
   int readable_bytes;
   uint8_t* rx_buffer;
+  SemaphoreHandle_t access_mutex;
   OnionMessage* onion_message;
   DlConnection* dl_connection;
   DlConnection* tmp_connection;
@@ -287,6 +277,11 @@ static void v_connections_daemon( void* pv_parameters )
 
     for ( i = i - 1; i >= 0; i-- )
     {
+      access_mutex = connection_access_mutex[ready_connections[i]->mutex_index];
+
+      // MUTEX TAKE
+      xSemaphoreTake( access_mutex, portMAX_DELAY );
+
       // because of how file descriptors in ssl are handled, we must read all the
       // current contents in 1 go, otherwise the ssl connection will pull the data
       // out of the file descriptor and the next poll will report no read ready
@@ -326,6 +321,9 @@ static void v_connections_daemon( void* pv_parameters )
         time( &now );
         ready_connections[i]->last_action = now;
       }
+
+      xSemaphoreGive( access_mutex );
+      // MUTEX GIVE
     }
 
     xSemaphoreGive( connections_mutex );
@@ -412,7 +410,6 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
   or_connection->address = address;
   or_connection->port = port;
   or_connection->ssl = ssl;
-  or_connection->access_mutex = xSemaphoreCreateMutex();
   or_connection->sock_fd = sock_fd;
   or_connection->is_or = 1;
 
@@ -434,6 +431,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     for ( i = 0; i < 16; i++ )
     {
       connections_poll[i].fd = -1;
+      connection_access_mutex[i] = xSemaphoreCreateMutex();
     }
   }
 
@@ -442,6 +440,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     if ( connections_poll[i].fd == -1 )
     {
       or_connection->poll_index = i;
+      or_connection->mutex_index = i;
       connections_poll[i].fd = sock_fd;
       connections_poll[i].events = POLLIN;
 
@@ -575,7 +574,6 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 
   local_connection->circ_id = circ_id;
   local_connection->stream_id = stream_id;
-  local_connection->access_mutex = xSemaphoreCreateMutex();
   local_connection->sock_fd = sock_fd;
   local_connection->is_or = 0;
   // set last action to uint max so it isn't killed before it can read (no one should be killed before they can read)
@@ -586,6 +584,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
     for ( i = 0; i < 16; i++ )
     {
       connections_poll[i].fd = -1;
+      connection_access_mutex[i] = xSemaphoreCreateMutex();
     }
   }
 
@@ -594,6 +593,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
     if ( connections_poll[i].fd == -1 )
     {
       local_connection->poll_index = i;
+      local_connection->mutex_index = i;
       connections_poll[i].fd = sock_fd;
       connections_poll[i].events = POLLIN;
 
@@ -647,22 +647,13 @@ int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t
   int ret = 0;
   DlConnection* local_connection;
 
-  // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
-
   local_connection = connections;
 
   while ( local_connection != NULL )
   {
     if ( local_connection->is_or == 0 && local_connection->circ_id == circ_id && local_connection->stream_id == stream_id )
     {
-      // MUTEX TAKE
-      xSemaphoreTake( local_connection->access_mutex, portMAX_DELAY );
-
       ret = send( local_connection->sock_fd, data, length, 0 );
-
-      xSemaphoreGive( local_connection->access_mutex );
-      // MUTEX GIVE
 
       break;
     }
@@ -674,9 +665,6 @@ int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t
   {
     ret = -1;
   }
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 
   return ret;
 }
@@ -710,9 +698,6 @@ void v_cleanup_local_connections_by_circ_id( uint32_t circ_id )
   DlConnection* local_connection;
   DlConnection* tmp_connection;
 
-  // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
-
   local_connection = connections;
 
   while ( local_connection != NULL )
@@ -728,18 +713,12 @@ void v_cleanup_local_connections_by_circ_id( uint32_t circ_id )
       local_connection = local_connection->next;
     }
   }
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 }
 
 bool b_verify_or_connection( DlConnection* or_connection )
 {
-  uint8_t ret = false;
+  bool ret = false;
   DlConnection* in_list;
-
-  // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
 
   in_list = connections;
 
@@ -747,15 +726,12 @@ bool b_verify_or_connection( DlConnection* or_connection )
   {
     if ( in_list->is_or == 1 && in_list == or_connection )
     {
-      ret = 1;
+      ret = true;
       break;
     }
 
     in_list = in_list->next;
   }
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 
   return ret;
 }
@@ -764,6 +740,7 @@ void v_dettach_connection( DlConnection* or_connection )
 {
   OnionCircuit* check_circuit;
   DlConnection* dl_connection;
+  SemaphoreHandle_t access_mutex;
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -802,7 +779,15 @@ void v_dettach_connection( DlConnection* or_connection )
 
     if ( dl_connection != NULL )
     {
-      v_cleanup_connection( or_connection );
+      access_mutex = connection_access_mutex[dl_connection->mutex_index];
+
+      // MUTEX TAKE
+      xSemaphoreTake( access_mutex, portMAX_DELAY );
+
+      v_cleanup_connection( dl_connection );
+
+      xSemaphoreGive( access_mutex );
+      // MUTEX GIVE
     }
 
     xSemaphoreGive( connections_mutex );

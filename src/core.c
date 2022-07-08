@@ -268,12 +268,11 @@ circuit_destroy:
   free( circuit );
 }
 
-static void v_handle_packed_cell( DlConnection* or_connection )
+static void v_handle_tor_cell( DlConnection* or_connection )
 {
   int succ;
-  uint32_t circ_id;
-  uint8_t* packed_cell;
-  Cell unpacked_cell;
+  int recv_index;
+  Cell* cell;
   OnionCircuit* working_circuit;
   OnionCircuit* tmp_circuit;
   OnionService* working_service;
@@ -281,27 +280,45 @@ static void v_handle_packed_cell( DlConnection* or_connection )
   OnionRelay* target_relay;
   OnionRelay* start_relay;
   DoublyLinkedOnionRelay* dl_relay;
+  SemaphoreHandle_t access_mutex = NULL;
+
+  // MUTEX TAKE
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
 
   if ( b_verify_or_connection( or_connection ) == false )
   {
+    xSemaphoreGive( connections_mutex );
+    // MUTEX GIVE
+
     return;
   }
 
-  packed_cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
+  access_mutex = connection_access_mutex[or_connection->mutex_index];
+
+  // MUTEX TAKE
+  xSemaphoreTake( access_mutex, portMAX_DELAY );
+
+  cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
   or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
 
-  circ_id = ((uint32_t)packed_cell[0]) << 24;
-  circ_id |= ((uint32_t)packed_cell[1]) << 16;
-  circ_id |= ((uint32_t)packed_cell[2]) << 8;
-  circ_id |= (packed_cell[3]);
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
+
+  if ( cell == NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+
+    return;
+  }
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
 
-  working_circuit = px_get_circuit_by_circ_id( onion_circuits, circ_id );
+  working_circuit = px_get_circuit_by_circ_id( onion_circuits, ntohl( cell->circ_id ) );
 
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
@@ -309,44 +326,52 @@ static void v_handle_packed_cell( DlConnection* or_connection )
   if ( working_circuit == NULL )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( CORE_TAG, "Discarding circuitless cell %d", circ_id );
+    ESP_LOGE( CORE_TAG, "Discarding circuitless cell %d", cell->circ_id );
 #endif
 
-    free( packed_cell );
+    free( cell );
+
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
 
     return;
   }
 
   time( &(working_circuit->last_action) );
 
-  // in manual mode, another task will handle the packed cell
-  if ( working_circuit->status == CIRCUIT_RENDEZVOUS )
+  if ( cell->command == RELAY )
   {
-    succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &working_circuit->relay_list, working_circuit->hs_crypto, &unpacked_cell.recv_index );
-  }
-  else
-  {
-    succ = d_decrypt_packed_cell( packed_cell, CIRCID_LEN, &working_circuit->relay_list, NULL, &unpacked_cell.recv_index );
-  }
+    if ( working_circuit->status == CIRCUIT_RENDEZVOUS )
+    {
+      succ = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, working_circuit->hs_crypto );
+    }
+    else
+    {
+      succ = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, NULL );
+    }
 
-  if ( succ < 0 )
-  {
+    if ( succ < 0 )
+    {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( CORE_TAG, "Failed to decrypt packed cell" );
+      ESP_LOGE( CORE_TAG, "Failed to decrypt packed cell" );
 #endif
 
-    free( packed_cell );
+      free( cell );
 
-    return;
+      xSemaphoreGive( access_mutex );
+      // MUTEX GIVE
+
+      return;
+    }
   }
 
-  // packed cell is freed here
-  unpack_and_free( &unpacked_cell, packed_cell, CIRCID_LEN );
+  // after decryption we need to change from network byte order to our byte order
+  v_hostize_cell( cell );
 
   // discard padding cell
-  if ( unpacked_cell.command == PADDING )
+  if ( cell->command == PADDING )
   {
-    free_cell( &unpacked_cell );
+    free( cell );
 
     return;
   }
@@ -355,15 +380,13 @@ static void v_handle_packed_cell( DlConnection* or_connection )
   {
     case CIRCUIT_CREATED:
       ESP_LOGE( CORE_TAG, "in created" );
-      if ( unpacked_cell.command != CREATED2 )
+      if ( cell->command != CREATED2 )
       {
         goto circuit_rebuild;
       }
 
-      if ( d_router_created2( working_circuit, &unpacked_cell ) < 0 )
+      if ( d_router_created2( working_circuit, cell ) < 0 )
       {
-        // prevent destroy function from freeing the handshake key again
-        working_circuit->status = CIRCUIT_CREATE;
         goto circuit_rebuild;
       }
 
@@ -391,19 +414,18 @@ static void v_handle_packed_cell( DlConnection* or_connection )
       break;
     case CIRCUIT_EXTENDED:
       ESP_LOGE( CORE_TAG, "in extended" );
-      if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_EXTENDED2 )
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_EXTENDED2 )
       {
         ESP_LOGE( CORE_TAG, "failed to get extended" );
         ESP_LOGE( CORE_TAG, "circ_id: %x", working_circuit->circ_id );
+        ESP_LOGE( CORE_TAG, "command: %x relay command: %x", cell->command, cell->payload.relay.relay_command );
         ESP_LOGE( CORE_TAG, "circuit: %d %d %d", working_circuit->relay_list.head->relay->or_port, working_circuit->relay_list.head->next->relay->or_port, working_circuit->relay_list.tail->relay->or_port );
         goto circuit_rebuild;
       }
 
-      if ( d_router_extended2( working_circuit, working_circuit->relay_list.built_length, &unpacked_cell ) < 0 )
+      if ( d_router_extended2( working_circuit, working_circuit->relay_list.built_length, cell ) < 0 )
       {
         ESP_LOGE( CORE_TAG, "failed to process extended" );
-        // prevent destroy function from freeing the handshake key again
-        working_circuit->status = CIRCUIT_CREATE;
         goto circuit_rebuild;
       }
 
@@ -451,11 +473,11 @@ static void v_handle_packed_cell( DlConnection* or_connection )
       break;
     case CIRCUIT_TRUNCATED:
       ESP_LOGE( CORE_TAG, "in truncated" );
-      if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_TRUNCATED )
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_TRUNCATED )
       {
         ESP_LOGE( CORE_TAG, "failed to recv truncated" );
-        ESP_LOGE( CORE_TAG, "command: %d", unpacked_cell.command );
-        ESP_LOGE( CORE_TAG, "command: %d", ( (PayloadRelay*)unpacked_cell.payload )->command );
+        ESP_LOGE( CORE_TAG, "command: %d", cell->command );
+        ESP_LOGE( CORE_TAG, "relay command: %d", cell->payload.relay.relay_command );
         goto circuit_rebuild;
       }
 
@@ -485,6 +507,11 @@ static void v_handle_packed_cell( DlConnection* or_connection )
 
           xSemaphoreGive( circuits_mutex );
           // MUTEX GIVE
+
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
 
           d_destroy_onion_circuit( working_circuit );
 
@@ -522,7 +549,7 @@ static void v_handle_packed_cell( DlConnection* or_connection )
       break;
     case CIRCUIT_INTRO_ESTABLISHED:
       ESP_LOGE( CORE_TAG, "in intro established" );
-      if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_COMMAND_INTRO_ESTABLISHED )
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_COMMAND_INTRO_ESTABLISHED )
       {
         goto circuit_rebuild;
       }
@@ -543,7 +570,7 @@ static void v_handle_packed_cell( DlConnection* or_connection )
       break;
     case CIRCUIT_HSDIR_CONNECTED:
       ESP_LOGE( CORE_TAG, "in hsdir connected" );
-      if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_CONNECTED )
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_CONNECTED )
       {
         goto circuit_rebuild;
       }
@@ -558,7 +585,7 @@ static void v_handle_packed_cell( DlConnection* or_connection )
       break;
     case CIRCUIT_HSDIR_DATA:
       ESP_LOGE( CORE_TAG, "in hsdir data" );
-      if ( unpacked_cell.command != RELAY || ( (PayloadRelay*)unpacked_cell.payload )->command != RELAY_DATA )
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_DATA )
       {
         ESP_LOGE( CORE_TAG, "failed to recv hsdir data response" );
         goto circuit_rebuild;
@@ -566,7 +593,7 @@ static void v_handle_packed_cell( DlConnection* or_connection )
 
       // TODO check actual response for success
 
-      ESP_LOGE( CORE_TAG, "%.*s\n", ( (PayloadRelay*)unpacked_cell.payload )->length, ( (RelayPayloadData*)( (PayloadRelay*)unpacked_cell.payload )->relay_payload )->payload );
+      ESP_LOGE( CORE_TAG, "%.*s\n", cell->payload.relay.length, cell->payload.relay.data );
 
       working_circuit->service->hsdir_sent++;
       working_circuit->target_relay_index++;
@@ -599,6 +626,11 @@ static void v_handle_packed_cell( DlConnection* or_connection )
           );
         }
 
+        xSemaphoreGive( access_mutex );
+        // MUTEX GIVE
+
+        access_mutex = NULL;
+
         d_destroy_onion_circuit( working_circuit );
 
         free( working_circuit );
@@ -616,6 +648,11 @@ static void v_handle_packed_cell( DlConnection* or_connection )
 
           xSemaphoreGive( circuits_mutex );
           // MUTEX GIVE
+
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
 
           d_destroy_onion_circuit( working_circuit );
 
@@ -649,12 +686,15 @@ static void v_handle_packed_cell( DlConnection* or_connection )
     case CIRCUIT_INTRO_LIVE:
     case CIRCUIT_RENDEZVOUS:
       ESP_LOGE( CORE_TAG, "Got a service cell" );
-      v_onion_service_handle_cell( working_circuit, &unpacked_cell );
+      // pass the access mutex on so it can be given on a cleanup event
+      v_onion_service_handle_cell( working_circuit, cell, access_mutex );
+
+      access_mutex = NULL;
 
       break;
     default:
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( CORE_TAG, "Got an unknown circuit status in v_handle_packed_cell" );
+      ESP_LOGE( CORE_TAG, "Got an unknown circuit status in v_handle_tor_cell" );
 #endif
       break;
   }
@@ -677,19 +717,30 @@ static void v_handle_packed_cell( DlConnection* or_connection )
   }
 
 
-  free_cell( &unpacked_cell );
+  free( cell );
+
+  if ( access_mutex != NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+  }
 
   return;
 
 circuit_rebuild:
-  free_cell( &unpacked_cell );
+  free( cell );
+
+  if ( access_mutex != NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+  }
 
   v_circuit_rebuild_or_destroy( working_circuit );
 }
 
 static void v_handle_service_tcp_data( ServiceTcpTraffic* tcp_traffic )
 {
-  Cell unpacked_cell;
   OnionCircuit* rend_circuit;
 
   // MUTEX TAKE
@@ -765,6 +816,21 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
   if ( d_prepare_onion_circuit( new_circuit, create_request->length, create_request->start_relay, create_request->end_relay ) < 0 )
   {
     goto fail;
+  }
+
+  {
+    DoublyLinkedOnionRelay* dl_relay;
+
+    dl_relay = new_circuit->relay_list.head;
+
+    while( dl_relay != NULL )
+    {
+      ESP_LOGE( CORE_TAG, "building with %d", dl_relay->relay->or_port );
+
+      dl_relay = dl_relay->next;
+    }
+
+    ESP_LOGE( CORE_TAG, "building to status %d", new_circuit->target_status );
   }
 
   succ = d_attach_or_connection( new_circuit->relay_list.head->relay->address, new_circuit->relay_list.head->relay->or_port, new_circuit );
@@ -883,13 +949,8 @@ static void v_handle_scheduled_consensus()
 
 static void v_keep_circuitlist_alive()
 {
-  int succ;
-  Cell padding_cell;
+  Cell* padding_cell;
   OnionCircuit* working_circuit;
-  unsigned char* packed_cell;
-
-  padding_cell.command = PADDING;
-  padding_cell.payload = NULL;
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -898,10 +959,14 @@ static void v_keep_circuitlist_alive()
 
   while ( working_circuit != NULL )
   {
-    padding_cell.circ_id = working_circuit->circ_id;
-    packed_cell = pack_and_free( &padding_cell );
 
-    if ( d_send_packed_cell_and_free( working_circuit->or_connection, packed_cell ) < 0 )
+    padding_cell = malloc( MINITOR_CELL_LEN );
+
+    padding_cell->command = PADDING;
+    padding_cell->circ_id = working_circuit->circ_id;
+    padding_cell->length = FIXED_CELL_HEADER_SIZE;
+
+    if ( d_send_cell_and_free( working_circuit->or_connection, padding_cell ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( CORE_TAG, "Failed to send padding cell on circ_id: %d", working_circuit->circ_id );
@@ -1071,31 +1136,53 @@ void v_handle_circuit_timeout()
 
 void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
 {
-  uint8_t* packed_cell;
+  Cell* cell;
+  SemaphoreHandle_t access_mutex = NULL;
+
+  // MUTEX TAKE
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
 
   if ( b_verify_or_connection( or_connection ) == false )
   {
+    xSemaphoreGive( connections_mutex );
+    // MUTEX GIVE
+
     return;
   }
 
-  packed_cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
+  access_mutex = connection_access_mutex[or_connection->mutex_index];
+
+  // MUTEX TAKE
+  xSemaphoreTake( access_mutex, portMAX_DELAY );
+
+  cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
   or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
 
-  // MUTEX TAKE
-  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
+
+  ESP_LOGE( CORE_TAG, "got handshake status %d %p", or_connection->status, cell );
+
+  if ( cell == NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+
+    return;
+  }
 
   switch ( or_connection->status )
   {
     case CONNECTION_WANT_VERSIONS:
-      if ( packed_cell[2] != VERSIONS )
+      if ( ((CellShortVariable*)cell)->command != VERSIONS )
       {
         goto fail;
       }
 
-      v_process_versions( or_connection, packed_cell, length );
+      v_process_versions( or_connection, cell, length );
 
       or_connection->status = CONNECTION_WANT_CERTS;
 
@@ -1103,8 +1190,8 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
     case CONNECTION_WANT_CERTS:
       if 
       (
-        packed_cell[4] != CERTS ||
-        d_process_certs( or_connection, packed_cell, length ) < 0
+        ((CellVariable*)cell)->command != CERTS ||
+        d_process_certs( or_connection, cell, length ) < 0
       )
       {
         goto fail;
@@ -1116,8 +1203,8 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
     case CONNECTION_WANT_CHALLENGE:
       if
       (
-        packed_cell[4] != AUTH_CHALLENGE ||
-        d_process_challenge( or_connection, packed_cell, length ) < 0
+        ((CellVariable*)cell)->command != AUTH_CHALLENGE ||
+        d_process_challenge( or_connection, cell, length ) < 0
       )
       {
         goto fail;
@@ -1129,8 +1216,8 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
     case CONNECTION_WANT_NETINFO:
       if
       (
-        packed_cell[4] != NETINFO ||
-        d_process_netinfo( or_connection, packed_cell ) < 0
+        cell->command != NETINFO ||
+        d_process_netinfo( or_connection, cell ) < 0
       )
       {
         goto fail;
@@ -1138,8 +1225,10 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
 
       or_connection->status = CONNECTION_LIVE;
 
-      xSemaphoreGive( or_connection->access_mutex );
+      xSemaphoreGive( access_mutex );
       // MUTEX GIVE
+
+      access_mutex = NULL;
 
       v_handle_conn_ready( or_connection );
 
@@ -1152,19 +1241,46 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
       break;
   }
 
-  if ( or_connection->status != CONNECTION_LIVE )
+  if ( access_mutex != NULL )
   {
-    xSemaphoreGive( or_connection->access_mutex );
+    xSemaphoreGive( access_mutex );
     // MUTEX GIVE
   }
+
+  free( cell );
 
   return;
 
 fail:
+  free( cell );
+
+  if ( access_mutex != NULL )
+  {
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+  }
+
+  // it may seem silly but we need to yeild and retake the access mutex since
+  // trying to take the connections_mutex while holding an access mutex could
+  // result in a double bind
   // MUTEX TAKE
   xSemaphoreTake( connections_mutex, portMAX_DELAY );
 
+  if ( b_verify_or_connection( or_connection ) == false )
+  {
+    xSemaphoreGive( connections_mutex );
+    // MUTEX GIVE
+
+    return;
+  }
+
+  // MUTEX TAKE
+  xSemaphoreTake( connection_access_mutex[or_connection->mutex_index], portMAX_DELAY );
+
   v_cleanup_connection( or_connection );
+
+  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+  // MUTEX TAKE
 
   xSemaphoreGive( connections_mutex );
   // MUTEX GIVE
@@ -1188,7 +1304,7 @@ void v_minitor_daemon( void* pv_parameters )
     switch ( onion_message->type )
     {
       case TIMER_CONSENSUS:
-        v_handle_scheduled_consensus();
+        //v_handle_scheduled_consensus();
         break;
       case TIMER_KEEPALIVE:
         v_keep_circuitlist_alive();
@@ -1205,8 +1321,8 @@ void v_minitor_daemon( void* pv_parameters )
       case INIT_CIRCUIT:
         v_init_circuit( onion_message->data );
         break;
-      case PACKED_CELL:
-        v_handle_packed_cell( onion_message->data );
+      case TOR_CELL:
+        v_handle_tor_cell( onion_message->data );
         break;
       case SERVICE_TCP_DATA:
         v_handle_service_tcp_data( onion_message->data );

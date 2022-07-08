@@ -36,6 +36,7 @@ typedef enum ConnectionStatus
 
 typedef struct DlConnection
 {
+  uint32_t conn_id;
   struct DlConnection* next;
   struct DlConnection* previous;
   ConnectionStatus status;
@@ -44,7 +45,7 @@ typedef struct DlConnection
   WOLFSSL* ssl;
   int sock_fd;
   int poll_index;
-  SemaphoreHandle_t access_mutex;
+  int mutex_index;
   uint32_t circ_id;
   uint16_t stream_id;
   time_t last_action;

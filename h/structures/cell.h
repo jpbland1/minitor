@@ -35,6 +35,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define TAP_C_HANDSHAKE_LEN DH_LEN+KEY_LEN+PK_PAD_LEN
 #define TAP_S_HANDSHAKE_LEN DH_LEN+HASH_LEN
 #define LEGACY_RENDEZVOUS_PAYLOAD_LEN 168
+#define FIXED_CELL_OFFSET 2
+#define MINITOR_CELL_LEN CELL_LEN + FIXED_CELL_OFFSET
+#define FIXED_CELL_HEADER_SIZE 5
+#define VARIABLE_CELL_HEADER_SIZE 7
+#define RELAY_CELL_HEADER_SIZE 11
 
 #define NTOR_HANDSHAKE_TAG "ntorNTORntorNTOR\0"
 
@@ -143,6 +148,11 @@ typedef enum HandshakeType {
   NTOR = 0x0002,
 } HandshakeType;
 
+typedef enum OnionKeyType
+{
+  ONION_NTOR = 1,
+};
+
 typedef enum MinitorCertType {
   LINK_KEY = 1,
   IDENTITY_CERT = 2,
@@ -163,28 +173,55 @@ typedef enum SendMeVersion {
   SENDME_AUTH = 0x01,
 } SendMeVersion;
 
-typedef struct Cell {
-  unsigned int circ_id;
-  Command command;
-  unsigned short length;
-  void* payload;
-  int recv_index;
-} Cell;
+typedef enum LinkSpecifierType {
+  IPv4Link = 0x00,
+  IPv6Link = 0x01,
+  LEGACYLink = 0x02,
+  EDLink = 0x03,
+} LinkSpecifierType;
 
-typedef struct Address {
-  AddressType address_type;
-  AddressLength length;
-  unsigned char* address;
-} Address;
+typedef enum RelayResolvedType {
+  Hostname = 0x00,
+  IPv4RelayResolved = 0x04,
+  IPv6RelayResolved = 0x06,
+  TrainsientError = 0xF0,
+  NonTrainsientError = 0xF1,
+} RelayResolvedType;
 
-typedef struct MinitorCert {
-  MinitorCertType cert_type;
-  unsigned short cert_length;
-  unsigned char* cert;
-} MinitorCert;
+typedef enum AuthKeyType {
+  EDSHA3 = 0x02,
+} AuthKeyType;
+
+typedef enum IntroExtensionType {
+  EXTENSION_ED25519 = 0x02,
+} IntroExtensionType;
+
+typedef enum EstablishIntroType {
+  ESTABLISH_INTRO_LEGACY = 0,
+  ESTABLISH_INTRO_CURRENT = 1,
+} EstablishIntroType;
+
+typedef enum IntroduceAckStatus {
+  Success = 0x0000,
+  Failure = 0x0001,
+  BadFormat = 0x0002,
+  CantRelay = 0x0003,
+} IntroduceAckStatus;
+
+typedef enum IntroduceOnionKeyType {
+    Ntor = 1,
+} IntroduceOnionKeyType;
+
+typedef struct __attribute__((__packed__)) TorCert
+{
+  uint8_t cert_type;
+  uint16_t cert_length;
+  uint8_t cert[];
+} TorCert;
 
 // Authentication
-typedef struct AuthenticationOne {
+typedef struct __attribute__((__packed__)) AuthenticationOne
+{
   // [0x41, 0x55, 0x54, 0x48, 0x30, 0x30, 0x30, 0x31],
   unsigned char type[8];
   unsigned char client_id[32];
@@ -197,7 +234,8 @@ typedef struct AuthenticationOne {
   unsigned char signature[128];
 } AuthenticationOne;
 
-typedef struct AuthenticationThree {
+typedef struct __attribute__((__packed__)) AuthenticationThree
+{
   // [0x41, 0x55, 0x54, 0x48, 0x30, 0x30, 0x30, 0x33],
   unsigned char type[8];
   unsigned char client_id[32];
@@ -212,6 +250,249 @@ typedef struct AuthenticationThree {
   unsigned char signature[128];
 } AuthenticationThree;
 
+typedef struct __attribute__((__packed__)) MyAddr
+{
+  uint8_t type;
+  uint8_t length;
+  uint8_t address[];
+} MyAddr;
+
+typedef struct __attribute__((__packed__)) LinkSpecifier
+{
+  uint8_t type;
+  uint8_t length;
+  uint8_t specifier[];
+} LinkSpecifier;
+
+typedef struct __attribute__((__packed__)) Create2
+{
+  uint16_t handshake_type;
+  uint16_t handshake_length;
+  uint8_t handshake_data[];
+} Create2;
+
+typedef struct __attribute__((__packed__)) Created2
+{
+  uint16_t handshake_length;
+  uint8_t handshake_data[];
+} Created2;
+
+typedef struct __attribute__((__packed__)) IntroExtension
+{
+  uint8_t intro_type;
+  uint8_t intro_length;
+  uint8_t extension_field[];
+} IntroExtension;
+
+typedef struct __attribute__((__packed__)) IntroOnionKey
+{
+  uint8_t onion_key_type;
+  uint16_t onion_key_length;
+  uint8_t onion_key[];
+} IntroOnionKey;
+
+typedef struct __attribute__((__packed__)) DecryptedIntroduce2
+{
+  uint8_t rendezvous_cookie[20];
+  uint8_t num_extensions;
+  uint8_t extensions[];
+} DecryptedIntroduce2;
+
+typedef union __attribute__((__packed__)) CellPayload
+{
+  struct __attribute__((__packed__))
+  {
+    uint8_t num_certs;
+    uint8_t certs[];
+  } certs;
+
+  struct __attribute__((__packed__))
+  {
+    uint8_t challenge[32];
+    uint16_t num_methods;
+    uint16_t methods[];
+  } auth_challenge;
+
+  struct __attribute__((__packed__))
+  {
+    uint16_t auth_type;
+    uint16_t auth_length;
+
+    union
+    {
+      AuthenticationOne auth_1;
+      AuthenticationThree auth_3;
+    };
+  } authenticate;
+
+  struct __attribute__((__packed__))
+  {
+    uint32_t time;
+
+    union
+    {
+      struct __attribute__((__packed__))
+      {
+        struct __attribute__((__packed__))
+        {
+          uint8_t type;
+          uint8_t length;
+          uint8_t address[4];
+        } otheraddr;
+
+        struct __attribute__((__packed__))
+        {
+          uint8_t num_myaddr;
+          uint8_t addresses[];
+        } myaddr;
+      } addresses_4;
+
+      struct __attribute__((__packed__))
+      {
+        struct __attribute__((__packed__))
+        {
+          uint8_t type;
+          uint8_t length;
+          uint8_t address[16];
+        } otheraddr;
+
+        struct __attribute__((__packed__))
+        {
+          uint8_t num_myaddr;
+          uint8_t addresses[];
+        } myaddr;
+      } addresses_6;
+    };
+  } netinfo;
+
+  Create2 create2;
+
+  Created2 created2;
+
+  struct __attribute__((__packed__))
+  {
+    uint8_t relay_command;
+    uint16_t recognized;
+    uint16_t stream_id;
+    uint32_t digest;
+    uint16_t length;
+
+    union
+    {
+      struct __attribute__((__packed__))
+      {
+        uint32_t address_4;
+
+        union
+        {
+          uint32_t ttl_4;
+
+          struct __attribute__((__packed__))
+          {
+            uint8_t address_type;
+            uint8_t address_6[16];
+            uint32_t ttl_6;
+          };
+        };
+      } connected;
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t num_specifiers;
+        uint8_t link_specifiers[];
+      } extend2;
+
+      Created2 extended2;
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t auth_key_type;
+        uint16_t auth_key_length;
+        uint8_t auth_key[];
+      } establish_intro;
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t legacy_key_id[20];
+        uint8_t auth_key_type;
+        uint16_t auth_key_length;
+        uint8_t auth_key[];
+      } introduce2;
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t rendezvous_cookie[20];
+        uint8_t public_key[PK_PUBKEY_LEN];
+        uint8_t auth[MAC_LEN];
+      } rend2;
+
+      uint8_t destroy_code;
+
+      uint8_t data[RELAY_PAYLOAD_LEN];
+    };
+  } relay;
+
+  uint8_t destroy_code;
+
+  uint16_t versions[PAYLOAD_LEN];
+
+  uint8_t data[PAYLOAD_LEN];
+} CellPayload;
+
+typedef struct __attribute__((__packed__)) CellShortVariable
+{
+  uint16_t circ_id;
+  uint8_t command;
+  uint16_t length;
+
+  CellPayload payload;
+} CellShortVariable;
+
+typedef struct __attribute__((__packed__)) CellVariable
+{
+  uint32_t circ_id;
+  uint8_t command;
+  uint16_t length;
+
+  CellPayload payload;
+} CellVariable;
+
+typedef struct __attribute__((__packed__)) Cell
+{
+  // length is above because it is not a part of the cell, it is for our tracking
+  // need to add 2 bytes when sending
+  uint16_t length;
+  uint32_t circ_id;
+  uint8_t command;
+
+  CellPayload payload;
+} Cell;
+
+/*
+typedef struct Cell {
+  unsigned int circ_id;
+  Command command;
+  unsigned short length;
+  void* payload;
+  int recv_index;
+} Cell;
+*/
+
+/*
+typedef struct Address {
+  AddressType address_type;
+  AddressLength length;
+  unsigned char* address;
+} Address;
+
+typedef struct MinitorCert {
+  MinitorCertType cert_type;
+  unsigned short cert_length;
+  unsigned char* cert;
+} MinitorCert;
+*/
+
+/*
 // Payload
 typedef struct PayloadPadding {
 } PayloadPadding;
@@ -300,35 +581,6 @@ typedef struct PayloadAuthenticate {
   void* authentication;
 } PayloadAuthenticate;
 
-typedef enum LinkSpecifierType {
-  IPv4Link = 0x00,
-  IPv6Link = 0x01,
-  LEGACYLink = 0x02,
-  EDLink = 0x03,
-} LinkSpecifierType;
-
-typedef struct LinkSpecifier {
-  LinkSpecifierType type;
-  unsigned char length;
-  unsigned char* specifier;
-} LinkSpecifier;
-
-typedef enum RelayResolvedType {
-  Hostname = 0x00,
-  IPv4RelayResolved = 0x04,
-  IPv6RelayResolved = 0x06,
-  TrainsientError = 0xF0,
-  NonTrainsientError = 0xF1,
-} RelayResolvedType;
-
-typedef enum AuthKeyType {
-  EDSHA3 = 0x02,
-} AuthKeyType;
-
-typedef enum IntroExtensionType {
-  EXTENSION_ED25519 = 0x02,
-} IntroExtensionType;
-
 typedef struct IntroExtensionFieldEd25519 {
   unsigned char nonce[16];
   unsigned char pubkey[32];
@@ -340,11 +592,6 @@ typedef struct IntroExtension {
   unsigned char length;
   void* intro_extension_field;
 } IntroExtension;
-
-typedef enum EstablishIntroType {
-  ESTABLISH_INTRO_LEGACY = 0,
-  ESTABLISH_INTRO_CURRENT = 1,
-} EstablishIntroType;
 
 typedef struct EstablishIntroLegacy {
   unsigned short key_length;
@@ -366,21 +613,10 @@ typedef struct EstablishIntroCurrent {
   unsigned char* signature;
 } EstablishIntroCurrent;
 
-typedef enum IntroduceAckStatus {
-  Success = 0x0000,
-  Failure = 0x0001,
-  BadFormat = 0x0002,
-  CantRelay = 0x0003,
-} IntroduceAckStatus;
-
 typedef struct RendezvousHandshakeInfo {
   unsigned char public_key[PK_PUBKEY_LEN];
   unsigned char auth[MAC_LEN];
 } RendezvousHandshakeInfo;
-
-typedef enum IntroduceOnionKeyType {
-    Ntor = 1,
-} IntroduceOnionKeyType;
 
 // RelayPayload
 typedef struct RelayPayloadExtend2 {
@@ -519,5 +755,6 @@ void pack_buffer( unsigned char** packed_cell, unsigned char* buffer, int length
 void pack_buffer_short( unsigned char** packed_cell, unsigned short* buffer, int length );
 
 void v_free_introduce_2_data( DecryptedIntroduce2* unpacked_data );
+*/
 
 #endif

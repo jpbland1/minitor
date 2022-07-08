@@ -30,27 +30,287 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/cell.h"
 #include "../h/structures/onion_message.h"
 
-int d_send_packed_cell_and_free( DlConnection* or_connection, unsigned char* packed_cell )
+void v_hostize_variable_short_cell( CellShortVariable* cell )
+{
+  int i;
+
+  cell->circ_id = ntohs( cell->circ_id );
+  cell->length = ntohs( cell->length );
+
+  switch ( cell->command )
+  {
+    case VERSIONS:
+      for ( i = 0; i < cell->length / 2; i++ )
+      {
+        cell->payload.versions[i] = ntohs( cell->payload.versions[i] );
+      }
+
+      break;
+
+    default:
+      break;
+  }
+}
+
+void v_hostize_variable_cell( CellVariable* cell )
+{
+  int i;
+  TorCert* cert;
+
+  cell->circ_id = ntohl( cell->circ_id );
+  cell->length = ntohs( cell->length );
+
+  switch ( cell->command )
+  {
+    case CERTS:
+      cert = cell->payload.certs.certs;
+
+      for ( i = 0; i < cell->payload.certs.num_certs; i++ )
+      {
+        // cert length
+        cert->cert_length = ntohs( cert->cert_length );
+
+        cert = (uint8_t*)cert + 3 + cert->cert_length;
+      }
+
+      break;
+
+    case AUTH_CHALLENGE:
+      cell->payload.auth_challenge.num_methods = ntohs( cell->payload.auth_challenge.num_methods );
+
+      for ( i = 0; i < cell->payload.auth_challenge.num_methods; i++ )
+      {
+        cell->payload.auth_challenge.methods[i] = ntohs( cell->payload.auth_challenge.methods[i] );
+      }
+
+      break;
+
+    default:
+      break;
+  }
+}
+
+void v_hostize_cell( Cell* cell )
+{
+  cell->circ_id = ntohl( cell->circ_id );
+
+  switch ( cell->command )
+  {
+    case RELAY:
+      cell->payload.relay.stream_id = ntohs( cell->payload.relay.stream_id );
+      cell->payload.relay.length = ntohs( cell->payload.relay.length );
+
+      switch ( cell->payload.relay.relay_command )
+      {
+        case RELAY_BEGIN:
+          // flags of relay_begin are after the address string
+          ((uint32_t*)cell->payload.relay.data + strlen( (char*)cell->payload.relay.data ) + 1)[0] = ntohl(((uint32_t*)cell->payload.relay.data + strlen( (char*)cell->payload.relay.data ) + 1)[0]);
+
+          break;
+
+        case RELAY_CONNECTED:
+          if ( cell->payload.relay.connected.address_4 != 0 )
+          {
+            cell->payload.relay.connected.ttl_4 = ntohl( cell->payload.relay.connected.ttl_4 );
+          }
+          else if ( cell->payload.relay.connected.address_type == 6 )
+          {
+            cell->payload.relay.connected.ttl_6 = ntohl( cell->payload.relay.connected.ttl_6 );
+          }
+
+          break;
+
+        case RELAY_EXTENDED2:
+          cell->payload.relay.extended2.handshake_length = ntohs( cell->payload.relay.extended2.handshake_length );
+
+          break;
+
+        case RELAY_COMMAND_INTRODUCE2:
+          cell->payload.relay.introduce2.auth_key_length = ntohs( cell->payload.relay.introduce2.auth_key_length );
+
+          break;
+
+        default:
+          break;
+      }
+
+      break;
+
+    case NETINFO:
+      cell->payload.netinfo.time = ntohl( cell->payload.netinfo.time );
+
+      break;
+
+    case CREATED2:
+      cell->payload.created2.handshake_length = ntohs( cell->payload.created2.handshake_length );
+
+      break;
+
+    default:
+      break;
+  }
+}
+
+void v_networkize_variable_short_cell( CellShortVariable* cell )
+{
+  int i;
+
+  switch ( cell->command )
+  {
+    case VERSIONS:
+      for ( i = 0; i < cell->length / 2; i++ )
+      {
+        cell->payload.versions[i] = htons( cell->payload.versions[i] );
+      }
+
+      break;
+  }
+
+  cell->circ_id = htons( cell->circ_id );
+  cell->length = htons( cell->length );
+}
+
+void v_networkize_variable_cell ( CellVariable* cell )
+{
+  int i;
+  int length;
+  TorCert* cert;
+
+  switch ( cell->command )
+  {
+    case AUTHENTICATE:
+      cell->payload.authenticate.auth_type = htons( cell->payload.authenticate.auth_type );
+      cell->payload.authenticate.auth_length = htons( cell->payload.authenticate.auth_length );
+
+      break;
+
+    case CERTS:
+      cert = cell->payload.certs.certs;
+
+      for ( i = 0; i < cell->payload.certs.num_certs; i++ )
+      {
+        length = cert->cert_length;
+        cert->cert_length = htons( cert->cert_length );
+
+        cert = (uint8_t*)cert + 3 + length;
+      }
+
+      break;
+
+    default:
+      break;
+  }
+
+  cell->circ_id = htonl( cell->circ_id );
+  cell->length = htons( cell->length );
+}
+
+void v_networkize_cell( Cell* cell )
+{
+  int i;
+  uint8_t* tmp_p;
+  Create2* create2;
+
+  switch ( cell->command )
+  {
+    case RELAY:
+    case RELAY_EARLY:
+      cell->payload.relay.stream_id = htons( cell->payload.relay.stream_id );
+      cell->payload.relay.length = htons( cell->payload.relay.length );
+
+      switch ( cell->payload.relay.relay_command )
+      {
+        case RELAY_CONNECTED:
+          if ( cell->payload.relay.connected.address_4 != 0 )
+          {
+            cell->payload.relay.connected.ttl_4 = htonl( cell->payload.relay.connected.ttl_4 );
+          }
+          else if ( cell->payload.relay.connected.address_type == 6 )
+          {
+            cell->payload.relay.connected.ttl_6 = htonl( cell->payload.relay.connected.ttl_6 );
+          }
+
+          break;
+        case RELAY_EXTEND2:
+          tmp_p = cell->payload.relay.extend2.link_specifiers;
+
+          // skip over the link specifiers
+          for ( i = 0; i < cell->payload.relay.extend2.num_specifiers; i++ )
+          {
+            tmp_p += tmp_p[1] + 2;
+          }
+
+          create2 = tmp_p;
+
+          create2->handshake_type = htons( create2->handshake_type );
+          create2->handshake_length = htons( create2->handshake_length );
+
+          break;
+        case RELAY_COMMAND_ESTABLISH_INTRO:
+          // this has already been networkized for the handshake auth, need to hostize it for this
+          tmp_p = cell->payload.relay.establish_intro.auth_key + ntohs( cell->payload.relay.establish_intro.auth_key_length ) + 1;
+
+          // extensions
+          for ( i = 0; i < cell->payload.relay.establish_intro.auth_key[ntohs( cell->payload.relay.establish_intro.auth_key_length )]; i++ )
+          {
+            if ( tmp_p[0] == EXTENSION_ED25519 )
+            {
+              tmp_p += 16 + 32 + 64;
+            }
+          }
+
+          tmp_p += MAC_LEN;
+
+          // signature length
+          ((uint16_t*)tmp_p)[0] = htons( ((uint16_t*)tmp_p)[0] );
+
+          // auth key length needs to be hostized before the signature is created, and before this function is called
+          //cell->payload.relay.establish_intro.auth_key_length = htons( cell->payload.relay.establish_intro.auth_key_length );
+
+          break;
+        default:
+          //ESP_LOGE( MINITOR_TAG, "unhandled relay command %d", cell->payload.relay.relay_command );
+          break;
+      }
+
+      break;
+
+    case NETINFO:
+      cell->payload.netinfo.time = htonl( cell->payload.netinfo.time );
+
+      break;
+
+    case CREATE2:
+      cell->payload.create2.handshake_type = htons( cell->payload.create2.handshake_type );
+      cell->payload.create2.handshake_length = htons( cell->payload.create2.handshake_length );
+      
+      break;
+
+    default:
+      //ESP_LOGE( MINITOR_TAG, "unhandled command %d", cell->command );
+
+      break;
+  }
+
+  cell->circ_id = htonl( cell->circ_id );
+
+  if ( ( cell->command == RELAY || cell->command == RELAY_EARLY ) && cell->payload.relay.relay_command != RELAY_BEGIN_DIR )
+  {
+    esp_fill_random( (uint8_t*)cell + FIXED_CELL_OFFSET + cell->length, CELL_LEN - cell->length );
+  }
+  else
+  {
+    memset( (uint8_t*)cell + FIXED_CELL_OFFSET + cell->length, 0, CELL_LEN - cell->length );
+  }
+}
+
+int d_send_cell_and_free( DlConnection* or_connection, Cell* cell )
 {
   int succ;
 
-  if ( b_verify_or_connection( or_connection ) == false )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
-#endif
+  v_networkize_cell( cell );
 
-    succ = -1;
-    goto finish;
-  }
-
-  // MUTEX TAKE
-  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-
-  succ = wolfSSL_send( or_connection->ssl, packed_cell, CELL_LEN, 0 );
-
-  xSemaphoreGive( or_connection->access_mutex );
-  // MUTEX GIVE
+  succ = wolfSSL_send( or_connection->ssl, (uint8_t*)cell + FIXED_CELL_OFFSET, CELL_LEN, 0 );
 
   if ( succ < 0 )
   {
@@ -59,19 +319,20 @@ int d_send_packed_cell_and_free( DlConnection* or_connection, unsigned char* pac
 #endif
   }
 
-finish:
-  free( packed_cell );
+  free( cell );
 
   return succ;
 }
 
-int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned char* packed_cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto )
+int d_send_relay_cell_and_free( DlConnection* or_connection, Cell* cell, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto )
 {
   int ret = 0;
   int i;
   int succ;
   unsigned char tmp_digest[WC_SHA3_256_DIGEST_SIZE];
   DoublyLinkedOnionRelay* db_relay = relay_list->head;
+
+  v_networkize_cell( cell );
 
   for ( i = 0; i < relay_list->built_length - 1; i++ )
   {
@@ -80,21 +341,22 @@ int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned cha
 
   if ( hs_crypto == NULL )
   {
-    wc_ShaUpdate( &db_relay->relay_crypto->running_sha_forward, packed_cell + 5, PAYLOAD_LEN );
+    wc_ShaUpdate( &db_relay->relay_crypto->running_sha_forward, cell->payload.data, PAYLOAD_LEN );
     wc_ShaGetHash( &db_relay->relay_crypto->running_sha_forward, tmp_digest );
   }
   else
   {
-    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, packed_cell + 5, PAYLOAD_LEN );
+    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, cell->payload.data, PAYLOAD_LEN );
     wc_Sha3_256_GetHash( &hs_crypto->hs_running_sha_backward, tmp_digest );
   }
 
-  memcpy( packed_cell + 10, tmp_digest, 4 );
+  // TODO verify this is at + 10
+  memcpy( &(cell->payload.relay.digest), tmp_digest, 4 );
 
   // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
   for ( i = relay_list->built_length - 1; i >= 0; i-- )
   {
-    succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+    succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_forward, cell->payload.data, cell->payload.data, PAYLOAD_LEN );
 
     if ( succ < 0 )
     {
@@ -111,7 +373,7 @@ int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned cha
 
   if ( hs_crypto != NULL )
   {
-    succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_backward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+    succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_backward, cell->payload.data, cell->payload.data, PAYLOAD_LEN );
 
     if ( succ < 0 ) {
 #ifdef DEBUG_MINITOR
@@ -123,24 +385,8 @@ int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned cha
     }
   }
 
-  if ( b_verify_or_connection( or_connection ) == false )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
-#endif
-
-    ret = -1;
-    goto finish;
-  }
-
-  // MUTEX TAKE
-  xSemaphoreTake( or_connection->access_mutex, portMAX_DELAY );
-
   // send the RELAY_EARLY to the first node in the circuit
-  succ = wolfSSL_send( or_connection->ssl, packed_cell, CELL_LEN, 0 );
-
-  xSemaphoreGive( or_connection->access_mutex );
-  // MUTEX GIVE
+  succ = wolfSSL_send( or_connection->ssl, (uint8_t*)cell + FIXED_CELL_OFFSET, CELL_LEN, 0 );
 
   if ( succ < 0 )
   {
@@ -153,88 +399,14 @@ int d_send_packed_relay_cell_and_free( DlConnection* or_connection, unsigned cha
   }
 
 finish:
-  free( packed_cell );
+  free( cell );
 
   return ret;
 }
 
-// recv a cell from our or connection
-/*
-int d_recv_cell( OnionCircuit* circuit, Cell* unpacked_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, Sha256* sha, HsCrypto* hs_crypto )
+int d_recv_cell( WOLFSSL* ssl, uint8_t** cell, int circ_id_length )
 {
-  int retry;
-  int succ;
-  uint8_t* packed_cell;
-
-  // retry in case we killed a final relay before processing a RELAY_END
-  for ( retry = 3; retry > 0; retry-- )
-  {
-//
-    // MUTEX TAKE
-    xSemaphoreTake( or_connections_mutex, portMAX_DELAY );
-
-    succ = b_verify_or_connection( circuit->or_connection, &or_connections );
-
-    xSemaphoreGive( or_connections_mutex );
-    // MUTEX GIVE
-
-    if ( succ == 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Inavlid or_connection, bailing" );
-#endif
-
-      return -1;
-    }
-//
-
-    succ = xQueueReceive( circuit->rx_queue, &packed_cell, 1000 * 10 / portTICK_PERIOD_MS );
-
-    if ( succ == pdFALSE || packed_cell == NULL )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to recv packed cell" );
-#endif
-
-      if ( packed_cell != NULL )
-      {
-        free( packed_cell );
-      }
-
-      return -1;
-    }
-
-    if ( d_decrypt_packed_cell( packed_cell, circ_id_length, relay_list, hs_crypto, &unpacked_cell->recv_index ) < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "failed to decrypt packed cell" );
-#endif
-
-      free( onion_message->data );
-      free( onion_message );
-
-      continue;
-    }
-
-    if ( sha != NULL )
-    {
-      wc_Sha256Update( sha, packed_cell, onion_message->length );
-    }
-
-    free( onion_message );
-
-    // set the unpacked cell and return success
-    unpack_and_free( unpacked_cell, packed_cell, circ_id_length );
-
-    return 0;
-  }
-
-  return -1;
-}
-*/
-
-int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_length )
-{
+  int i;
   int rx_length;
   int rx_length_total = 0;
   // length of the header may change if we run into a variable length cell
@@ -248,7 +420,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
   // initially just make the packed cell big enough for a standard header,
   // we'll realloc it later
-  *packed_cell = malloc( CELL_LEN );
+  *cell = malloc( CELL_LEN );
   //*packed_cell = malloc( header_length );
 
   while ( 1 )
@@ -257,11 +429,11 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // the cell or the length of the header
     if ( rx_limit - rx_length_total > CELL_LEN )
     {
-      rx_length = wolfSSL_recv( ssl, *packed_cell + rx_length_total, CELL_LEN, 0 );
+      rx_length = wolfSSL_recv( ssl, *cell + rx_length_total, CELL_LEN, 0 );
     }
     else
     {
-      rx_length = wolfSSL_recv( ssl, *packed_cell + rx_length_total, rx_limit - rx_length_total, 0 );
+      rx_length = wolfSSL_recv( ssl, *cell + rx_length_total, rx_limit - rx_length_total, 0 );
     }
 
     // if rx_length is 0 then we've hit an error and should return -1
@@ -271,7 +443,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
       ESP_LOGE( MINITOR_TAG, "Failed to wolfSSL_recv rx_length: %d, error code: %d", rx_length, wolfSSL_get_error( ssl, rx_length ) );
 #endif
 
-      free( *packed_cell );
+      free( *cell );
 
       return -1;
     }
@@ -286,7 +458,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     // header length to include the length field
     if ( rx_length_total == circ_id_length + 1 )
     {
-      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING )
+      if ( (*cell)[circ_id_length] == VERSIONS || (*cell)[circ_id_length] >= VPADDING )
       {
         header_length = circ_id_length + 3;
         rx_limit = header_length;
@@ -299,10 +471,10 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     if ( rx_length_total == header_length )
     {
       // set the rx_limit to the length of the cell
-      if ( (*packed_cell)[circ_id_length] == VERSIONS || (*packed_cell)[circ_id_length] >= VPADDING )
+      if ( (*cell)[circ_id_length] == VERSIONS || (*cell)[circ_id_length] >= VPADDING )
       {
-        length = ( (unsigned short)(*packed_cell)[circ_id_length + 1] ) << 8;
-        length |= (unsigned short)(*packed_cell)[circ_id_length + 2];
+        length = ( (unsigned short)(*cell)[circ_id_length + 1] ) << 8;
+        length |= (unsigned short)(*cell)[circ_id_length + 2];
         rx_limit = header_length + length;
       }
       else
@@ -312,7 +484,7 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
 
       if ( rx_limit > CELL_LEN )
       {
-        *packed_cell = realloc( *packed_cell, rx_limit );
+        *cell = realloc( *cell, rx_limit );
       }
     }
 
@@ -325,10 +497,23 @@ int d_recv_packed_cell( WOLFSSL* ssl, unsigned char** packed_cell, int circ_id_l
     }
   }
 
+  if ( circ_id_length == CIRCID_LEN && (*cell)[circ_id_length] != VERSIONS && (*cell)[circ_id_length] < VPADDING )
+  {
+    *cell = realloc( *cell, MINITOR_CELL_LEN );
+
+    i = MINITOR_CELL_LEN;
+    i = ( i / 2 ) - 1;
+
+    for ( ; i > 0; i-- )
+    {
+      ((uint16_t*)(*cell))[i] = ((uint16_t*)(*cell))[i - 1];
+    }
+  }
+
   return rx_limit;
 }
 
-int d_decrypt_packed_cell( uint8_t* packed_cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto, int* recv_index )
+int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* relay_list, HsCrypto* hs_crypto )
 {
   int i;
   int wolf_succ;
@@ -340,111 +525,116 @@ int d_decrypt_packed_cell( uint8_t* packed_cell, int circ_id_length, DoublyLinke
   unsigned char tmp_sha3_digest[WC_SHA3_256_DIGEST_SIZE];
   int fully_recognized = 0;
 
-  if ( packed_cell[circ_id_length] == RELAY )
+  if ( cell->command != RELAY )
   {
-    if ( relay_list == NULL )
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, cell was not relay %d", cell->command );
+#endif
+
+    return -1;
+  }
+
+  if ( relay_list == NULL )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
+#endif
+
+    return -1;
+  }
+
+  db_relay = relay_list->head;
+  //wc_InitSha( &tmp_sha );
+
+  for ( i = 0; i < relay_list->built_length; i++ )
+  {
+    wolf_succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_backward, cell->payload.data, cell->payload.data, PAYLOAD_LEN );
+
+    if ( wolf_succ < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
+      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
 #endif
 
       return -1;
     }
 
-    db_relay = relay_list->head;
-    //wc_InitSha( &tmp_sha );
-
-    for ( i = 0; i < relay_list->built_length; i++ )
+    if ( cell->payload.relay.recognized == 0 )
     {
-      wolf_succ = wc_AesCtrEncrypt( &db_relay->relay_crypto->aes_backward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+      wc_ShaCopy( &db_relay->relay_crypto->running_sha_backward, &tmp_sha );
 
-      if ( wolf_succ < 0 )
+      // before digest
+      wc_ShaUpdate( &tmp_sha, (uint8_t*)(&cell->payload), 5 );
+      // zeros in lieu of the digest
+      wc_ShaUpdate( &tmp_sha, zeros, 4 );
+      wc_ShaUpdate( &tmp_sha, (uint8_t*)(&cell->payload.relay.length), PAYLOAD_LEN - 9 );
+      wc_ShaGetHash( &tmp_sha, tmp_digest );
+
+      if ( memcmp( tmp_digest, (uint8_t*)(&cell->payload.relay.digest), 4 ) == 0 )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
-#endif
-
-        return -1;
+        //wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
+        wc_ShaCopy( &tmp_sha, &db_relay->relay_crypto->running_sha_backward );
+        fully_recognized = 1;
+        break;
       }
-
-      if ( packed_cell[6] == 0 && packed_cell[7] == 0 )
-      {
-        wc_ShaCopy( &db_relay->relay_crypto->running_sha_backward, &tmp_sha );
-
-        wc_ShaUpdate( &tmp_sha, packed_cell + 5, 5 );
-        wc_ShaUpdate( &tmp_sha, zeros, 4 );
-        wc_ShaUpdate( &tmp_sha, packed_cell + 14, PAYLOAD_LEN - 9 );
-        wc_ShaGetHash( &tmp_sha, tmp_digest );
-
-        if ( memcmp( tmp_digest, packed_cell + 10, 4 ) == 0 )
-        {
-          //wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
-          wc_ShaCopy( &tmp_sha, &db_relay->relay_crypto->running_sha_backward );
-          fully_recognized = 1;
-          break;
-        }
-      }
-
-      db_relay = db_relay->next;
     }
 
-    // set the recv_index so we know which node in the circuit sent the cell
-    *recv_index = i;
+    db_relay = db_relay->next;
+  }
 
-    if ( !fully_recognized && hs_crypto == NULL )
+  if ( !fully_recognized && hs_crypto == NULL )
+  {
+#ifdef DEBUG_MINITOR
+    ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on circuit" );
+#endif
+    wc_ShaFree( &tmp_sha );
+
+    return -1;
+  }
+  else if ( !fully_recognized && hs_crypto != NULL )
+  {
+    wolf_succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_forward, (uint8_t*)(&cell->payload), (uint8_t*)(&cell->payload), PAYLOAD_LEN );
+
+    if ( wolf_succ < 0 )
     {
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on circuit" );
+      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
 #endif
-      wc_ShaFree( &tmp_sha );
 
       return -1;
     }
-    else if ( !fully_recognized && hs_crypto != NULL )
+
+    if ( cell->payload.relay.recognized == 0 )
     {
-      wolf_succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_forward, packed_cell + 5, packed_cell + 5, PAYLOAD_LEN );
+      wc_Sha3_256_Copy( &hs_crypto->hs_running_sha_forward, &tmp_sha3 );
 
-      if ( wolf_succ < 0 )
+      wc_Sha3_256_Update( &tmp_sha3, (uint8_t*)(&cell->payload), 5 );
+      wc_Sha3_256_Update( &tmp_sha3, zeros, 4 );
+      wc_Sha3_256_Update( &tmp_sha3, (uint8_t*)(&cell->payload.relay.length), PAYLOAD_LEN - 9 );
+      wc_Sha3_256_GetHash( &tmp_sha3, tmp_sha3_digest );
+
+      if ( memcmp( tmp_sha3_digest, (uint8_t*)(&cell->payload.relay.digest), 4 ) == 0 )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
-#endif
-
-        return -1;
-      }
-
-      if ( packed_cell[6] == 0 && packed_cell[7] == 0 )
-      {
-        wc_Sha3_256_Copy( &hs_crypto->hs_running_sha_forward, &tmp_sha3 );
-
-        wc_Sha3_256_Update( &tmp_sha3, packed_cell + 5, 5 );
-        wc_Sha3_256_Update( &tmp_sha3, zeros, 4 );
-        wc_Sha3_256_Update( &tmp_sha3, packed_cell + 14, PAYLOAD_LEN - 9 );
-        wc_Sha3_256_GetHash( &tmp_sha3, tmp_sha3_digest );
-
-        if ( memcmp( tmp_sha3_digest, packed_cell + 10, 4 ) == 0 )
-        {
-          wc_Sha3_256_Free( &hs_crypto->hs_running_sha_forward );
-          wc_Sha3_256_Copy( &tmp_sha3, &hs_crypto->hs_running_sha_forward );
-        }
-        else
-        {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on hidden service" );
-#endif
-          wc_Sha3_256_Free( &tmp_sha3 );
-
-          return -1;
-        }
+        wc_Sha3_256_Free( &hs_crypto->hs_running_sha_forward );
+        wc_Sha3_256_Copy( &tmp_sha3, &hs_crypto->hs_running_sha_forward );
       }
       else
       {
 #ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Cell recognized not set to 0" );
+        ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on hidden service" );
 #endif
+        wc_Sha3_256_Free( &tmp_sha3 );
 
         return -1;
       }
+    }
+    else
+    {
+#ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Cell recognized not set to 0" );
+#endif
+
+      return -1;
     }
   }
 
