@@ -17,10 +17,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/hash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 #include "../include/config.h"
 #include "../h/onion_service.h"
@@ -34,7 +34,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/models/relay.h"
 #include "../h/models/revision_counter.h"
 
-void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTraffic* tcp_traffic )
+void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, DlConnection* or_connection, ServiceTcpTraffic* tcp_traffic )
 {
   int i;
   Cell* relay_cell;
@@ -65,7 +65,7 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTra
 
   relay_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + relay_cell->payload.relay.length;
 
-  if ( d_send_relay_cell_and_free( circuit->or_connection, relay_cell, &circuit->relay_list, circuit->hs_crypto ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, relay_cell, &circuit->relay_list, circuit->hs_crypto ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA" );
@@ -73,14 +73,18 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, ServiceTcpTra
   }
 }
 
-void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, SemaphoreHandle_t access_mutex )
+// at this point we have a lock on the connection access mutex
+void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connection, Cell* relay_cell )
 {
+  SemaphoreHandle_t access_mutex;
+
+  access_mutex = connection_access_mutex[or_connection->mutex_index];
+
   switch( relay_cell->command )
   {
     case RELAY:
       switch( relay_cell->payload.relay.relay_command )
       {
-        // TODO when a relay_begin comes in, create a task to block on the local tcp stream
         case RELAY_BEGIN:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_BEGIN!" );
 
@@ -89,7 +93,7 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
 
           access_mutex = NULL;
 
-          if ( d_onion_service_handle_relay_begin( circuit, relay_cell ) < 0 )
+          if ( d_onion_service_handle_relay_begin( circuit, or_connection, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
@@ -97,7 +101,6 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
           }
 
           break;
-        // TODO when a relay_data comes in, send the data to the local tcp stream
         case RELAY_DATA:
           ESP_LOGE( MINITOR_TAG, "Got a RELAY_DATA!" );
           if
@@ -135,7 +138,7 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
 
           access_mutex = NULL;
 
-          if ( d_onion_service_handle_relay_truncated( circuit, relay_cell ) < 0 )
+          if ( d_onion_service_handle_relay_truncated( circuit, or_connection, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
             ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_END cell" );
@@ -148,6 +151,11 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
           break;
         // when an intro request comes in, respond to it
         case RELAY_COMMAND_INTRODUCE2:
+          xSemaphoreGive( access_mutex );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
+
           if ( d_onion_service_handle_introduce_2( circuit, relay_cell ) < 0 )
           {
 #ifdef DEBUG_MINITOR
@@ -163,7 +171,6 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
       }
 
       break;
-    // TODO when a destroy comes in close and clean the circuit and local tcp stream
     default:
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Unequiped to handle cell command %d", relay_cell->command );
@@ -177,7 +184,7 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, Cell* relay_cell, Semap
   }
 }
 
-int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* begin_cell )
+int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection* or_connection, Cell* begin_cell )
 {
   int i;
   int ret = 0;
@@ -234,24 +241,13 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* begin_
 
   // re-aquire our connection lock
   // MUTEX TAKE
-  ESP_LOGE( MINITOR_TAG, "pre service take" );
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
-  ESP_LOGE( MINITOR_TAG, "post service take" );
+  or_connection = px_get_conn_by_id_and_lock( or_connection->conn_id );
 
-  if ( b_verify_or_connection( rend_circuit->or_connection ) == false )
+  if ( or_connection == NULL )
   {
-    xSemaphoreGive( connections_mutex );
-    // MUTEX GIVE
-
     ret = -1;
     goto finish;
   }
-
-  // MUTEX TAKE
-  xSemaphoreTake( connection_access_mutex[rend_circuit->or_connection->mutex_index], portMAX_DELAY );
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 
   connected_cell = malloc( MINITOR_CELL_LEN );
 
@@ -265,7 +261,7 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* begin_
   connected_cell->payload.relay.digest = 0;
   connected_cell->payload.relay.length = 0;
 
-  if ( d_send_relay_cell_and_free( rend_circuit->or_connection, connected_cell, &rend_circuit->relay_list, rend_circuit->hs_crypto ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, connected_cell, &rend_circuit->relay_list, rend_circuit->hs_crypto ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_CONNECTED" );
@@ -274,7 +270,7 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, Cell* begin_
     ret = -1;
   }
 
-  xSemaphoreGive( connection_access_mutex[rend_circuit->or_connection->mutex_index] );
+  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
   // MUTEX GIVE
 
 finish:
@@ -283,12 +279,12 @@ finish:
   return ret;
 }
 
-int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, Cell* truncated_cell )
+int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, DlConnection* or_connection, Cell* truncated_cell )
 {
   int i;
   DoublyLinkedOnionRelay* dl_relay;
 
-  v_cleanup_local_connections_by_circ_id( truncated_cell->circ_id );
+  d_destroy_onion_circuit( rend_circuit, or_connection );
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -298,8 +294,9 @@ int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, Cell* tr
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
 
-  d_destroy_onion_circuit( rend_circuit );
   free( rend_circuit );
+
+  v_cleanup_local_connections_by_circ_id( truncated_cell->circ_id );
 
   return 0;
 }
@@ -323,6 +320,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   HsCrypto* hs_crypto;
   OnionCircuit* rend_circuit;
   DoublyLinkedOnionRelay* dl_relay;
+  DlConnection* or_connection = NULL;
 
   ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", introduce_cell->circ_id );
 
@@ -566,8 +564,12 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
     v_add_relay_to_list( dl_relay, &rend_circuit->relay_list );
 
-    if ( d_router_extend2( rend_circuit, rend_circuit->relay_list.built_length ) < 0 )
+    // MUTEX TAKE
+    or_connection = px_get_conn_by_id_and_lock( rend_circuit->conn_id );
+
+    if ( or_connection == NULL || d_router_extend2( rend_circuit, or_connection, rend_circuit->relay_list.built_length ) < 0 )
     {
+
       wc_Sha3_256_Free( &hs_crypto->hs_running_sha_forward );
       wc_Sha3_256_Free( &hs_crypto->hs_running_sha_backward );
       wc_AesFree( &hs_crypto->hs_aes_forward );
@@ -583,7 +585,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
       xSemaphoreGive( circuits_mutex );
       // MUTEX GIVE
 
-      d_destroy_onion_circuit( rend_circuit );
+      d_destroy_onion_circuit( rend_circuit, or_connection );
 
       free( rend_circuit );
 
@@ -595,6 +597,12 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
       rend_circuit->status = CIRCUIT_EXTENDED;
       rend_circuit->target_status = CIRCUIT_RENDEZVOUS;
       rend_circuit->hs_crypto = hs_crypto;
+    }
+
+    if ( or_connection != NULL )
+    {
+      xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+      // MUTEX GIVE
     }
   }
 
@@ -609,7 +617,7 @@ finish:
   return ret;
 }
 
-int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac )
+int d_router_join_rendezvous( OnionCircuit* rend_circuit, DlConnection* or_connection, unsigned char* rendezvous_cookie, unsigned char* hs_pub_key, unsigned char* auth_input_mac )
 {
   Cell* rend_cell;
 
@@ -630,7 +638,7 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, unsigned char* rendezv
   memcpy( rend_cell->payload.relay.rend2.public_key, hs_pub_key, PK_PUBKEY_LEN );
   memcpy( rend_cell->payload.relay.rend2.auth, auth_input_mac, MAC_LEN );
 
-  if ( d_send_relay_cell_and_free( rend_circuit->or_connection, rend_cell, &rend_circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, rend_cell, &rend_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send the RELAY_COMMAND_RENDEZVOUS1 cell" );
@@ -704,7 +712,6 @@ int d_verify_and_decrypt_introduce_2(
 
   memcpy( working_intro_secret_hs_input, HS_PROTOID, HS_PROTOID_LENGTH );
 
-  // TODO compute info
   memcpy( info, HS_PROTOID_EXPAND, HS_PROTOID_EXPAND_LENGTH );
 
   for ( i = 0; i < 2; i++ )
@@ -2226,7 +2233,7 @@ void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* 
   output[31] = (!!sign_bit) << 7;
 }
 
-int d_router_establish_intro( OnionCircuit* circuit )
+int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection )
 {
   int ret = 0;
   int wolf_succ;
@@ -2350,7 +2357,7 @@ int d_router_establish_intro( OnionCircuit* circuit )
 
   ESP_LOGE( MINITOR_TAG, "Sending establish intro to %d", circuit->relay_list.tail->relay->or_port );
 
-  if ( d_send_relay_cell_and_free( circuit->or_connection, establish_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, establish_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
@@ -2747,7 +2754,7 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
   return 0;
 }
 
-int d_begin_hsdir( OnionCircuit* publish_circuit )
+int d_begin_hsdir( OnionCircuit* publish_circuit, DlConnection* or_connection )
 {
   Cell* begin_cell;
 
@@ -2764,7 +2771,7 @@ int d_begin_hsdir( OnionCircuit* publish_circuit )
 
   begin_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE;
 
-  if ( d_send_relay_cell_and_free( publish_circuit->or_connection, begin_cell, &publish_circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, begin_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
@@ -2776,7 +2783,7 @@ int d_begin_hsdir( OnionCircuit* publish_circuit )
   return 0;
 }
 
-int d_post_hs_desc( OnionCircuit* publish_circuit )
+int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 {
   int ret = 0;
   char* REQUEST;
@@ -2883,7 +2890,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
     goto finish;
   }
 
-  if ( d_send_relay_cell_and_free( publish_circuit->or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
@@ -2930,7 +2937,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit )
 
     data_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + data_cell->payload.relay.length;
 
-    if ( d_send_relay_cell_and_free( publish_circuit->or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
+    if ( d_send_relay_cell_and_free( or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
@@ -3280,7 +3287,6 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
   {
     next_relay = dl_relay->next;
 
-    // TODO this free call triggered a store prohibited exception
     free( dl_relay );
 
     dl_relay = next_relay;

@@ -159,9 +159,9 @@ static void v_send_init_circuit_intro( OnionService* service )
   xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
 }
 
-static int d_send_circuit_create( OnionCircuit* circuit )
+static int d_send_circuit_create( OnionCircuit* circuit, DlConnection* or_connection )
 {
-  if ( d_router_create2( circuit ) < 0 )
+  if ( d_router_create2( circuit, or_connection ) < 0 )
   {
     return -1;
   }
@@ -171,7 +171,7 @@ static int d_send_circuit_create( OnionCircuit* circuit )
   return 0;
 }
 
-static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit )
+static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* or_connection )
 {
   int retry_length;
   OnionRelay* retry_end_relay = NULL;
@@ -263,16 +263,18 @@ circuit_destroy:
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
 
-  d_destroy_onion_circuit( circuit );
+  d_destroy_onion_circuit( circuit, or_connection );
+  // MUTEX GIVE
 
   free( circuit );
 }
 
-static void v_handle_tor_cell( DlConnection* or_connection )
+static void v_handle_tor_cell( uint32_t conn_id )
 {
   int succ;
   int recv_index;
   Cell* cell;
+  DlConnection* or_connection;
   OnionCircuit* working_circuit;
   OnionCircuit* tmp_circuit;
   OnionService* working_service;
@@ -283,29 +285,20 @@ static void v_handle_tor_cell( DlConnection* or_connection )
   SemaphoreHandle_t access_mutex = NULL;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  or_connection = px_get_conn_by_id_and_lock( conn_id );
 
-  if ( b_verify_or_connection( or_connection ) == false )
+  if ( or_connection == NULL )
   {
-    xSemaphoreGive( connections_mutex );
-    // MUTEX GIVE
-
     return;
   }
 
   access_mutex = connection_access_mutex[or_connection->mutex_index];
-
-  // MUTEX TAKE
-  xSemaphoreTake( access_mutex, portMAX_DELAY );
 
   cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
   or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 
   if ( cell == NULL )
   {
@@ -373,6 +366,9 @@ static void v_handle_tor_cell( DlConnection* or_connection )
   {
     free( cell );
 
+    xSemaphoreGive( access_mutex );
+    // MUTEX GIVE
+
     return;
   }
 
@@ -394,7 +390,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
 
       if ( working_circuit->relay_list.built_length < working_circuit->relay_list.length )
       {
-        if ( d_router_extend2( working_circuit, working_circuit->relay_list.built_length ) < 0 )
+        if ( d_router_extend2( working_circuit, or_connection, working_circuit->relay_list.built_length ) < 0 )
         {
           goto circuit_rebuild;
         }
@@ -433,7 +429,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
 
       if ( working_circuit->relay_list.built_length < working_circuit->relay_list.length )
       {
-        if ( d_router_extend2( working_circuit, working_circuit->relay_list.built_length ) < 0 )
+        if ( d_router_extend2( working_circuit, or_connection, working_circuit->relay_list.built_length ) < 0 )
         {
           goto circuit_rebuild;
         }
@@ -442,7 +438,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
       {
         if ( working_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
         {
-          if ( d_begin_hsdir( working_circuit ) < 0 )
+          if ( d_begin_hsdir( working_circuit, or_connection ) < 0 )
           {
             goto circuit_rebuild;
           }
@@ -451,7 +447,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
         }
         else if ( working_circuit->target_status == CIRCUIT_ESTABLISH_INTRO )
         {
-          if ( d_router_establish_intro( working_circuit ) < 0 )
+          if ( d_router_establish_intro( working_circuit, or_connection ) < 0 )
           {
             goto circuit_rebuild;
           }
@@ -460,7 +456,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
         }
         else if ( working_circuit->target_status == CIRCUIT_RENDEZVOUS )
         {
-          if ( d_router_join_rendezvous( working_circuit, working_circuit->hs_crypto->rendezvous_cookie, working_circuit->hs_crypto->point, working_circuit->hs_crypto->auth_input_mac ) < 0 )
+          if ( d_router_join_rendezvous( working_circuit, or_connection, working_circuit->hs_crypto->rendezvous_cookie, working_circuit->hs_crypto->point, working_circuit->hs_crypto->auth_input_mac ) < 0 )
           {
             ESP_LOGE( CORE_TAG, "Failed to join rend" );
             goto circuit_rebuild;
@@ -508,12 +504,10 @@ static void v_handle_tor_cell( DlConnection* or_connection )
           xSemaphoreGive( circuits_mutex );
           // MUTEX GIVE
 
-          xSemaphoreGive( access_mutex );
+          d_destroy_onion_circuit( working_circuit, or_connection );
           // MUTEX GIVE
 
           access_mutex = NULL;
-
-          d_destroy_onion_circuit( working_circuit );
 
           v_send_init_circuit(
             3,
@@ -537,7 +531,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
 
           v_add_relay_to_list( dl_relay, &working_circuit->relay_list );
 
-          if ( d_router_extend2( working_circuit, working_circuit->relay_list.built_length ) < 0 )
+          if ( d_router_extend2( working_circuit, or_connection, working_circuit->relay_list.built_length ) < 0 )
           {
             goto circuit_rebuild;
           }
@@ -575,7 +569,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
         goto circuit_rebuild;
       }
 
-      if ( d_post_hs_desc( working_circuit ) < 0 )
+      if ( d_post_hs_desc( working_circuit, or_connection ) < 0 )
       {
         goto circuit_rebuild;
       }
@@ -602,6 +596,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
       {
         v_cleanup_service_hs_data( working_circuit->service, working_circuit->desc_index );
 
+        // TODO need to overhaul circuits to use the same mutexing as connections, this won't be safe if more than one core thread is running
         // MUTEX TAKE
         xSemaphoreTake( circuits_mutex, portMAX_DELAY );
 
@@ -609,6 +604,11 @@ static void v_handle_tor_cell( DlConnection* or_connection )
 
         xSemaphoreGive( circuits_mutex );
         // MUTEX GIVE
+
+        d_destroy_onion_circuit( working_circuit, or_connection );
+        // MUTEX GIVE
+
+        access_mutex = NULL;
 
         if ( working_circuit->service->hsdir_sent != working_circuit->service->hsdir_to_send )
         {
@@ -626,13 +626,6 @@ static void v_handle_tor_cell( DlConnection* or_connection )
           );
         }
 
-        xSemaphoreGive( access_mutex );
-        // MUTEX GIVE
-
-        access_mutex = NULL;
-
-        d_destroy_onion_circuit( working_circuit );
-
         free( working_circuit );
 
         working_circuit = NULL;
@@ -649,12 +642,10 @@ static void v_handle_tor_cell( DlConnection* or_connection )
           xSemaphoreGive( circuits_mutex );
           // MUTEX GIVE
 
-          xSemaphoreGive( access_mutex );
+          d_destroy_onion_circuit( working_circuit, or_connection );
           // MUTEX GIVE
 
           access_mutex = NULL;
-
-          d_destroy_onion_circuit( working_circuit );
 
           v_send_init_circuit(
             3,
@@ -673,7 +664,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
         }
         else
         {
-          if ( d_router_truncate( working_circuit, working_circuit->relay_list.built_length - 1 ) < 0 )
+          if ( d_router_truncate( working_circuit, or_connection, working_circuit->relay_list.built_length - 1 ) < 0 )
           {
             goto circuit_rebuild;
           }
@@ -687,7 +678,7 @@ static void v_handle_tor_cell( DlConnection* or_connection )
     case CIRCUIT_RENDEZVOUS:
       ESP_LOGE( CORE_TAG, "Got a service cell" );
       // pass the access mutex on so it can be given on a cleanup event
-      v_onion_service_handle_cell( working_circuit, cell, access_mutex );
+      v_onion_service_handle_cell( working_circuit, or_connection, cell );
 
       access_mutex = NULL;
 
@@ -730,18 +721,15 @@ static void v_handle_tor_cell( DlConnection* or_connection )
 circuit_rebuild:
   free( cell );
 
-  if ( access_mutex != NULL )
-  {
-    xSemaphoreGive( access_mutex );
-    // MUTEX GIVE
-  }
-
-  v_circuit_rebuild_or_destroy( working_circuit );
+  // this will give the mutex
+  v_circuit_rebuild_or_destroy( working_circuit, or_connection );
+  // MUTEX GIVE
 }
 
 static void v_handle_service_tcp_data( ServiceTcpTraffic* tcp_traffic )
 {
   OnionCircuit* rend_circuit;
+  DlConnection* or_connection;
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -754,7 +742,17 @@ static void v_handle_service_tcp_data( ServiceTcpTraffic* tcp_traffic )
 
   if ( rend_circuit != NULL )
   {
-    v_onion_service_handle_local_tcp_data( rend_circuit, tcp_traffic );
+    // MUTEX TAKE
+    or_connection = px_get_conn_by_id_and_lock( rend_circuit->conn_id );
+
+    v_onion_service_handle_local_tcp_data( rend_circuit, or_connection, tcp_traffic );
+
+    xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+    // MUTEX GIVE
+  }
+  else if ( tcp_traffic->length > 0 )
+  {
+    free( tcp_traffic->data );
   }
 
   free( tcp_traffic );
@@ -763,11 +761,13 @@ static void v_handle_service_tcp_data( ServiceTcpTraffic* tcp_traffic )
 // TODO had a failure to restart an hsdir upload circuit
 // this function seems to have been called but no subsequent
 // circuit init showed in the log
-static void v_handle_conn_close( DlConnection* or_connection )
+static void v_handle_conn_close( uint32_t conn_id )
 {
   int i = 0;
   OnionCircuit* closed_circuits[20];
   OnionCircuit* closed_circuit;
+
+  ESP_LOGE( CORE_TAG, "conn_id %d closed", conn_id );
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -776,7 +776,7 @@ static void v_handle_conn_close( DlConnection* or_connection )
 
   while ( closed_circuit != NULL )
   {
-    if ( closed_circuit->or_connection == or_connection )
+    if ( closed_circuit->conn_id == conn_id )
     {
       closed_circuits[i] = closed_circuit;
       i++;
@@ -790,7 +790,8 @@ static void v_handle_conn_close( DlConnection* or_connection )
 
   for ( i = i - 1; i >= 0; i-- )
   {
-    v_circuit_rebuild_or_destroy( closed_circuits[i] );
+    ESP_LOGE( CORE_TAG, "rebuilding circuit" );
+    v_circuit_rebuild_or_destroy( closed_circuits[i], NULL );
   }
 }
 
@@ -800,6 +801,7 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
   OnionCircuit* new_circuit;
   OnionRelay* start_relay;
   OnionRelay* end_relay;
+  DlConnection* or_connection = NULL;
 
   new_circuit = malloc( sizeof( OnionCircuit ) );
 
@@ -818,31 +820,22 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
     goto fail;
   }
 
-  {
-    DoublyLinkedOnionRelay* dl_relay;
-
-    dl_relay = new_circuit->relay_list.head;
-
-    while( dl_relay != NULL )
-    {
-      ESP_LOGE( CORE_TAG, "building with %d", dl_relay->relay->or_port );
-
-      dl_relay = dl_relay->next;
-    }
-
-    ESP_LOGE( CORE_TAG, "building to status %d", new_circuit->target_status );
-  }
-
   succ = d_attach_or_connection( new_circuit->relay_list.head->relay->address, new_circuit->relay_list.head->relay->or_port, new_circuit );
 
   if ( succ < 0 )
   {
     goto fail;
   }
+
+  ESP_LOGE( CORE_TAG, "status %d attached to conn_id %d", new_circuit->target_status, new_circuit->conn_id );
+
+  // MUTEX TAKE
+  or_connection = px_get_conn_by_id_and_lock( new_circuit->conn_id );
+
   // connection is live, start create
-  else if ( succ == 1 )
+  if ( succ == 1 )
   {
-    if ( d_send_circuit_create( new_circuit ) < 0 )
+    if ( d_send_circuit_create( new_circuit, or_connection ) < 0 )
     {
       goto fail;
     }
@@ -852,6 +845,8 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
     time( &(new_circuit->last_action) );
   }
 
+  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+  // MUTEX GIVE
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -868,6 +863,9 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
 
 // try to make the circuit again
 fail:
+  d_destroy_onion_circuit( new_circuit, or_connection );
+  // MUTEX GIVE
+
   start_relay = NULL;
   end_relay = NULL;
 
@@ -894,18 +892,18 @@ fail:
     create_request->hs_crypto
   );
 
-  d_destroy_onion_circuit( new_circuit );
-
   free( create_request );
   free( new_circuit );
 }
 
-static void v_handle_conn_ready( DlConnection* or_connection )
+static void v_handle_conn_ready( uint32_t conn_id )
 {
   int i = 0;
+  int f = 0;
   OnionCircuit* ready_circuit;
   OnionCircuit* ready_circuits[20];
   OnionRelay* end_relay;
+  DlConnection* or_connection;
 
   // MUTEX TAKE
   xSemaphoreTake( circuits_mutex, portMAX_DELAY );
@@ -914,7 +912,7 @@ static void v_handle_conn_ready( DlConnection* or_connection )
 
   while ( ready_circuit != NULL )
   {
-    if ( ready_circuit->or_connection == or_connection )
+    if ( ready_circuit->conn_id == conn_id )
     {
       ready_circuits[i] = ready_circuit;
       i++;
@@ -926,12 +924,27 @@ static void v_handle_conn_ready( DlConnection* or_connection )
   xSemaphoreGive( circuits_mutex );
   // MUTEX GIVE
 
-  for ( i = i - 1; i >= 0; i-- )
+  // we shouldn't need to reaquire the lock every circuit
+  // MUTEX TAKE
+  or_connection = px_get_conn_by_id_and_lock( conn_id );
+
+  for ( f = i, i = i - 1; i >= 0; i-- )
   {
-    if ( ready_circuits[i]->status == CIRCUIT_CREATE && d_send_circuit_create( ready_circuits[i] ) < 0 )
+    if ( ready_circuits[i]->status == CIRCUIT_CREATE && d_send_circuit_create( ready_circuits[i], or_connection ) < 0 )
     {
-      v_circuit_rebuild_or_destroy( ready_circuits[i] );
+      f--;
+
+      // don't pass in the or_connection, keeps our lock
+      v_circuit_rebuild_or_destroy( ready_circuits[i], NULL );
     }
+  }
+
+  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+  // MUTEX GIVE
+
+  if ( f == 0 )
+  {
+    v_cleanup_connection( or_connection );
   }
 }
 
@@ -950,6 +963,7 @@ static void v_handle_scheduled_consensus()
 static void v_keep_circuitlist_alive()
 {
   Cell* padding_cell;
+  DlConnection* or_connection;
   OnionCircuit* working_circuit;
 
   // MUTEX TAKE
@@ -959,6 +973,15 @@ static void v_keep_circuitlist_alive()
 
   while ( working_circuit != NULL )
   {
+    // MUTEX TAKE
+    or_connection = px_get_conn_by_id_and_lock( working_circuit->conn_id );
+
+    if ( or_connection == NULL )
+    {
+      working_circuit = working_circuit->next;
+
+      continue;
+    }
 
     padding_cell = malloc( MINITOR_CELL_LEN );
 
@@ -966,12 +989,15 @@ static void v_keep_circuitlist_alive()
     padding_cell->circ_id = working_circuit->circ_id;
     padding_cell->length = FIXED_CELL_HEADER_SIZE;
 
-    if ( d_send_cell_and_free( working_circuit->or_connection, padding_cell ) < 0 )
+    if ( d_send_cell_and_free( or_connection, padding_cell ) < 0 )
     {
 #ifdef DEBUG_MINITOR
       ESP_LOGE( CORE_TAG, "Failed to send padding cell on circ_id: %d", working_circuit->circ_id );
 #endif
     }
+
+    xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+    // MUTEX GIVE
 
     working_circuit = working_circuit->next;
   }
@@ -1087,6 +1113,7 @@ void v_handle_circuit_timeout()
   time_t min_left = 30;
   OnionCircuit* circuit;
   OnionCircuit* timed_out[20];
+  DlConnection* or_connection;
 
   // first get all the circuits protected by the mutex
   // MUTEX TAKE
@@ -1126,43 +1153,43 @@ void v_handle_circuit_timeout()
   // now rebuild the timed out circuits found out of the mutex
   for ( i = i - 1; i >= 0; i-- )
   {
-    v_circuit_rebuild_or_destroy( timed_out[i] );
-  }
+    // MUTEX TAKE
+    or_connection = px_get_conn_by_id_and_lock( timed_out[i]->conn_id );
 
+    if ( or_connection == NULL )
+    {
+      continue;
+    }
+
+    v_circuit_rebuild_or_destroy( timed_out[i], or_connection );
+    // MUTEX GIVE
+  }
 
   // this should also start the timer
   xTimerChangePeriod( timeout_timer, 1000 * min_left / portTICK_PERIOD_MS, portMAX_DELAY );
 }
 
-void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
+void v_handle_conn_handshake( uint32_t conn_id, uint32_t length )
 {
   Cell* cell;
+  DlConnection* or_connection;
   SemaphoreHandle_t access_mutex = NULL;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  or_connection = px_get_conn_by_id_and_lock( conn_id );
 
-  if ( b_verify_or_connection( or_connection ) == false )
+  if ( or_connection == NULL )
   {
-    xSemaphoreGive( connections_mutex );
-    // MUTEX GIVE
-
     return;
   }
 
   access_mutex = connection_access_mutex[or_connection->mutex_index];
-
-  // MUTEX TAKE
-  xSemaphoreTake( access_mutex, portMAX_DELAY );
 
   cell = or_connection->cell_ring_buf[or_connection->cell_ring_start];
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
   or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 
   ESP_LOGE( CORE_TAG, "got handshake status %d %p", or_connection->status, cell );
 
@@ -1230,7 +1257,7 @@ void v_handle_conn_handshake( DlConnection* or_connection, uint32_t length )
 
       access_mutex = NULL;
 
-      v_handle_conn_ready( or_connection );
+      v_handle_conn_ready( or_connection->conn_id );
 
       break;
     case CONNECTION_LIVE:
@@ -1260,30 +1287,7 @@ fail:
     // MUTEX GIVE
   }
 
-  // it may seem silly but we need to yeild and retake the access mutex since
-  // trying to take the connections_mutex while holding an access mutex could
-  // result in a double bind
-  // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
-
-  if ( b_verify_or_connection( or_connection ) == false )
-  {
-    xSemaphoreGive( connections_mutex );
-    // MUTEX GIVE
-
-    return;
-  }
-
-  // MUTEX TAKE
-  xSemaphoreTake( connection_access_mutex[or_connection->mutex_index], portMAX_DELAY );
-
   v_cleanup_connection( or_connection );
-
-  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
-  // MUTEX TAKE
-
-  xSemaphoreGive( connections_mutex );
-  // MUTEX GIVE
 }
 
 void v_minitor_daemon( void* pv_parameters )
@@ -1304,7 +1308,7 @@ void v_minitor_daemon( void* pv_parameters )
     switch ( onion_message->type )
     {
       case TIMER_CONSENSUS:
-        //v_handle_scheduled_consensus();
+        v_handle_scheduled_consensus();
         break;
       case TIMER_KEEPALIVE:
         v_keep_circuitlist_alive();

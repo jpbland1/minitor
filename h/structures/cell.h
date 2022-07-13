@@ -151,7 +151,7 @@ typedef enum HandshakeType {
 typedef enum OnionKeyType
 {
   ONION_NTOR = 1,
-};
+} OnionKeyType;
 
 typedef enum MinitorCertType {
   LINK_KEY = 1,

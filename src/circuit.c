@@ -266,7 +266,7 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
 }
 
 // destroy a tor circuit
-int d_destroy_onion_circuit( OnionCircuit* circuit )
+int d_destroy_onion_circuit( OnionCircuit* circuit, DlConnection* or_connection )
 {
   int i;
   Cell* destroy_cell;
@@ -281,11 +281,17 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
   destroy_cell->payload.destroy_code = NO_DESTROY_CODE;
 
   // send a destroy cell to the first hop
-  if ( d_send_cell_and_free( circuit->or_connection, destroy_cell ) < 0 )
+  if ( or_connection != NULL )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send DESTROY cell" );
-#endif
+    if ( d_send_cell_and_free( or_connection, destroy_cell ) < 0 )
+    {
+  #ifdef DEBUG_MINITOR
+      ESP_LOGE( MINITOR_TAG, "Failed to send DESTROY cell" );
+  #endif
+    }
+
+    xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+    // MUTEX GIVE
   }
 
   tmp_relay_node = circuit->relay_list.head;
@@ -315,7 +321,7 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
     }
   }
 
-  ESP_LOGE( MINITOR_TAG, "Freed with target status %d", circuit->target_status );
+  ESP_LOGE( MINITOR_TAG, "Freed with target status %d conn_id %d", circuit->target_status, circuit->conn_id );
 
   circuit->relay_list.length = 0;
   circuit->relay_list.built_length = 0;
@@ -341,12 +347,15 @@ int d_destroy_onion_circuit( OnionCircuit* circuit )
     wc_curve25519_free( &circuit->create2_handshake_key );
   }
 
-  v_dettach_connection( circuit->or_connection );
+  if ( or_connection != NULL )
+  {
+    v_dettach_connection( or_connection );
+  }
 
   return 0;
 }
 
-int d_router_truncate( OnionCircuit* circuit, int new_length )
+int d_router_truncate( OnionCircuit* circuit, DlConnection* or_connection, int new_length )
 {
   int i;
   Cell* truncate_cell;
@@ -402,7 +411,7 @@ int d_router_truncate( OnionCircuit* circuit, int new_length )
   truncate_cell->payload.relay.destroy_code = NO_DESTROY_CODE;
 
   // send a destroy cell to the first hop
-  if ( d_send_relay_cell_and_free( circuit->or_connection, truncate_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, truncate_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_TRUNCATE cell" );
@@ -414,7 +423,7 @@ int d_router_truncate( OnionCircuit* circuit, int new_length )
   return 0;
 }
 
-int d_router_extend2( OnionCircuit* circuit, int node_index )
+int d_router_extend2( OnionCircuit* circuit, DlConnection* or_connection, int node_index )
 {
   int i;
   int wolf_succ;
@@ -497,7 +506,7 @@ int d_router_extend2( OnionCircuit* circuit, int node_index )
   }
 
   // send the EXTEND2 cell
-  if ( d_send_relay_cell_and_free( circuit->or_connection, extend2_cell, &circuit->relay_list, NULL ) < 0 )
+  if ( d_send_relay_cell_and_free( or_connection, extend2_cell, &circuit->relay_list, NULL ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
@@ -541,7 +550,7 @@ int d_router_extended2( OnionCircuit* circuit, int node_index, Cell* extended2_c
   return 0;
 }
 
-int d_router_create2( OnionCircuit* circuit )
+int d_router_create2( OnionCircuit* circuit, DlConnection* or_connection )
 {
   int wolf_succ;
   WC_RNG rng;
@@ -595,7 +604,7 @@ int d_router_create2( OnionCircuit* circuit )
     goto cleanup;
   }
 
-  if ( d_send_cell_and_free( circuit->or_connection, create2_cell ) < 0 )
+  if ( d_send_cell_and_free( or_connection, create2_cell ) < 0 )
   {
 #ifdef DEBUG_MINITOR
     ESP_LOGE( MINITOR_TAG, "Failed to send CREATE2 cell" );
@@ -1059,11 +1068,11 @@ fail:
   // I need to free this in the fail states of the other steps of the handshake
   wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
 
-  wc_Sha256Free( &or_connection->responder_sha );
-  wc_Sha256Free( &or_connection->initiator_sha );
-
   free( or_connection->responder_rsa_identity_key_der );
   free( or_connection->initiator_rsa_identity_key_der );
+
+  wc_Sha256Free( &or_connection->responder_sha );
+  wc_Sha256Free( &or_connection->initiator_sha );
 
   return -1;
 }
@@ -1175,11 +1184,13 @@ int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_ce
 finish:
   wolfSSL_X509_free( peer_cert );
 
+  wc_Sha256Free( &reusable_sha );
+
+  // I need to free this in the fail states of the other steps of the handshake
   free( or_connection->responder_rsa_identity_key_der );
   free( or_connection->initiator_rsa_identity_key_der );
 
   wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
-  wc_Sha256Free( &reusable_sha );
 
   wc_Sha256Free( &or_connection->responder_sha );
   wc_Sha256Free( &or_connection->initiator_sha );

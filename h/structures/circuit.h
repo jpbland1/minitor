@@ -73,9 +73,9 @@ typedef struct OnionCircuit
   uint32_t circ_id;
   bool want_action;
   time_t last_action;
+  uint32_t conn_id;
   CircuitStatus status;
   CircuitStatus target_status;
-  DlConnection* or_connection;
   curve25519_key create2_handshake_key;
   DoublyLinkedOnionRelayList relay_list;
   HsCrypto* hs_crypto;

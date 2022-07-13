@@ -40,6 +40,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 static const char* CONN_TAG = "CONNECTIONS DAEMON";
 
+uint32_t conn_id = 0;
 TaskHandle_t connections_daemon_task_handle;
 struct pollfd connections_poll[16];
 DlConnection* connections;
@@ -59,7 +60,7 @@ static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX
   return 0;
 }
 
-void v_cleanup_connection( DlConnection* dl_connection )
+static void v_cleanup_connection_in_lock( DlConnection* dl_connection )
 {
   int i;
   OnionMessage* onion_message;
@@ -71,7 +72,7 @@ void v_cleanup_connection( DlConnection* dl_connection )
   {
     onion_message = malloc( sizeof( OnionMessage ) );
     onion_message->type = CONN_CLOSE;
-    onion_message->data = dl_connection;
+    onion_message->data = dl_connection->conn_id;
 
     wolfSSL_shutdown( dl_connection->ssl );
     wolfSSL_free( dl_connection->ssl );
@@ -82,6 +83,21 @@ void v_cleanup_connection( DlConnection* dl_connection )
       {
         free( dl_connection->cell_ring_buf[i] );
       }
+    }
+
+    if (
+      dl_connection->status == CONNECTION_WANT_VERSIONS ||
+      dl_connection->status == CONNECTION_WANT_CERTS ||
+      dl_connection->status == CONNECTION_WANT_CHALLENGE
+    )
+    {
+      wc_FreeRsaKey( &dl_connection->initiator_rsa_auth_key );
+
+      free( dl_connection->responder_rsa_identity_key_der );
+      free( dl_connection->initiator_rsa_identity_key_der );
+
+      wc_Sha256Free( &dl_connection->responder_sha );
+      wc_Sha256Free( &dl_connection->initiator_sha );
     }
 
     xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
@@ -95,6 +111,35 @@ void v_cleanup_connection( DlConnection* dl_connection )
   v_remove_connection_from_list( dl_connection, &connections );
 
   free( dl_connection );
+}
+
+void v_cleanup_connection( DlConnection* dl_connection )
+{
+  SemaphoreHandle_t access_mutex;
+
+  // MUTEX TAKE
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+
+  if ( b_verify_or_connection( dl_connection->conn_id ) == false )
+  {
+    xSemaphoreGive( connections_mutex );
+    // MUTEX GIVE
+
+    return;
+  }
+
+  access_mutex = connection_access_mutex[dl_connection->mutex_index];
+
+  // MUTEX TAKE
+  xSemaphoreTake( access_mutex, portMAX_DELAY );
+
+  v_cleanup_connection_in_lock( dl_connection );
+
+  xSemaphoreGive( access_mutex );
+  // MUTEX TAKE
+
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
 }
 
 static int d_recv_on_or_connection( DlConnection* or_connection )
@@ -129,7 +174,7 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
   or_connection->cell_ring_buf[or_connection->cell_ring_end] = cell;
 
   onion_message = malloc( sizeof( OnionMessage ) );
-  onion_message->data = or_connection;
+  onion_message->data = or_connection->conn_id;
   onion_message->length = succ;
 
   if ( or_connection->status == CONNECTION_LIVE )
@@ -258,21 +303,25 @@ static void v_connections_daemon( void* pv_parameters )
         xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
 
         tmp_connection = dl_connection->next;
-        v_cleanup_connection( dl_connection );
+
+        access_mutex = connection_access_mutex[dl_connection->mutex_index];
+
+        // MUTEX TAKE
+        xSemaphoreTake( access_mutex, portMAX_DELAY );
+
+        v_cleanup_connection_in_lock( dl_connection );
+
+        xSemaphoreGive( access_mutex );
+        // MUTEX GIVE
+
+        access_mutex = NULL;
+
         dl_connection = tmp_connection;
 
         continue;
       }
 
       dl_connection = dl_connection->next;
-    }
-
-    if ( i == 0 )
-    {
-      xSemaphoreGive( connections_mutex );
-      // MUTEX GIVE
-
-      continue;
     }
 
     for ( i = i - 1; i >= 0; i-- )
@@ -304,7 +353,7 @@ static void v_connections_daemon( void* pv_parameters )
 
         if ( succ <= 0 )
         {
-          v_cleanup_connection( ready_connections[i] );
+          v_cleanup_connection_in_lock( ready_connections[i] );
           ready_connections[i] = NULL;
 
           break;
@@ -412,6 +461,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
   or_connection->ssl = ssl;
   or_connection->sock_fd = sock_fd;
   or_connection->is_or = 1;
+  or_connection->conn_id = conn_id++;
 
   if ( d_start_v3_handshake( or_connection ) < 0 )
   {
@@ -517,7 +567,7 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
     }
   }
 
-  circuit->or_connection = dl_connection;
+  circuit->conn_id = dl_connection->conn_id;
 
   xSemaphoreGive( connections_mutex );
   // MUTEX GIVE
@@ -578,6 +628,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
   local_connection->is_or = 0;
   // set last action to uint max so it isn't killed before it can read (no one should be killed before they can read)
   local_connection->last_action = INT_MAX;
+  local_connection->conn_id = conn_id++;
 
   if ( connections_daemon_task_handle == NULL )
   {
@@ -682,7 +733,7 @@ void v_cleanup_local_connection( uint32_t circ_id, uint32_t stream_id )
   {
     if ( local_connection->is_or == 0 && local_connection->circ_id == circ_id && local_connection->stream_id == stream_id )
     {
-      v_cleanup_connection( local_connection );
+      v_cleanup_connection_in_lock( local_connection );
       break;
     }
 
@@ -705,7 +756,7 @@ void v_cleanup_local_connections_by_circ_id( uint32_t circ_id )
     if ( local_connection->is_or == 0 && local_connection->circ_id == circ_id )
     {
       tmp_connection = local_connection->next;
-      v_cleanup_connection( local_connection );
+      v_cleanup_connection_in_lock( local_connection );
       local_connection = tmp_connection;
     }
     else
@@ -715,7 +766,7 @@ void v_cleanup_local_connections_by_circ_id( uint32_t circ_id )
   }
 }
 
-bool b_verify_or_connection( DlConnection* or_connection )
+bool b_verify_or_connection( uint32_t id )
 {
   bool ret = false;
   DlConnection* in_list;
@@ -724,7 +775,7 @@ bool b_verify_or_connection( DlConnection* or_connection )
 
   while ( in_list != NULL )
   {
-    if ( in_list->is_or == 1 && in_list == or_connection )
+    if ( in_list->is_or == 1 && in_list->conn_id == id )
     {
       ret = true;
       break;
@@ -736,10 +787,9 @@ bool b_verify_or_connection( DlConnection* or_connection )
   return ret;
 }
 
-void v_dettach_connection( DlConnection* or_connection )
+void v_dettach_connection( DlConnection* dl_connection )
 {
   OnionCircuit* check_circuit;
-  DlConnection* dl_connection;
   SemaphoreHandle_t access_mutex;
 
   // MUTEX TAKE
@@ -749,7 +799,7 @@ void v_dettach_connection( DlConnection* or_connection )
 
   while ( check_circuit != NULL )
   {
-    if ( check_circuit->or_connection == or_connection )
+    if ( check_circuit->conn_id == dl_connection->conn_id )
     {
       break;
     }
@@ -762,35 +812,35 @@ void v_dettach_connection( DlConnection* or_connection )
 
   if ( check_circuit == NULL )
   {
-    // MUTEX TAKE
-    xSemaphoreTake( connections_mutex, portMAX_DELAY );
-
-    dl_connection = connections;
-
-    while ( dl_connection != NULL )
-    {
-      if ( dl_connection == or_connection )
-      {
-        break;
-      }
-
-      dl_connection = dl_connection->next;
-    }
-
-    if ( dl_connection != NULL )
-    {
-      access_mutex = connection_access_mutex[dl_connection->mutex_index];
-
-      // MUTEX TAKE
-      xSemaphoreTake( access_mutex, portMAX_DELAY );
-
-      v_cleanup_connection( dl_connection );
-
-      xSemaphoreGive( access_mutex );
-      // MUTEX GIVE
-    }
-
-    xSemaphoreGive( connections_mutex );
-    // MUTEX GIVE
+    v_cleanup_connection( dl_connection );
   }
+}
+
+// caller must give the access semaphore
+DlConnection* px_get_conn_by_id_and_lock( uint32_t id )
+{
+  DlConnection* dl_connection;
+
+  // MUTEX TAKE
+  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+
+  dl_connection = connections;
+
+  while ( dl_connection != NULL )
+  {
+    if ( dl_connection->conn_id == id )
+    {
+      // MUTEX TAKE
+      xSemaphoreTake( connection_access_mutex[dl_connection->mutex_index], portMAX_DELAY );
+
+      break;
+    }
+
+    dl_connection = dl_connection->next;
+  }
+
+  xSemaphoreGive( connections_mutex );
+  // MUTEX GIVE
+
+  return dl_connection;
 }

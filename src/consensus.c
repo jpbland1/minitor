@@ -76,10 +76,6 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
   tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( time_period ) ) >> 8 );
   tmp_64_buffer[7] = (unsigned char)( (uint64_t)( time_period ) );
 
-  {
-    //ESP_LOGE( MINITOR_TAG, "time_period: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x", tmp_64_buffer[0], tmp_64_buffer[1], tmp_64_buffer[2], tmp_64_buffer[3], tmp_64_buffer[4], tmp_64_buffer[5], tmp_64_buffer[6], tmp_64_buffer[7]  );
-  }
-
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
   tmp_64_buffer[0] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 56 );
@@ -91,26 +87,9 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
   tmp_64_buffer[6] = (unsigned char)( ( (uint64_t)( hsdir_interval ) ) >> 8 );
   tmp_64_buffer[7] = (unsigned char)( (uint64_t)( hsdir_interval ) );
 
-  {
-    //ESP_LOGE( MINITOR_TAG, "hsdir_interval: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x", tmp_64_buffer[0], tmp_64_buffer[1], tmp_64_buffer[2], tmp_64_buffer[3], tmp_64_buffer[4], tmp_64_buffer[5], tmp_64_buffer[6], tmp_64_buffer[7]  );
-  }
-
   wc_Sha3_256_Update( &reusable_sha3, tmp_64_buffer, 8 );
 
   wc_Sha3_256_Final( &reusable_sha3, id_hash );
-
-
-  /*
-  {
-    ESP_LOGE( MINITOR_TAG, "BEGIN NODE-IDX CHECK" );
-    ESP_LOGE( MINITOR_TAG, "prefix: %s", "node-idx" );
-    ESP_LOGE( MINITOR_TAG, "identity: %.2x %.2x %.2x %.2x", identity[0], identity[1], identity[2], identity[3] );
-    ESP_LOGE( MINITOR_TAG, "srv: %.2x %.2x %.2x %.2x", srv[0], srv[1], srv[2], srv[3] );
-    ESP_LOGE( MINITOR_TAG, "time_period: %d", time_period );
-    ESP_LOGE( MINITOR_TAG, "hsdir_interval: %d", hsdir_interval );
-    ESP_LOGE( MINITOR_TAG, "id_hash: %.2x %.2x %.2x %.2x", id_hash[0], id_hash[1], id_hash[2], id_hash[3] );
-  }
-  */
 
   wc_Sha3_256_Free( &reusable_sha3 );
 }
@@ -255,8 +234,6 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
       return -1;
     }
 
-    //ESP_LOGE( MINITOR_TAG, "\n\nUSING CACHE %d FOR DIR", cache_relay->dir_port );
-
     if ( out_identity != NULL )
     {
       memcpy( out_identity, cache_relay->identity, ID_LENGTH );
@@ -264,8 +241,6 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
 
     v_ipv4_to_string( cache_relay->address, ip_addr_str );
     dest_addr->sin_port = htons( cache_relay->dir_port );
-
-    //ESP_LOGE( MINITOR_TAG, "Got cache: %s:%d", ip_addr_str, cache_relay->dir_port );
 
     free( cache_relay );
   }
@@ -305,15 +280,14 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
     {
       if ( authority_string[i] == '=' )
       {
-        //ESP_LOGE( MINITOR_TAG, "Got port: %d", atoi( authority_string + i + 1 ) );
         dest_addr->sin_port = htons( atoi( authority_string + i + 1 ) );
+
         break;
       }
       else if ( authority_string[i] == ' ' )
       {
         memcpy( ip_addr_str, authority_string, i );
         ip_addr_str[i] = 0;;
-        //ESP_LOGE( MINITOR_TAG, "Got ip: %s", ip_addr_str );
       }
     }
   }
@@ -384,8 +358,6 @@ static int d_start_descriptor_fetch( FetchDescriptorState* fetch_state )
       }
     }
   }
-
-  //ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
 
   fetch_state->start = esp_timer_get_time();
 
@@ -806,326 +778,6 @@ static int d_parse_date_string( char* date_string )
 
   return mktime( &tmp_time );
 }
-
-/*
-static int d_fetch_descriptor_info( OnionRelay* relays, int num_relays )
-{
-  const char* REQUEST_FMT = "GET /tor/server/d/%s%s%s HTTP/1.0\r\n"
-      "Host: %s\r\n"
-      "User-Agent: esp-idf/1.0 esp3266\r\n"
-      "\r\n";
-  char REQUEST[230];
-  char ip_addr_str[16];
-
-  const char* master_key = "\nmaster-key-ed25519 ";
-  int master_key_found = 0;
-  char master_key_64[43] = { 0 };
-  int master_key_64_length = 0;
-
-  const char* ntor_onion_key = "\nntor-onion-key ";
-  int ntor_onion_key_found = 0;
-  char ntor_onion_key_64[43] = { 0 };
-  int ntor_onion_key_64_length = 0;
-
-  const char* signing_key = "\nsigning-key\n-----BEGIN RSA PUBLIC KEY-----\n";
-  int signing_key_found = 0;
-  char signing_key_64[187] = { 0 };
-  int signing_key_64_length = 0;
-  uint8_t der[141];
-  uint8_t identity_digest[ID_LENGTH];
-
-  Sha tmp_sha;
-
-  int ret = 0;
-  int i;
-  int j;
-  int relays_set;
-  int matched_relay;
-  int retries = 0;
-  int rx_length;
-  int sock_fd;
-  int err;
-  char end_header = 0;
-  // buffer thath holds data returned from the socket
-  char rx_buffer[512];
-  struct sockaddr_in dest_addr;
-  uint64_t start;
-  uint64_t end;
-  int using_cache_relay;
-
-  using_cache_relay = d_get_suitable_dir_relay( &dest_addr, ip_addr_str, cache_identity );
-
-  if ( using_cache_relay < 0 )
-  {
-    return -1;
-  }
-
-  switch ( num_relays )
-  {
-    case 1:
-      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "", "", ip_addr_str );
-      break;
-    case 2:
-      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", "", ip_addr_str );
-      break;
-    case 3:
-      sprintf( REQUEST, REQUEST_FMT, "dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", "+dddddddddddddddddddddddddddddddddddddddd", ip_addr_str );
-      break;
-  }
-
-  start = esp_timer_get_time();
-
-  // create a socket to access the descriptor
-  sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
-
-  if ( sock_fd < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
-#endif
-
-    return -1;
-  }
-
-  wc_InitSha( &tmp_sha );
-
-  // connect the socket to the dir server address
-  err = connect( sock_fd, (struct sockaddr*) &dest_addr, sizeof( dest_addr ) );
-
-  if ( err != 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
-#endif
-
-    shutdown( sock_fd, 0 );
-    close( sock_fd );
-
-    ret = -1;
-    goto finish;
-  }
-
-  for ( i = 0; i < num_relays; i++ )
-  {
-    for ( j = 0; j < 20; j++ )
-    {
-      if ( relays[i].digest[j] >> 4 < 10 )
-      {
-        REQUEST[18 + 2 * j + i * 41] = 48 + ( relays[i].digest[j] >> 4 );
-      }
-      else
-      {
-        REQUEST[18 + 2 * j + i * 41] = 65 + ( ( relays[i].digest[j] >> 4 ) - 10 );
-      }
-
-      if ( ( relays[i].digest[j] & 0x0f ) < 10  )
-      {
-        REQUEST[18 + 2 * j + 1 + i * 41] = 48 + ( relays[i].digest[j] & 0x0f );
-      }
-      else
-      {
-        REQUEST[18 + 2 * j + 1 + i * 41] = 65 + ( ( relays[i].digest[j] & 0x0f ) - 10 );
-      }
-    }
-  }
-
-  //ESP_LOGE( MINITOR_TAG, "%s", REQUEST );
-
-  // send the http request to the dir server
-  err = send( sock_fd, REQUEST, strlen( REQUEST ), 0 );
-
-  if ( err < 0 )
-  {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
-#endif
-
-    ret = -1;
-    goto finish;
-  }
-
-  relays_set = 0;
-
-  // keep reading forever, we will break inside when the transfer is over
-  while ( relays_set < num_relays )
-  {
-    // recv data from the destination and fill the rx_buffer with the data
-    rx_length = recv( sock_fd, rx_buffer, sizeof( rx_buffer ), 0 );
-
-    // if we got less than 0 we encoutered an error
-    if ( rx_length < 0 )
-    {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "couldn't recv http server" );
-#endif
-
-      ret = -1;
-      goto finish;
-    // we got 0 bytes back then the connection closed and we're done getting
-    // consensus data
-    }
-    else if ( rx_length == 0 )
-    {
-      break;
-    }
-
-    // iterate over each byte we got back from the socket recv
-    // NOTE that we can't rely on all the data being there, we
-    // have to treat each byte as though we only have that byte
-    for ( i = 0; i < rx_length && relays_set < num_relays; i++ )
-    {
-      // skip over the http header, when we get two \r\n s in a row we
-      // know we're at the end
-      if ( end_header < 4 )
-      {
-        // increment end_header whenever we get part of a carrage retrun
-        if ( rx_buffer[i] == '\r' || rx_buffer[i] == '\n' )
-        {
-          end_header++;
-        // otherwise reset the count
-        }
-        else
-        {
-          end_header = 0;
-        }
-      // if we have 4 end_header we're onto the actual data
-      }
-      else
-      {
-        if ( ntor_onion_key_found != -1 )
-        {
-          if ( ntor_onion_key_found == strlen( ntor_onion_key ) )
-          {
-            ntor_onion_key_64[ntor_onion_key_64_length] = rx_buffer[i];
-            ntor_onion_key_64_length++;
-
-            if ( ntor_onion_key_64_length == 43 )
-            {
-              //v_base_64_decode( relays[relay_order[relay_index]].ntor_onion_key, ntor_onion_key_64, 43 );
-              ntor_onion_key_found = -1;
-            }
-          }
-          else if ( rx_buffer[i] == ntor_onion_key[ntor_onion_key_found] )
-          {
-            ntor_onion_key_found++;
-          }
-          else
-          {
-            ntor_onion_key_found = 0;
-          }
-        }
-
-        if ( master_key_found != -1 )
-        {
-          if ( master_key_found == strlen( master_key ) )
-          {
-            master_key_64[master_key_64_length] = rx_buffer[i];
-            master_key_64_length++;
-
-            if ( master_key_64_length == 43 )
-            {
-              //v_base_64_decode( relays[relay_order[relay_index]].master_key, master_key_64, 43 );
-              master_key_found = -1;
-            }
-          }
-          else if ( rx_buffer[i] == master_key[master_key_found] )
-          {
-            master_key_found++;
-          }
-          else
-          {
-            master_key_found = 0;
-          }
-        }
-
-        if ( signing_key_found != -1 )
-        {
-          if ( signing_key_found == strlen( signing_key ) )
-          {
-            if ( rx_buffer[i] != '\n' )
-            {
-              signing_key_64[signing_key_64_length] = rx_buffer[i];
-              signing_key_64_length++;
-            }
-
-            if ( signing_key_64_length == 187 )
-            {
-              v_base_64_decode( der, signing_key_64, 187 );
-              wc_ShaUpdate( &tmp_sha, der, 140 );
-              wc_ShaFinal( &tmp_sha, identity_digest );
-
-              for ( j = 0; j < num_relays; j++ )
-              {
-                if ( memcmp( identity_digest, relays[j].identity, ID_LENGTH ) == 0 )
-                {
-                  matched_relay = j;
-                  //ESP_LOGE( MINITOR_TAG, "matched relay: %d", matched_relay );
-                  break;
-                }
-              }
-              signing_key_found = -1;
-            }
-          }
-          else if ( rx_buffer[i] == signing_key[signing_key_found] )
-          {
-            signing_key_found++;
-          }
-          else
-          {
-            signing_key_found = 0;
-          }
-        }
-
-        if ( master_key_found == -1 && ntor_onion_key_found == -1 && signing_key_found == -1 )
-        {
-          v_base_64_decode( relays[matched_relay].ntor_onion_key, ntor_onion_key_64, 43 );
-          v_base_64_decode( relays[matched_relay].master_key, master_key_64, 43 );
-
-          relays_set++;
-          master_key_64_length = 0;
-          master_key_found = 0;
-          ntor_onion_key_64_length = 0;
-          ntor_onion_key_found = 0;
-          signing_key_64_length = 0;
-          signing_key_found = 0;
-        }
-      }
-    }
-  }
-
-finish:
-  wc_ShaFree( &tmp_sha );
-
-  shutdown( sock_fd, 0 );
-  close( sock_fd );
-
-  end = esp_timer_get_time();
-
-  if ( ret < 0 )
-  {
-    if ( using_fastest == 1 )
-    {
-      fetch_speed_sample = 0;
-      fastest_fetch_time = 0xffffffffffffffff;
-    }
-  }
-  else if ( using_cache_relay == 1 )
-  {
-    if ( using_fastest == 0 )
-    {
-      fetch_speed_sample++;
-    }
-
-    if ( end - start < fastest_fetch_time )
-    {
-      fastest_fetch_time = end - start;
-      memcpy( fastest_identity, cache_identity, ID_LENGTH );
-    }
-  }
-
-  return ret;
-}
-*/
 
 static int d_parse_line( int fd, char* line, int limit )
 {
@@ -1936,8 +1588,6 @@ int d_set_next_consenus()
   memcpy( network_consensus.previous_shared_rand, next_network_consensus->previous_shared_rand, 32 );
   memcpy( network_consensus.shared_rand, next_network_consensus->shared_rand, 32 );
 
-  //succ = d_load_hsdir_relays_from_file();
-
   xSemaphoreGive( network_consensus_mutex );
   // END mutex for the network consensus
 
@@ -1970,6 +1620,13 @@ int d_fetch_consensus_info()
   // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
   // get it on voting interval after, just to be careful
   next_srv_time = network_consensus.valid_after + ( ( 24 - ( ( ( network_consensus.valid_after / voting_interval ) ) % 24 ) + 1 ) * voting_interval );
+
+  if ( next_srv_time <= now )
+  {
+    ESP_LOGE( MINITOR_TAG, "got an invalid next_srv_time: %ld now: %ld", next_srv_time, now );
+    next_srv_time = now + 60;
+  }
+
   xTimerChangePeriod( consensus_timer, 1000 * ( next_srv_time - now ) / portTICK_PERIOD_MS, portMAX_DELAY );
   //xTimerChangePeriod( consensus_timer, 1000 * 10 / portTICK_PERIOD_MS, portMAX_DELAY );
 #else

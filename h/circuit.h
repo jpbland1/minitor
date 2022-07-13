@@ -33,12 +33,12 @@ int d_prepare_onion_circuit( OnionCircuit* onion_circuit, int length, OnionRelay
 int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uint8_t* exclude_start, uint8_t* exclude_end );
 int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, uint8_t* exclude_start, uint8_t* exclude_end );
 //int d_build_onion_circuit( OnionCircuit* circuit );
-int d_destroy_onion_circuit( OnionCircuit* circuit );
-int d_router_truncate( OnionCircuit* circuit, int new_length );
+int d_destroy_onion_circuit( OnionCircuit* circuit, DlConnection* or_connection );
+int d_router_truncate( OnionCircuit* circuit, DlConnection* or_connection, int new_length );
 //void v_handle_circuit( void* pv_parameters );
-int d_router_extend2( OnionCircuit* onion_circuit, int node_index );
+int d_router_extend2( OnionCircuit* circuit, DlConnection* or_connection, int node_index );
 int d_router_extended2( OnionCircuit* circuit, int node_index, Cell* extended2_cell );
-int d_router_create2( OnionCircuit* onion_circuit );
+int d_router_create2( OnionCircuit* circuit, DlConnection* or_connection );
 int d_router_created2( OnionCircuit* circuit, Cell* unpacked_cell );
 int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key );
 int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key );

@@ -14,7 +14,8 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t* data, uint32_t length );
 void v_cleanup_local_connection( uint32_t circ_id, uint32_t stream_id );
 void v_cleanup_local_connections_by_circ_id( uint32_t circ_id );
-bool b_verify_or_connection( DlConnection* or_connection );
+bool b_verify_or_connection( uint32_t id );
 void v_dettach_connection( DlConnection* or_connection );
+DlConnection* px_get_conn_by_id_and_lock( uint32_t id );
 
 #endif
