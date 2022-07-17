@@ -19,12 +19,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-
 #include "../include/config.h"
 #include "../include/minitor.h"
+#include "../h/port.h"
+
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
@@ -33,120 +31,111 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
-static void v_timer_trigger_timeout( TimerHandle_t x_timer )
+static void v_timer_trigger_timeout( MinitorTimer x_timer )
 {
   int succ;
   OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->type = TIMER_CIRCUIT_TIMEOUT;
 
-  succ = xQueueSendToBack( core_task_queue, (void*)(&onion_message), 0 );
+  succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
   if ( succ == pdFALSE )
   {
     free( onion_message );
-    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
   }
 }
 
-static void v_timer_trigger_consensus( TimerHandle_t x_timer )
+static void v_timer_trigger_consensus( MinitorTimer x_timer )
 {
   int succ;
   OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->type = TIMER_CONSENSUS;
 
-  succ = xQueueSendToBack( core_task_queue, (void*)(&onion_message), 0 );
+  succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
   if ( succ == pdFALSE )
   {
     free( onion_message );
-    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
   }
 }
 
-static void v_timer_trigger_keepalive( TimerHandle_t x_timer )
+static void v_timer_trigger_keepalive( MinitorTimer x_timer )
 {
   int succ;
   OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->type = TIMER_KEEPALIVE;
 
-  succ = xQueueSendToBack( core_task_queue, (void*)(&onion_message), 0 );
+  succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
   if ( succ == pdFALSE )
   {
     free( onion_message );
-    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
   }
 }
 
-static void v_timer_trigger_hsdir_update( TimerHandle_t x_timer )
+static void v_timer_trigger_hsdir_update( MinitorTimer x_timer )
 {
   int succ;
   OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->type = TIMER_HSDIR;
   onion_message->data = pvTimerGetTimerID( x_timer );
 
-  succ = xQueueSendToBack( core_task_queue, (void*)(&onion_message), 0 );
+  succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
   if ( succ == pdFALSE )
   {
     free( onion_message );
-    xTimerChangePeriod( x_timer, 500 / portTICK_PERIOD_MS, portMAX_DELAY );
+    MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
   }
 }
 
 // intialize tor
 int d_minitor_INIT()
 {
-  circ_id_mutex = xSemaphoreCreateMutex();
-  network_consensus_mutex = xSemaphoreCreateMutex();
-  crypto_insert_finish = xSemaphoreCreateMutex();
-  connections_mutex = xSemaphoreCreateMutex();
-  circuits_mutex = xSemaphoreCreateMutex();
-  fastest_cache_mutex = xSemaphoreCreateMutex();
+  circ_id_mutex = MINITOR_MUTEX_CREATE();
+  network_consensus_mutex = MINITOR_MUTEX_CREATE();
+  crypto_insert_finish = MINITOR_MUTEX_CREATE();
+  connections_mutex = MINITOR_MUTEX_CREATE();
+  circuits_mutex = MINITOR_MUTEX_CREATE();
+  fastest_cache_mutex = MINITOR_MUTEX_CREATE();
 
-  core_task_queue = xQueueCreate( 25, sizeof( OnionMessage* ) );
+  core_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
 
-  xTaskCreatePinnedToCore(
-    v_minitor_daemon,
-    "MINITOR_DAEMON",
-    7168,
-    //15000,
-    NULL,
-    7,
-    NULL,
-    tskNO_AFFINITY
-  );
+  b_create_core_task( NULL );
 
-  consensus_timer = xTimerCreate(
+  consensus_timer = MINITOR_TIMER_CREATE_MS(
     "CONSENSUS_TIMER",
-    1000 * 60 * 60 * 24 / portTICK_PERIOD_MS,
+    1000 * 60 * 60 * 24,
     0,
     NULL,
     v_timer_trigger_consensus
   );
-  xTimerStop( consensus_timer, portMAX_DELAY );
+  MINITOR_TIMER_STOP_BLOCKING( consensus_timer );
 
-  keepalive_timer = xTimerCreate(
+  keepalive_timer = MINITOR_TIMER_CREATE_MS(
     "KEEPALIVE_TIMER",
-    1000 * 60 * 2 / portTICK_PERIOD_MS,
+    1000 * 60 * 2,
     0,
     NULL,
     v_timer_trigger_keepalive
   );
-  xTimerReset( keepalive_timer, portMAX_DELAY );
+  MINITOR_TIMER_RESET_BLOCKING( keepalive_timer );
 
-  timeout_timer = xTimerCreate(
+  timeout_timer = MINITOR_TIMER_CREATE_MS(
     "TIMEOUT_TIMER",
-    1000 * 10 / portTICK_PERIOD_MS,
+    1000 * 10,
     0,
     NULL,
     v_timer_trigger_timeout
   );
-  xTimerReset( timeout_timer, portMAX_DELAY );
+  MINITOR_TIMER_RESET_BLOCKING( timeout_timer );
 
   wolfSSL_Init();
   /* wolfSSL_Debugging_ON(); */
@@ -154,18 +143,17 @@ int d_minitor_INIT()
   //if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_3_client_method() ) ) == NULL )
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't setup wolfssl context" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't setup wolfssl context" );
 
     return -1;
   }
 
-  ESP_LOGE( MINITOR_TAG, "Starting fetch" );
+  MINITOR_LOG( MINITOR_TAG, "Starting fetch" );
+
   // fetch network consensus
   while ( d_fetch_consensus_info() < 0 )
   {
-    ESP_LOGE( MINITOR_TAG, "Fetch failed, retrying" );
+    MINITOR_LOG( MINITOR_TAG, "Fetch failed, retrying" );
   }
 
   return 0;
@@ -183,20 +171,18 @@ int d_setup_onion_service( unsigned short local_port, unsigned short exit_port, 
   service->exit_port = exit_port;
   service->rend_timestamp = 0;
 
-  service->hsdir_timer = xTimerCreate(
+  service->hsdir_timer = MINITOR_TIMER_CREATE_MS(
     "HSDIR_TIMER",
-    1000 * 60 * 60 * 24 / portTICK_PERIOD_MS,
+    1000 * 60 * 60 * 24,
     0,
     (void*)service,
     v_timer_trigger_hsdir_update
   );
-  xTimerStop( service->hsdir_timer, portMAX_DELAY );
+  MINITOR_TIMER_STOP_BLOCKING( service->hsdir_timer );
 
   if ( d_generate_hs_keys( service, onion_service_directory ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to generate hs keys" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to generate hs keys" );
 
     free( service );
 
@@ -207,7 +193,7 @@ int d_setup_onion_service( unsigned short local_port, unsigned short exit_port, 
   onion_message->type = INIT_SERVICE;
   onion_message->data = service;
 
-  xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
 
   return 0;
 }

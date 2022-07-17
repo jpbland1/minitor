@@ -20,9 +20,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "esp_log.h"
-
 #include "../../include/config.h"
+#include "../../h/port.h"
+
 #include "../../h/constants.h"
 
 int d_roll_revision_counter()
@@ -43,9 +43,7 @@ int d_roll_revision_counter()
 
   if ( fd < 0 )
   {
-#ifdef MINITOR_CHUTNEY
-    ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "rev_counter" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "rev_counter" );
     
     return -1;
   }
@@ -54,9 +52,7 @@ int d_roll_revision_counter()
   {
     if ( read( fd, &count, sizeof( int ) ) != sizeof( int ) )
     {
-#ifdef MINITOR_CHUTNEY
-      ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "rev_counter" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "rev_counter" );
 
       count = -1;
       goto finish;
@@ -64,9 +60,7 @@ int d_roll_revision_counter()
 
     if ( lseek( fd, 0, SEEK_SET ) != 0 )
     {
-  #ifdef MINITOR_CHUTNEY
-      ESP_LOGE( MINITOR_TAG, "Failed to seek " FILESYSTEM_PREFIX "rev_counter" );
-  #endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to seek " FILESYSTEM_PREFIX "rev_counter" );
 
       count = -1;
       goto finish;
@@ -82,9 +76,7 @@ int d_roll_revision_counter()
 
   if ( write( fd, &count, sizeof( int ) ) != sizeof( int ) )
   {
-#ifdef MINITOR_CHUTNEY
-    ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "rev_counter" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "rev_counter" );
 
     count = -1;
     goto finish;

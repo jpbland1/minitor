@@ -18,7 +18,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdlib.h>
 #include <string.h>
-#include "esp_log.h"
 
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/aes.h"
@@ -26,6 +25,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "wolfssl/wolfcrypt/sha3.h"
 
 #include "../include/config.h"
+#include "../h/port.h"
 
 #include "../h/cell.h"
 #include "../h/structures/onion_message.h"
@@ -269,7 +269,8 @@ void v_networkize_cell( Cell* cell )
 
           break;
         default:
-          //ESP_LOGE( MINITOR_TAG, "unhandled relay command %d", cell->payload.relay.relay_command );
+          //MINITOR_LOG( MINITOR_TAG, "unhandled relay command %d", cell->payload.relay.relay_command );
+
           break;
       }
 
@@ -287,7 +288,7 @@ void v_networkize_cell( Cell* cell )
       break;
 
     default:
-      //ESP_LOGE( MINITOR_TAG, "unhandled command %d", cell->command );
+      //MINITOR_LOG( MINITOR_TAG, "unhandled command %d", cell->command );
 
       break;
   }
@@ -296,7 +297,7 @@ void v_networkize_cell( Cell* cell )
 
   if ( ( cell->command == RELAY || cell->command == RELAY_EARLY ) && cell->payload.relay.relay_command != RELAY_BEGIN_DIR )
   {
-    esp_fill_random( (uint8_t*)cell + FIXED_CELL_OFFSET + cell->length, CELL_LEN - cell->length );
+    MINITOR_FILL_RANDOM( (uint8_t*)cell + FIXED_CELL_OFFSET + cell->length, CELL_LEN - cell->length );
   }
   else
   {
@@ -314,9 +315,7 @@ int d_send_cell_and_free( DlConnection* or_connection, Cell* cell )
 
   if ( succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send packed cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send packed cell" );
   }
 
   free( cell );
@@ -350,7 +349,6 @@ int d_send_relay_cell_and_free( DlConnection* or_connection, Cell* cell, DoublyL
     wc_Sha3_256_GetHash( &hs_crypto->hs_running_sha_backward, tmp_digest );
   }
 
-  // TODO verify this is at + 10
   memcpy( &(cell->payload.relay.digest), tmp_digest, 4 );
 
   // encrypt the RELAY_EARLY cell's payload from R_(node_index-1) to R_0
@@ -360,9 +358,7 @@ int d_send_relay_cell_and_free( DlConnection* or_connection, Cell* cell, DoublyL
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY payload, error code: %d", succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to encrypt RELAY payload, error code: %d", succ );
 
       ret = -1;
       goto finish;
@@ -376,9 +372,7 @@ int d_send_relay_cell_and_free( DlConnection* or_connection, Cell* cell, DoublyL
     succ = wc_AesCtrEncrypt( &hs_crypto->hs_aes_backward, cell->payload.data, cell->payload.data, PAYLOAD_LEN );
 
     if ( succ < 0 ) {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt RELAY payload using hs crypto, error code: %d", succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to encrypt RELAY payload using hs crypto, error code: %d", succ );
 
       ret = -1;
       goto finish;
@@ -390,9 +384,7 @@ int d_send_relay_cell_and_free( DlConnection* or_connection, Cell* cell, DoublyL
 
   if ( succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY cell" );
 
     ret = -1;
     goto finish;
@@ -439,9 +431,7 @@ int d_recv_cell( WOLFSSL* ssl, uint8_t** cell, int circ_id_length )
     // if rx_length is 0 then we've hit an error and should return -1
     if ( rx_length <= 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to wolfSSL_recv rx_length: %d, error code: %d", rx_length, wolfSSL_get_error( ssl, rx_length ) );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to wolfSSL_recv rx_length: %d, error code: %d", rx_length, wolfSSL_get_error( ssl, rx_length ) );
 
       free( *cell );
 
@@ -527,18 +517,14 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
 
   if ( cell->command != RELAY )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, cell was not relay %d", cell->command );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to decrypt RELAY payload, cell was not relay %d", cell->command );
 
     return -1;
   }
 
   if ( relay_list == NULL )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to decrypt RELAY payload, relay list was null" );
 
     return -1;
   }
@@ -552,9 +538,7 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
 
     if ( wolf_succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to decrypt RELAY payload, error code: %d", wolf_succ );
 
       return -1;
     }
@@ -584,9 +568,8 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
 
   if ( !fully_recognized && hs_crypto == NULL )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on circuit" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Relay cell was not recognized on circuit" );
+
     wc_ShaFree( &tmp_sha );
 
     return -1;
@@ -597,9 +580,7 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
 
     if ( wolf_succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to decrypt RELAY payload using hs_aes_forward, error code: %d", wolf_succ );
 
       return -1;
     }
@@ -620,9 +601,8 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
       }
       else
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Relay cell was not recognized on hidden service" );
-#endif
+        MINITOR_LOG( MINITOR_TAG, "Relay cell was not recognized on hidden service" );
+
         wc_Sha3_256_Free( &tmp_sha3 );
 
         return -1;
@@ -630,9 +610,7 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
     }
     else
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Cell recognized not set to 0" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Cell recognized not set to 0" );
 
       return -1;
     }

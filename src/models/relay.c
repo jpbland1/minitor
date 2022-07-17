@@ -24,10 +24,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <unistd.h>
 #include <errno.h>
 
-#include "esp_log.h"
 #include "user_settings.h"
 
 #include "../../include/config.h"
+#include "../../h/port.h"
+
 #include "../../h/constants.h"
 #include "../../h/consensus.h"
 #include "../../h/models/relay.h"
@@ -48,18 +49,14 @@ static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename )
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
 
     return -1;
   }
 
   if ( write( fd, onion_relay, sizeof( OnionRelay )  ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
 
     close( fd );
 
@@ -131,9 +128,7 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 
     return -1;
   }
@@ -142,9 +137,7 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 
   if ( succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 
     close( fd );
 
@@ -161,8 +154,6 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
     }
 
     count++;
-
-    //ESP_LOGE( MINITOR_TAG, "or_port: %d", onion_relay->or_port );
 
     db_relay = used_relays->head;
 
@@ -292,9 +283,8 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 
   if ( succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
+
     while ( greater_list->length > 0 )
     {
       v_pop_relay_from_list_back( greater_list );
@@ -315,16 +305,14 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 static OnionRelay* get_random_relay_from_list( const char* filename, int count )
 {
   int fd;
-  int rand = esp_random() % count;
+  int rand = MINITOR_RANDOM() % count;
   OnionRelay* ret_relay = malloc( sizeof( OnionRelay ) );
 
   fd = open( filename, O_RDONLY );
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
 
     free( ret_relay );
 
@@ -334,27 +322,21 @@ static OnionRelay* get_random_relay_from_list( const char* filename, int count )
   // min of rand is zero so this won't go over by 1
   if ( lseek( fd, sizeof( time_t ) + rand * sizeof( OnionRelay ), SEEK_SET ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to lseek %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to lseek %s, errno: %d", filename, errno );
 
     goto fail;
   }
 
   if ( read( fd, ret_relay, sizeof( OnionRelay ) ) != sizeof( OnionRelay ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to read %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to read %s, errno: %d", filename, errno );
 
     goto fail;
   }
 
   if ( close( fd ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
 
     free( ret_relay );
 
@@ -450,9 +432,7 @@ OnionRelay* px_get_cache_relay_by_identity( uint8_t* identity, bool staging )
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s, errno: %d", filepath, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filepath, errno );
 
     free( ret_relay );
 
@@ -462,9 +442,7 @@ OnionRelay* px_get_cache_relay_by_identity( uint8_t* identity, bool staging )
   // min of rand is zero so this won't go over by 1
   if ( lseek( fd, sizeof( time_t ), SEEK_SET ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to lseek %s, errno: %d", filepath, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to lseek %s, errno: %d", filepath, errno );
 
     goto fail;
   }
@@ -473,9 +451,7 @@ OnionRelay* px_get_cache_relay_by_identity( uint8_t* identity, bool staging )
   {
     if ( read( fd, ret_relay, sizeof( OnionRelay ) ) != sizeof( OnionRelay ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read next relay from %s", filepath );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read next relay from %s", filepath );
 
       goto fail;
     }
@@ -483,9 +459,7 @@ OnionRelay* px_get_cache_relay_by_identity( uint8_t* identity, bool staging )
 
   if ( close( fd ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close %s, errno: %d", filepath, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to close %s, errno: %d", filepath, errno );
 
     free( ret_relay );
 
@@ -540,18 +514,14 @@ static int d_reset_relay_list( const char* filename )
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to reset %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to reset %s, errno: %d", filename, errno );
 
     return -1;
   }
 
   if ( write( fd, &dummy_until, sizeof( time_t )  ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
 
     close( fd );
 
@@ -560,9 +530,7 @@ static int d_reset_relay_list( const char* filename )
 
   if ( close( fd ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
   }
 
   return 0;
@@ -598,18 +566,14 @@ static int d_get_relay_list_valid_until( const char* filename )
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
 
     return -1;
   }
 
   if ( read( fd, &valid_until, sizeof( time_t )  ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to read %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to read %s, errno: %d", filename, errno );
 
     close( fd );
 
@@ -618,9 +582,7 @@ static int d_get_relay_list_valid_until( const char* filename )
 
   if ( close( fd ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
 
     return -1;
   }
@@ -651,18 +613,14 @@ static int d_set_relay_list_valid_until( time_t valid_until, const char* filenam
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
 
     return -1;
   }
 
   if ( write( fd, &valid_until, sizeof( time_t )  ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s, errno: %d", filename, errno );
 
     close( fd );
 
@@ -671,9 +629,7 @@ static int d_set_relay_list_valid_until( time_t valid_until, const char* filenam
 
   if ( close( fd ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to close %s, errno: %d", filename, errno );
 
     return -1;
   }
@@ -702,9 +658,7 @@ static int d_get_relay_list_count( const char* filename )
 
   if ( stat( filename, &st ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to stat %s, errno: %d", filename, errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to stat %s, errno: %d", filename, errno );
 
     return -1;
   }
@@ -742,9 +696,7 @@ int d_finalize_staged_relay_lists()
   {
     if ( unlink( FILESYSTEM_PREFIX "hsdir_list" ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 
       return -1;
     }
@@ -754,9 +706,7 @@ int d_finalize_staged_relay_lists()
   {
     if ( unlink( FILESYSTEM_PREFIX "cache_list" ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
 
       return -1;
     }
@@ -766,9 +716,7 @@ int d_finalize_staged_relay_lists()
   {
     if ( unlink( FILESYSTEM_PREFIX "fast_list" ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
 
       return -1;
     }
@@ -776,27 +724,21 @@ int d_finalize_staged_relay_lists()
 
   if ( rename( FILESYSTEM_PREFIX "hsdir_list_stg", FILESYSTEM_PREFIX "hsdir_list" ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 
       return -1;
   }
 
   if ( rename( FILESYSTEM_PREFIX "cache_list_stg", FILESYSTEM_PREFIX "cache_list" ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "cache_list, errno: %d", errno );
 
       return -1;
   }
 
   if ( rename( FILESYSTEM_PREFIX "fast_list_stg", FILESYSTEM_PREFIX "fast_list" ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename " FILESYSTEM_PREFIX "fast_list, errno: %d", errno );
 
       return -1;
   }

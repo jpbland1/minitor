@@ -21,8 +21,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../../include/config.h"
 #include "../../h/structures/consensus.h"
 
-TimerHandle_t consensus_timer;
-TimerHandle_t consensus_valid_timer;
+MinitorTimer consensus_timer;
+MinitorTimer consensus_valid_timer;
 
 // shared state must be protected by mutex
 NetworkConsensus network_consensus = {
@@ -42,8 +42,8 @@ NetworkConsensus network_consensus = {
   .hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT,
 #endif
 };
-SemaphoreHandle_t network_consensus_mutex;
-SemaphoreHandle_t crypto_insert_finish;
+MinitorMutex network_consensus_mutex;
+MinitorMutex crypto_insert_finish;
 
 // add a linked onion relay to a doubly linked list of onion relays
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list )

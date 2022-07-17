@@ -19,15 +19,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdlib.h>
 #include <time.h>
 
-#include "esp_log.h"
-#include "lwip/sockets.h"
-
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 
 #include "../include/config.h"
+#include "../h/port.h"
+
 #include "../h/constants.h"
 #include "../h/consensus.h"
 #include "../h/encoding.h"
@@ -41,9 +40,9 @@ uint64_t fastest_fetch_time = 0xffffffffffffffff;
 uint8_t fastest_identity[ID_LENGTH];
 uint8_t previous_fastest_identity[ID_LENGTH];
 
-SemaphoreHandle_t fastest_cache_mutex;
-QueueHandle_t insert_relays_queue;
-QueueHandle_t fetch_relays_queue;
+MinitorMutex fastest_cache_mutex;
+MinitorQueue insert_relays_queue;
+MinitorQueue fetch_relays_queue;
 
 typedef struct FetchDescriptorState
 {
@@ -94,7 +93,7 @@ static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period,
   wc_Sha3_256_Free( &reusable_sha3 );
 }
 
-static void v_handle_crypto_and_insert( void* pv_parameters )
+void v_handle_crypto_and_insert( void* pv_parameters )
 {
   int process_count = 0;
   int shutdown_count = 0;
@@ -102,9 +101,9 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
   NetworkConsensus* working_consensus = (NetworkConsensus*)pv_parameters;
 
   // MUTEX TAKE
-  xSemaphoreTake( crypto_insert_finish, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( crypto_insert_finish );
 
-  while ( xQueueReceive( insert_relays_queue, &onion_relay, portMAX_DELAY ) )
+  while ( MINITOR_DEQUEUE_BLOCKING( insert_relays_queue, &onion_relay ) )
   {
     if ( onion_relay == NULL )
     {
@@ -112,10 +111,11 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
 
       if ( shutdown_count >= 2 )
       {
-        ESP_LOGE( MINITOR_TAG, "%d total relays processed", process_count );
-        xSemaphoreGive( crypto_insert_finish );
+        MINITOR_LOG( MINITOR_TAG, "%d total relays processed", process_count );
+
+        MINITOR_MUTEX_GIVE( crypto_insert_finish );
         // MUTEX GIVE
-        vTaskDelete( NULL );
+        MINITOR_TASK_DELETE( NULL );
       }
 
       continue;
@@ -123,11 +123,11 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
 
 #ifdef DEBUG_MINITOR
 #ifdef MINITOR_CHUTNEY
-    ESP_LOGE( MINITOR_TAG, "%d relays processed so far", process_count );
+    MINITOR_LOG( MINITOR_TAG, "%d relays processed so far", process_count );
 #else
     if ( process_count % 50 == 0 )
     {
-      ESP_LOGE( MINITOR_TAG, "%d relays processed so far", process_count );
+      MINITOR_LOG( MINITOR_TAG, "%d relays processed so far", process_count );
     }
 #endif
 
@@ -141,7 +141,7 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
 
       while ( d_create_hsdir_relay( onion_relay ) < 0 )
       {
-        ESP_LOGE( MINITOR_TAG, "Failed to d_create_hsdir_relay, retrying" );
+        MINITOR_LOG( MINITOR_TAG, "Failed to d_create_hsdir_relay, retrying" );
       }
     }
 
@@ -153,7 +153,7 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
     {
       while ( d_create_cache_relay( onion_relay ) < 0 )
       {
-        ESP_LOGE( MINITOR_TAG, "Failed to d_create_cache_relay, retrying" );
+        MINITOR_LOG( MINITOR_TAG, "Failed to d_create_cache_relay, retrying" );
       }
     }
 
@@ -165,7 +165,7 @@ static void v_handle_crypto_and_insert( void* pv_parameters )
     {
       while ( d_create_fast_relay( onion_relay ) < 0 )
       {
-        ESP_LOGE( MINITOR_TAG, "Failed to d_create_fast_relay, retrying" );
+        MINITOR_LOG( MINITOR_TAG, "Failed to d_create_fast_relay, retrying" );
       }
     }
 
@@ -213,7 +213,7 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
   if ( d_get_staging_cache_relay_count() != 0 )
   {
     // MUTEX TAKE
-    xSemaphoreTake( fastest_cache_mutex, portMAX_DELAY );
+    MINITOR_MUTEX_TAKE_BLOCKING( fastest_cache_mutex );
 
     if ( fetch_speed_sample >= 30 )
     {
@@ -226,7 +226,7 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
       ret = 1;
     }
 
-    xSemaphoreGive( fastest_cache_mutex );
+    MINITOR_MUTEX_GIVE( fastest_cache_mutex );
     // MUTEX GIVE
 
     if ( cache_relay == NULL )
@@ -272,7 +272,7 @@ static int d_get_suitable_dir_addr( struct sockaddr_in* dest_addr, char* ip_addr
   }
   else
   {
-    i = esp_random() % tor_authorities_count;
+    i = MINITOR_RANDOM() % tor_authorities_count;
 
     authority_string = tor_authorities[i];
 
@@ -359,16 +359,14 @@ static int d_start_descriptor_fetch( FetchDescriptorState* fetch_state )
     }
   }
 
-  fetch_state->start = esp_timer_get_time();
+  fetch_state->start = MINITOR_GET_TIME();
 
   // create a socket to access the descriptor
   fetch_state->sock_fd = socket( AF_INET, SOCK_STREAM, IPPROTO_IP );
 
   if ( fetch_state->sock_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't create a socket to http server" );
 
     return -1;
   }
@@ -378,9 +376,7 @@ static int d_start_descriptor_fetch( FetchDescriptorState* fetch_state )
 
   if ( err != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't connect to http server %s", ip_addr_str );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't connect to http server %s", ip_addr_str );
 
     goto fail;
   }
@@ -390,9 +386,7 @@ static int d_start_descriptor_fetch( FetchDescriptorState* fetch_state )
 
   if ( err < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't send to http server" );
 
     goto fail;
   }
@@ -447,9 +441,7 @@ static int d_finish_descriptor_fetch( FetchDescriptorState* fetch_state )
     // if we got less than 0 we encoutered an error
     if ( rx_length < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "couldn't recv http server in d_finish_descriptor_fetch" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "couldn't recv http server in d_finish_descriptor_fetch" );
 
       ret = -1;
       goto finish;
@@ -588,10 +580,10 @@ finish:
   shutdown( fetch_state->sock_fd, 0 );
   close( fetch_state->sock_fd );
 
-  end = esp_timer_get_time();
+  end = MINITOR_GET_TIME();
 
   // MUTEX TAKE
-  xSemaphoreTake( fastest_cache_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( fastest_cache_mutex );
 
   if ( ret < 0 && fetch_state->using_cache_relay == 2 )
   {
@@ -609,13 +601,13 @@ finish:
     }
   }
 
-  xSemaphoreGive( fastest_cache_mutex );
+  MINITOR_MUTEX_GIVE( fastest_cache_mutex );
   // MUTEX GIVE
 
   return ret;
 }
 
-static void v_handle_relay_fetch( void* pv_parameters )
+void v_handle_relay_fetch( void* pv_parameters )
 {
   int i;
   int j;
@@ -645,7 +637,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
     // wait half a second at most before checking our polls
     if ( final_relay_hit == 0 && waiting_relay == 0 )
     {
-      succ = xQueueReceive( fetch_relays_queue, &onion_relay, 500 / portTICK_PERIOD_MS );
+      succ = MINITOR_DEQUEUE_MS( fetch_relays_queue, &onion_relay, 500 );
     }
 
     if ( succ == pdTRUE || waiting_relay == 1 )
@@ -654,9 +646,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
       {
         final_relay_hit = 1;
 
-#ifdef MINITOR_CHUTNEY
-        ESP_LOGE( MINITOR_TAG, "Got final relay to fetch" );
-#endif
+        MINITOR_LOG( MINITOR_TAG, "Got final relay to fetch" );
 
         for ( i = 0; i < 2; i++ )
         {
@@ -664,7 +654,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
           {
             while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
             {
-              ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+              MINITOR_LOG( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
             }
 
             fetch_poll[i].fd = fetch_states[i].sock_fd;
@@ -687,7 +677,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
             {
               while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
               {
-                ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+                MINITOR_LOG( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
               }
 
               fetch_poll[i].fd = fetch_states[i].sock_fd;
@@ -728,11 +718,11 @@ static void v_handle_relay_fetch( void* pv_parameters )
             // we're going to assume that once a socket is ready to read, we can read the entire thing
             if ( d_finish_descriptor_fetch( &fetch_states[i] ) < 0 )
             {
-              ESP_LOGE( MINITOR_TAG, "Failed to finish fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+              MINITOR_LOG( MINITOR_TAG, "Failed to finish fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
 
               while ( d_start_descriptor_fetch( &fetch_states[i] ) < 0 )
               {
-                ESP_LOGE( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
+                MINITOR_LOG( MINITOR_TAG, "Failed to start fetch of relay descriptors, retrying: %d", fetch_states[i].num_relays );
               }
 
               fetch_poll[i].fd = fetch_states[i].sock_fd;
@@ -743,7 +733,7 @@ static void v_handle_relay_fetch( void* pv_parameters )
               // send the fetched relays off to the insert task
               for ( j = 0; j < fetch_states[i].num_relays; j++ )
               {
-                xQueueSendToBack( insert_relays_queue, (void*)(&fetch_states[i].relays[j]), portMAX_DELAY );
+                MINITOR_ENQUEUE_BLOCKING( insert_relays_queue, (void*)(&fetch_states[i].relays[j]) );
                 relays_fetched++;
               }
 
@@ -759,10 +749,10 @@ static void v_handle_relay_fetch( void* pv_parameters )
 
   // send null, the insert task receives 2 before shutting down
   onion_relay = NULL;
-  xQueueSendToBack( insert_relays_queue, (void*)(&onion_relay), portMAX_DELAY );
+  MINITOR_ENQUEUE_BLOCKING( insert_relays_queue, (void*)(&onion_relay) );
 
-  ESP_LOGE( MINITOR_TAG, "This task fetched %d relays", relays_fetched );
-  vTaskDelete( NULL );
+  MINITOR_LOG( MINITOR_TAG, "This task fetched %d relays", relays_fetched );
+  MINITOR_TASK_DELETE( NULL );
 }
 
 static int d_parse_date_string( char* date_string )
@@ -791,9 +781,7 @@ static int d_parse_line( int fd, char* line, int limit )
 
     if ( ret < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read consensus line, errno: %d", errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read consensus line, errno: %d", errno );
 
       return -1;
     }
@@ -1035,8 +1023,8 @@ static int d_download_consensus()
   NetworkConsensus* consensus;
   int found_hsdir = 0;
   bool insert_finished = false;
-  TaskHandle_t fetch_handles[2];
-  TaskHandle_t crypto_insert_handle;
+  MinitorTask fetch_handles[2];
+  MinitorTask crypto_insert_handle;
 
 #ifndef MINITOR_CHUTNEY
   // check if our current consensus is still fresh, no need to re-download
@@ -1054,9 +1042,8 @@ static int d_download_consensus()
 
       if ( rx_length != sizeof( char ) || i > 500 )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "Failed to find valid-until value" );
-#endif
+        MINITOR_LOG( MINITOR_TAG, "Failed to find valid-until value" );
+
         break;
       }
 
@@ -1085,15 +1072,13 @@ static int d_download_consensus()
               d_load_fast_relay_count() >= 0
             )
             {
-              ESP_LOGE( MINITOR_TAG, "Using valid consensus already downloaded" );
+              MINITOR_LOG( MINITOR_TAG, "Using valid consensus already downloaded" );
 
               err = lseek( fd, 0, SEEK_SET );
 
               if ( err < 0 )
               {
-#ifdef DEBUG_MINITOR
-                ESP_LOGE( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
-#endif
+                MINITOR_LOG( MINITOR_TAG, "Failed to lseek " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 
                 close( fd );
 
@@ -1101,7 +1086,7 @@ static int d_download_consensus()
               }
 
               // BEGIN mutex for the network consensus
-              xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+              MINITOR_MUTEX_TAKE_BLOCKING( network_consensus_mutex );
 
               network_consensus.method = 0;
               network_consensus.valid_after = 0;
@@ -1119,16 +1104,14 @@ static int d_download_consensus()
 
               if ( d_parse_network_consensus_from_file( fd, &network_consensus ) )
               {
-#ifdef DEBUG_MINITOR
-                ESP_LOGE( MINITOR_TAG, "Failed to parse network consensus from file" );
-#endif
+                MINITOR_LOG( MINITOR_TAG, "Failed to parse network consensus from file" );
 
                 close( fd );
 
                 return -1;
               }
 
-              xSemaphoreGive( network_consensus_mutex );
+              MINITOR_MUTEX_GIVE( network_consensus_mutex );
               // END mutex for the network consensus
 
               return 0;
@@ -1183,9 +1166,7 @@ static int d_download_consensus()
 
   if ( sock_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create a socket to http server" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't create a socket to http server" );
 
     return -1;
   }
@@ -1195,9 +1176,7 @@ static int d_download_consensus()
 
   if ( err != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't connect to http server" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't connect to http server" );
 
     close( sock_fd );
 
@@ -1209,9 +1188,7 @@ static int d_download_consensus()
 
   if ( err < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't send to http server" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't send to http server" );
 
     shutdown( sock_fd, 0 );
     close( sock_fd );
@@ -1221,9 +1198,7 @@ static int d_download_consensus()
 
   if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_CREAT | O_TRUNC ) ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 
     shutdown( sock_fd, 0 );
     close( sock_fd );
@@ -1234,6 +1209,7 @@ static int d_download_consensus()
   close( fd );
 
   memset( &parse_relay, 0, sizeof( OnionRelay ) );
+
   consensus = malloc( sizeof( NetworkConsensus ) );
   rx_buffer = malloc( sizeof( char ) * 4092 );
 
@@ -1259,9 +1235,7 @@ static int d_download_consensus()
     // if we got less than 0 we encoutered an error
     if ( rx_length < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "couldn't recv http server in d_download_consensus" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "couldn't recv http server in d_download_consensus" );
 
       ret = -1;
       goto finish;
@@ -1272,9 +1246,8 @@ static int d_download_consensus()
     {
       if ( finished_consensus == 0 )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( MINITOR_TAG, "couldn't recv a consensus, got 0 bytes before end" );
-#endif
+        MINITOR_LOG( MINITOR_TAG, "couldn't recv a consensus, got 0 bytes before end" );
+
         ret = -1;
         goto finish;
       }
@@ -1314,9 +1287,7 @@ static int d_download_consensus()
       {
         if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_WRONLY | O_APPEND ) ) < 0 )
         {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
-#endif
+          MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 
           continue;
         }
@@ -1324,9 +1295,7 @@ static int d_download_consensus()
         err = write( fd, rx_buffer + i, ( rx_length - i ) );
 
         if ( err != ( rx_length - i ) ) {
-#ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
-#endif
+          MINITOR_LOG( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 
           close( fd );
         }
@@ -1361,39 +1330,14 @@ static int d_download_consensus()
             consensus->time_period = d_get_hs_time_period( consensus->fresh_until, consensus->valid_after, consensus->hsdir_interval );
 
             // sizeof pointer, not the actual struct
-            insert_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
-            fetch_relays_queue = xQueueCreate( 9, sizeof( OnionRelay* ) );
+            insert_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
+            fetch_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
 
             // create two v_handle_relay_fetch to increase throughput
-            fetch_handles[0] = xTaskCreatePinnedToCore(
-              v_handle_relay_fetch,
-              "H_RELAY_FETCH",
-              3072,
-              (void*)(consensus),
-              7,
-              NULL,
-              tskNO_AFFINITY
-            );
+            b_create_fetch_task( &fetch_handles[0], consensus );
+            b_create_fetch_task( &fetch_handles[1], consensus );
 
-            fetch_handles[1] = xTaskCreatePinnedToCore(
-              v_handle_relay_fetch,
-              "H_RELAY_FETCH",
-              3072,
-              (void*)(consensus),
-              7,
-              NULL,
-              tskNO_AFFINITY
-            );
-
-            crypto_insert_handle = xTaskCreatePinnedToCore(
-              v_handle_crypto_and_insert,
-              "H_CRYPTO_INSERT",
-              3072,
-              (void*)(consensus),
-              8,
-              NULL,
-              tskNO_AFFINITY
-            );
+            b_create_insert_task( &crypto_insert_handle, consensus );
           }
           // 1 means the relay is ready to have its descriptors fetched
           else if ( finished_consensus == 1 && d_parse_line_to_relay( &parse_relay, line ) == 1 )
@@ -1403,7 +1347,7 @@ static int d_download_consensus()
               found_hsdir++;
               tmp_relay = malloc( sizeof( OnionRelay ) );
               memcpy( tmp_relay, &parse_relay, sizeof( OnionRelay ) );
-              xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
+              MINITOR_ENQUEUE_BLOCKING( fetch_relays_queue, (void*)(&tmp_relay) );
             }
 
             memset( &parse_relay, 0, sizeof( OnionRelay ) );
@@ -1417,16 +1361,16 @@ static int d_download_consensus()
     rx_total += rx_length;
   }
 
-  ESP_LOGE( MINITOR_TAG, "Found %d hsdir relays in the consensus", found_hsdir );
+  MINITOR_LOG( MINITOR_TAG, "Found %d hsdir relays in the consensus", found_hsdir );
 
   // send two nulls, each fetch task will forward it to the insert task which
   // will wait for 2 before quitting
   tmp_relay = NULL;
-  xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
-  xQueueSendToBack( fetch_relays_queue, (void*)(&tmp_relay), portMAX_DELAY );
+  MINITOR_ENQUEUE_BLOCKING( fetch_relays_queue, (void*)(&tmp_relay) );
+  MINITOR_ENQUEUE_BLOCKING( fetch_relays_queue, (void*)(&tmp_relay) );
 
   // take the semaphore so we know the crypto and insert task finished
-  ret = xSemaphoreTake( crypto_insert_finish, 1000 * 60 / portTICK_PERIOD_MS );
+  ret = MINITOR_MUTEX_TAKE_MS( crypto_insert_finish, 1000 * 60 );
 
   if ( ret != pdTRUE )
   {
@@ -1434,7 +1378,7 @@ static int d_download_consensus()
     goto finish;
   }
 
-  xSemaphoreGive( crypto_insert_finish );
+  MINITOR_MUTEX_GIVE( crypto_insert_finish );
 
   insert_finished = true;
 
@@ -1449,7 +1393,7 @@ static int d_download_consensus()
   }
 
   // BEGIN mutex for the network consensus
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( network_consensus_mutex );
 
   network_consensus.method = consensus->method;
   network_consensus.valid_after = consensus->valid_after;
@@ -1462,10 +1406,11 @@ static int d_download_consensus()
   if ( d_finalize_staged_relay_lists() < 0 )
   {
     ret = -1;
-    ESP_LOGE( MINITOR_TAG, "Failed to finalize staged relay lists" );
+
+    MINITOR_LOG( MINITOR_TAG, "Failed to finalize staged relay lists" );
   }
 
-  xSemaphoreGive( network_consensus_mutex );
+  MINITOR_MUTEX_GIVE( network_consensus_mutex );
   // END mutex for the network consensus
 
 finish:
@@ -1473,9 +1418,9 @@ finish:
   {
     if ( insert_finished == false )
     {
-      vTaskDelete( fetch_handles[0] );
-      vTaskDelete( fetch_handles[1] );
-      vTaskDelete( crypto_insert_handle );
+      MINITOR_TASK_DELETE( fetch_handles[0] );
+      MINITOR_TASK_DELETE( fetch_handles[1] );
+      MINITOR_TASK_DELETE( crypto_insert_handle );
     }
 
     vQueueDelete( fetch_relays_queue );
@@ -1569,33 +1514,6 @@ int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_inte
   return time_period;
 }
 
-int d_set_next_consenus()
-{
-  int succ = 0;
-
-  // BEGIN mutex for the network consensus
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
-
-  network_consensus.method = next_network_consensus->method;
-  network_consensus.valid_after = next_network_consensus->valid_after;
-  network_consensus.fresh_until = next_network_consensus->fresh_until;
-  network_consensus.valid_until = next_network_consensus->valid_until;
-
-  ESP_LOGE( MINITOR_TAG, "consensus change" );
-  ESP_LOGE( MINITOR_TAG, "shared_rand_cmp %d", memcmp( network_consensus.shared_rand, next_network_consensus->shared_rand, 32 ) );
-  ESP_LOGE( MINITOR_TAG, "previous_shared_rand_cmp %d", memcmp( network_consensus.previous_shared_rand, next_network_consensus->previous_shared_rand, 32 ) );
-
-  memcpy( network_consensus.previous_shared_rand, next_network_consensus->previous_shared_rand, 32 );
-  memcpy( network_consensus.shared_rand, next_network_consensus->shared_rand, 32 );
-
-  xSemaphoreGive( network_consensus_mutex );
-  // END mutex for the network consensus
-
-  free( next_network_consensus );
-
-  return succ;
-}
-
 // fetch the network consensus so we can correctly create circuits
 int d_fetch_consensus_info()
 {
@@ -1623,19 +1541,17 @@ int d_fetch_consensus_info()
 
   if ( next_srv_time <= now )
   {
-    ESP_LOGE( MINITOR_TAG, "got an invalid next_srv_time: %ld now: %ld", next_srv_time, now );
+    MINITOR_LOG( MINITOR_TAG, "got an invalid next_srv_time: %ld now: %ld", next_srv_time, now );
+
     next_srv_time = now + 60;
   }
 
-  xTimerChangePeriod( consensus_timer, 1000 * ( next_srv_time - now ) / portTICK_PERIOD_MS, portMAX_DELAY );
-  //xTimerChangePeriod( consensus_timer, 1000 * 10 / portTICK_PERIOD_MS, portMAX_DELAY );
+  MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, 1000 * ( next_srv_time - now ) );
 #else
-  xTimerChangePeriod( consensus_timer, 1000 * ( network_consensus.valid_until - now ) / portTICK_PERIOD_MS, portMAX_DELAY );
+  MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, 1000 * ( network_consensus.valid_until - now ) );
 #endif
 
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( MINITOR_TAG, "finished fetching consensus" );
-#endif
+  MINITOR_LOG( MINITOR_TAG, "finished fetching consensus" );
 
 finish:
   // return 0 for no errors

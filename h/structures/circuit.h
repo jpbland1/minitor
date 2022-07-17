@@ -87,7 +87,7 @@ typedef struct OnionCircuit
 } OnionCircuit;
 
 extern unsigned int circ_id_counter;
-extern SemaphoreHandle_t circ_id_mutex;
+extern MinitorMutex circ_id_mutex;
 
 void v_add_circuit_to_list( OnionCircuit* circuit, OnionCircuit** list );
 void v_remove_circuit_from_list( OnionCircuit* circuit, OnionCircuit** list );

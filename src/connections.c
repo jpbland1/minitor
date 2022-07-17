@@ -18,16 +18,17 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdlib.h>
 
-#include "esp_log.h"
 #include "user_settings.h"
+
 #include "wolfssl/wolfcrypt/settings.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 #include "wolfssl/wolfcrypt/hmac.h"
 #include "wolfssl/internal.h"
 #include "wolfssl/wolfcrypt/error-crypt.h"
-#include "freertos/queue.h"
 
 #include "../include/config.h"
+#include "../h/port.h"
+
 #include "../h/minitor.h"
 #include "../h/circuit.h"
 #include "../h/cell.h"
@@ -41,11 +42,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 static const char* CONN_TAG = "CONNECTIONS DAEMON";
 
 uint32_t conn_id = 0;
-TaskHandle_t connections_daemon_task_handle;
+MinitorTask connections_daemon_task_handle;
 struct pollfd connections_poll[16];
 DlConnection* connections;
-SemaphoreHandle_t connections_mutex;
-SemaphoreHandle_t connection_access_mutex[16];
+MinitorMutex connections_mutex;
+MinitorMutex connection_access_mutex[16];
 
 static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store )
 {
@@ -53,9 +54,7 @@ static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX
     return SSL_SUCCESS;
   }
 
-#ifdef DEBUG_MINITOR
-  ESP_LOGE( CONN_TAG, "SSL callback error %d", store->error );
-#endif
+  MINITOR_LOG( CONN_TAG, "SSL callback error %d", store->error );
 
   return 0;
 }
@@ -100,7 +99,7 @@ static void v_cleanup_connection_in_lock( DlConnection* dl_connection )
       wc_Sha256Free( &dl_connection->initiator_sha );
     }
 
-    xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+    MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
   }
 
   connections_poll[dl_connection->poll_index].fd = -1;
@@ -115,14 +114,14 @@ static void v_cleanup_connection_in_lock( DlConnection* dl_connection )
 
 void v_cleanup_connection( DlConnection* dl_connection )
 {
-  SemaphoreHandle_t access_mutex;
+  MinitorMutex access_mutex;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
   if ( b_verify_or_connection( dl_connection->conn_id ) == false )
   {
-    xSemaphoreGive( connections_mutex );
+    MINITOR_MUTEX_GIVE( connections_mutex );
     // MUTEX GIVE
 
     return;
@@ -131,14 +130,14 @@ void v_cleanup_connection( DlConnection* dl_connection )
   access_mutex = connection_access_mutex[dl_connection->mutex_index];
 
   // MUTEX TAKE
-  xSemaphoreTake( access_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( access_mutex );
 
   v_cleanup_connection_in_lock( dl_connection );
 
-  xSemaphoreGive( access_mutex );
+  MINITOR_MUTEX_GIVE( access_mutex );
   // MUTEX TAKE
 
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 }
 
@@ -188,7 +187,7 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
 
   or_connection->cell_ring_end = ( or_connection->cell_ring_end + 1 ) % 20;
 
-  xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
 
 finish:
   return succ;
@@ -219,7 +218,7 @@ static int d_recv_on_local_connection( DlConnection* local_connection )
     ( (ServiceTcpTraffic*)onion_message->data )->length = succ;
   }
 
-  xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
 
   return succ;
 }
@@ -240,7 +239,7 @@ static int d_recv_on_connection( DlConnection* dl_connection )
   return succ;
 }
 
-static void v_connections_daemon( void* pv_parameters )
+void v_connections_daemon( void* pv_parameters )
 {
   int i;
   time_t now;
@@ -248,7 +247,7 @@ static void v_connections_daemon( void* pv_parameters )
   int succ;
   int readable_bytes;
   uint8_t* rx_buffer;
-  SemaphoreHandle_t access_mutex;
+  MinitorMutex access_mutex;
   OnionMessage* onion_message;
   DlConnection* dl_connection;
   DlConnection* tmp_connection;
@@ -260,21 +259,19 @@ static void v_connections_daemon( void* pv_parameters )
 
     if ( succ <= 0 )
     {
-#ifdef DEBUG_MINITOR
       if ( succ < 0 )
       {
-        ESP_LOGE( CONN_TAG, "Failed to poll local connections" );
+        MINITOR_LOG( CONN_TAG, "Failed to poll local connections" );
       }
-#endif
     }
 
-    if ( uxQueueMessagesWaiting( core_task_queue ) >= 15 )
+    if ( MINITOR_QUEUE_MESSAGES_WAITING( core_task_queue ) >= 15 )
     {
       continue;
     }
 
     // MUTEX TAKE
-    xSemaphoreTake( connections_mutex, portMAX_DELAY );
+    MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
     i = 0;
     time( &now );
@@ -300,18 +297,18 @@ static void v_connections_daemon( void* pv_parameters )
         ( (ServiceTcpTraffic*)onion_message->data )->circ_id = dl_connection->circ_id;
         ( (ServiceTcpTraffic*)onion_message->data )->stream_id = dl_connection->stream_id;
 
-        xQueueSendToBack( core_task_queue, (void*)(&onion_message), portMAX_DELAY );
+        MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
 
         tmp_connection = dl_connection->next;
 
         access_mutex = connection_access_mutex[dl_connection->mutex_index];
 
         // MUTEX TAKE
-        xSemaphoreTake( access_mutex, portMAX_DELAY );
+        MINITOR_MUTEX_TAKE_BLOCKING( access_mutex );
 
         v_cleanup_connection_in_lock( dl_connection );
 
-        xSemaphoreGive( access_mutex );
+        MINITOR_MUTEX_GIVE( access_mutex );
         // MUTEX GIVE
 
         access_mutex = NULL;
@@ -329,22 +326,21 @@ static void v_connections_daemon( void* pv_parameters )
       access_mutex = connection_access_mutex[ready_connections[i]->mutex_index];
 
       // MUTEX TAKE
-      xSemaphoreTake( access_mutex, portMAX_DELAY );
+      MINITOR_MUTEX_TAKE_BLOCKING( access_mutex );
 
       // because of how file descriptors in ssl are handled, we must read all the
       // current contents in 1 go, otherwise the ssl connection will pull the data
       // out of the file descriptor and the next poll will report no read ready
       if ( lwip_ioctl( ready_connections[i]->sock_fd, FIONREAD, &readable_bytes ) < 0 )
       {
-#ifdef DEBUG_MINITOR
-        ESP_LOGE( CONN_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
-#endif
+        MINITOR_LOG( CONN_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
+
         continue;
       }
 
       do
       {
-        if ( uxQueueMessagesWaiting( core_task_queue ) >= 15 )
+        if ( MINITOR_QUEUE_MESSAGES_WAITING( core_task_queue ) >= 15 )
         {
           break;
         }
@@ -371,11 +367,11 @@ static void v_connections_daemon( void* pv_parameters )
         ready_connections[i]->last_action = now;
       }
 
-      xSemaphoreGive( access_mutex );
+      MINITOR_MUTEX_GIVE( access_mutex );
       // MUTEX GIVE
     }
 
-    xSemaphoreGive( connections_mutex );
+    MINITOR_MUTEX_GIVE( connections_mutex );
     // MUTEX GIVE
   }
 }
@@ -397,18 +393,14 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   if ( sock_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to create socket" );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to create socket" );
 
     return NULL;
   }
 
   if ( connect( sock_fd, (struct sockaddr*)&dest_addr , sizeof( dest_addr ) ) != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to connect socket, errno: %d", errno );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to connect socket, errno: %d", errno );
 
     close( sock_fd );
 
@@ -419,9 +411,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   if ( ssl == NULL )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to create an ssl object, error code: %d", wolfSSL_get_error( ssl, 0 ) );
 
     shutdown( sock_fd, 0 );
     close( sock_fd );
@@ -434,23 +424,19 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to set ssl fd" );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to set ssl fd" );
 
     goto clean_ssl;
   }
 
   if ( wolfSSL_connect( ssl ) != SSL_SUCCESS )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to wolfssl_connect" );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to wolfssl_connect" );
 
     goto clean_ssl;
   }
 
-  ESP_LOGE( CONN_TAG, "Starting handshake" );
+  MINITOR_LOG( CONN_TAG, "Starting handshake" );
 
   or_connection = malloc( sizeof( DlConnection ) );
 
@@ -465,9 +451,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   if ( d_start_v3_handshake( or_connection ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "Failed to handshake with first relay" );
-#endif
+    MINITOR_LOG( CONN_TAG, "Failed to handshake with first relay" );
 
     goto clean_connection;
   }
@@ -481,7 +465,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     for ( i = 0; i < 16; i++ )
     {
       connections_poll[i].fd = -1;
-      connection_access_mutex[i] = xSemaphoreCreateMutex();
+      connection_access_mutex[i] = MINITOR_MUTEX_CREATE();
     }
   }
 
@@ -500,25 +484,14 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   if ( i >= 16 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "couldn't find an open poll spot" );
-#endif
+    MINITOR_LOG( CONN_TAG, "couldn't find an open poll spot" );
 
     goto clean_connection;
   }
 
   if ( connections_daemon_task_handle == NULL )
   {
-    xTaskCreatePinnedToCore(
-      v_connections_daemon,
-      "CONNECTIONS_DAEMON",
-      //2048,
-      3072,
-      NULL,
-      6,
-      &connections_daemon_task_handle,
-      tskNO_AFFINITY
-    );
+    b_create_connections_task( &connections_daemon_task_handle );
   }
 
   return or_connection;
@@ -540,7 +513,7 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
   DlConnection* dl_connection;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
   dl_connection = connections;
 
@@ -560,7 +533,7 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
 
     if ( dl_connection == NULL )
     {
-      xSemaphoreGive( connections_mutex );
+      MINITOR_MUTEX_GIVE( connections_mutex );
       // MUTEX GIVE
 
       return -1;
@@ -569,7 +542,7 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
 
   circuit->conn_id = dl_connection->conn_id;
 
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 
   if ( dl_connection->status == CONNECTION_LIVE )
@@ -589,7 +562,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
   DlConnection* local_connection;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
   // set the address of the directory server
   dest_addr.sin_addr.s_addr = inet_addr( "127.0.0.1" );
@@ -600,9 +573,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 
   if ( sock_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "couldn't create a socket to the local port, err: %d, errno: %d", sock_fd, errno );
-#endif
+    MINITOR_LOG( CONN_TAG, "couldn't create a socket to the local port, err: %d, errno: %d", sock_fd, errno );
 
     goto fail;
   }
@@ -611,9 +582,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 
   if ( succ != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "couldn't connect to the local port" );
-#endif
+    MINITOR_LOG( CONN_TAG, "couldn't connect to the local port" );
 
     goto clean_socket;
   }
@@ -635,7 +604,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
     for ( i = 0; i < 16; i++ )
     {
       connections_poll[i].fd = -1;
-      connection_access_mutex[i] = xSemaphoreCreateMutex();
+      connection_access_mutex[i] = MINITOR_MUTEX_CREATE();
     }
   }
 
@@ -654,9 +623,7 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 
   if ( i >= 16 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( CONN_TAG, "couldn't find an open poll spot" );
-#endif
+    MINITOR_LOG( CONN_TAG, "couldn't find an open poll spot" );
 
     free( local_connection );
     goto clean_socket;
@@ -666,19 +633,10 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
 
   if ( connections_daemon_task_handle == NULL )
   {
-    xTaskCreatePinnedToCore(
-      v_connections_daemon,
-      "CONNECTIONS_DAEMON",
-      //2048,
-      3072,
-      NULL,
-      6,
-      &connections_daemon_task_handle,
-      tskNO_AFFINITY
-    );
+    b_create_connections_task( &connections_daemon_task_handle );
   }
 
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 
   return 0;
@@ -687,7 +645,7 @@ clean_socket:
   shutdown( sock_fd, 0 );
   close( sock_fd );
 fail:
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 
   return -1;
@@ -725,7 +683,7 @@ void v_cleanup_local_connection( uint32_t circ_id, uint32_t stream_id )
   DlConnection* local_connection;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
   local_connection = connections;
 
@@ -740,7 +698,7 @@ void v_cleanup_local_connection( uint32_t circ_id, uint32_t stream_id )
     local_connection = local_connection->next;
   }
 
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 }
 
@@ -790,10 +748,10 @@ bool b_verify_or_connection( uint32_t id )
 void v_dettach_connection( DlConnection* dl_connection )
 {
   OnionCircuit* check_circuit;
-  SemaphoreHandle_t access_mutex;
+  MinitorMutex access_mutex;
 
   // MUTEX TAKE
-  xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
   check_circuit = onion_circuits;
 
@@ -807,7 +765,7 @@ void v_dettach_connection( DlConnection* dl_connection )
     check_circuit = check_circuit->next;
   }
 
-  xSemaphoreGive( circuits_mutex );
+  MINITOR_MUTEX_GIVE( circuits_mutex );
   // MUTEX GIVE
 
   if ( check_circuit == NULL )
@@ -822,7 +780,7 @@ DlConnection* px_get_conn_by_id_and_lock( uint32_t id )
   DlConnection* dl_connection;
 
   // MUTEX TAKE
-  xSemaphoreTake( connections_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
 
   dl_connection = connections;
 
@@ -831,7 +789,7 @@ DlConnection* px_get_conn_by_id_and_lock( uint32_t id )
     if ( dl_connection->conn_id == id )
     {
       // MUTEX TAKE
-      xSemaphoreTake( connection_access_mutex[dl_connection->mutex_index], portMAX_DELAY );
+      MINITOR_MUTEX_TAKE_BLOCKING( connection_access_mutex[dl_connection->mutex_index] );
 
       break;
     }
@@ -839,7 +797,7 @@ DlConnection* px_get_conn_by_id_and_lock( uint32_t id )
     dl_connection = dl_connection->next;
   }
 
-  xSemaphoreGive( connections_mutex );
+  MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE
 
   return dl_connection;

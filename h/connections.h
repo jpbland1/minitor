@@ -4,11 +4,12 @@
 #include "./structures/circuit.h"
 #include "./structures/connections.h"
 
-extern SemaphoreHandle_t connections_mutex;
-extern SemaphoreHandle_t connection_access_mutex[16];
+extern MinitorMutex connections_mutex;
+extern MinitorMutex connection_access_mutex[16];
 extern DlConnection* connections;
 
 void v_cleanup_connection( DlConnection* dl_connection );
+void v_connections_daemon( void* pv_parameters );
 int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circuit );
 int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t port );
 int d_forward_to_local_connection( uint32_t circ_id, uint32_t stream_id, uint8_t* data, uint32_t length );

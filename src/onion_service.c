@@ -16,13 +16,12 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#include "esp_log.h"
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/hash.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
 
 #include "../include/config.h"
+#include "../h/port.h"
+
 #include "../h/onion_service.h"
 #include "../h/constants.h"
 #include "../h/consensus.h"
@@ -67,16 +66,14 @@ void v_onion_service_handle_local_tcp_data( OnionCircuit* circuit, DlConnection*
 
   if ( d_send_relay_cell_and_free( or_connection, relay_cell, &circuit->relay_list, circuit->hs_crypto ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA" );
   }
 }
 
 // at this point we have a lock on the connection access mutex
 void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connection, Cell* relay_cell )
 {
-  SemaphoreHandle_t access_mutex;
+  MinitorMutex access_mutex;
 
   access_mutex = connection_access_mutex[or_connection->mutex_index];
 
@@ -86,23 +83,18 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connec
       switch( relay_cell->payload.relay.relay_command )
       {
         case RELAY_BEGIN:
-          ESP_LOGE( MINITOR_TAG, "Got a RELAY_BEGIN!" );
-
-          xSemaphoreGive( access_mutex );
+          MINITOR_MUTEX_GIVE( access_mutex );
           // MUTEX GIVE
 
           access_mutex = NULL;
 
           if ( d_onion_service_handle_relay_begin( circuit, or_connection, relay_cell ) < 0 )
           {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
-#endif
+            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
           }
 
           break;
         case RELAY_DATA:
-          ESP_LOGE( MINITOR_TAG, "Got a RELAY_DATA!" );
           if
           (
             d_forward_to_local_connection(
@@ -113,16 +105,12 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connec
             ) < 0
           )
           {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_DATA cell" );
-#endif
+            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_DATA cell" );
           }
 
           break;
         case RELAY_END:
-          ESP_LOGE( MINITOR_TAG, "Got a RELAY_END!" );
-
-          xSemaphoreGive( access_mutex );
+          MINITOR_MUTEX_GIVE( access_mutex );
           // MUTEX GIVE
 
           access_mutex = NULL;
@@ -131,55 +119,48 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connec
 
           break;
         case RELAY_TRUNCATED:
-          ESP_LOGE( MINITOR_TAG, "Got a RELAY_TRUNCATED!" );
-
-          xSemaphoreGive( access_mutex );
+          MINITOR_MUTEX_GIVE( access_mutex );
           // MUTEX GIVE
 
           access_mutex = NULL;
 
           if ( d_onion_service_handle_relay_truncated( circuit, or_connection, relay_cell ) < 0 )
           {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_END cell" );
-#endif
+            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_END cell" );
           }
 
           break;
         case RELAY_DROP:
-          ESP_LOGE( MINITOR_TAG, "Got a RELAY_DROP!" );
           break;
         // when an intro request comes in, respond to it
         case RELAY_COMMAND_INTRODUCE2:
-          xSemaphoreGive( access_mutex );
+          MINITOR_MUTEX_GIVE( access_mutex );
           // MUTEX GIVE
 
           access_mutex = NULL;
 
           if ( d_onion_service_handle_introduce_2( circuit, relay_cell ) < 0 )
           {
-#ifdef DEBUG_MINITOR
-            ESP_LOGE( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
-#endif
+            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
           }
 
           break;
         default:
 #ifdef DEBUG_MINITOR
-          ESP_LOGE( MINITOR_TAG, "Unequiped to handle relay command %d", relay_cell->payload.relay.relay_command );
+          MINITOR_LOG( MINITOR_TAG, "Unequiped to handle relay command %d", relay_cell->payload.relay.relay_command );
 #endif
       }
 
       break;
     default:
 #ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Unequiped to handle cell command %d", relay_cell->command );
+      MINITOR_LOG( MINITOR_TAG, "Unequiped to handle cell command %d", relay_cell->command );
 #endif
   }
 
   if ( access_mutex != NULL )
   {
-    xSemaphoreGive( access_mutex );
+    MINITOR_MUTEX_GIVE( access_mutex );
     // MUTEX GIVE
   }
 }
@@ -211,9 +192,7 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection
 
   if ( port == 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "failed to find RELAY_BEGIN port" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "failed to find RELAY_BEGIN port" );
 
     ret = -1;
     goto finish;
@@ -221,9 +200,7 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection
 
   if ( port != rend_circuit->service->exit_port && port != 443 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "request was for the wrong port: %d, looking for: %d", port, rend_circuit->service->exit_port );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "request was for the wrong port: %d, looking for: %d", port, rend_circuit->service->exit_port );
 
     ret = -1;
     goto finish;
@@ -231,9 +208,7 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection
 
   if ( d_create_local_connection( begin_cell->circ_id, begin_cell->payload.relay.stream_id, rend_circuit->service->local_port ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "couldn't create local connection" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "couldn't create local connection" );
 
     ret = -1;
     goto finish;
@@ -263,14 +238,12 @@ int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection
 
   if ( d_send_relay_cell_and_free( or_connection, connected_cell, &rend_circuit->relay_list, rend_circuit->hs_crypto ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_CONNECTED" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_CONNECTED" );
 
     ret = -1;
   }
 
-  xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+  MINITOR_MUTEX_GIVE( connection_access_mutex[or_connection->mutex_index] );
   // MUTEX GIVE
 
 finish:
@@ -287,11 +260,11 @@ int d_onion_service_handle_relay_truncated( OnionCircuit* rend_circuit, DlConnec
   d_destroy_onion_circuit( rend_circuit, or_connection );
 
   // MUTEX TAKE
-  xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
   v_remove_circuit_from_list( rend_circuit, &onion_circuits );
 
-  xSemaphoreGive( circuits_mutex );
+  MINITOR_MUTEX_GIVE( circuits_mutex );
   // MUTEX GIVE
 
   free( rend_circuit );
@@ -322,16 +295,12 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   DoublyLinkedOnionRelay* dl_relay;
   DlConnection* or_connection = NULL;
 
-  ESP_LOGE( MINITOR_TAG, "circ_id: %.8x", introduce_cell->circ_id );
-
   time( &now );
-
-  ESP_LOGE( MINITOR_TAG, "now: %ld, timestap: %ld", now, intro_circuit->service->rend_timestamp );
 
   if ( now - intro_circuit->service->rend_timestamp < 20 )
   {
 #ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Rate limit in effect, dropping intro" );
+    MINITOR_LOG( MINITOR_TAG, "Rate limit in effect, dropping intro" );
 #endif
 
     return -1;
@@ -344,9 +313,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( introduce_cell->payload.relay.introduce2.auth_key_type != EDSHA3 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Auth key type for RELAY_COMMAND_INTRODUCE2 was not EDSHA3" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Auth key type for RELAY_COMMAND_INTRODUCE2 was not EDSHA3" );
 
     ret = -1;
     goto finish;
@@ -354,9 +321,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( introduce_cell->payload.relay.introduce2.auth_key_length != 32 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Auth key length for RELAY_COMMAND_INTRODUCE2 was not 32" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Auth key length for RELAY_COMMAND_INTRODUCE2 was not 32" );
 
     ret = -1;
     goto finish;
@@ -364,9 +329,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( memcmp( introduce_cell->payload.relay.introduce2.auth_key, intro_circuit->intro_crypto->auth_key.p, 32 ) != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Auth key for RELAY_COMMAND_INTRODUCE2 does not match" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Auth key for RELAY_COMMAND_INTRODUCE2 does not match" );
 
     ret = -1;
     goto finish;
@@ -390,9 +353,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( wolf_succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to import client public key, error code %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to import client public key, error code %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -404,9 +365,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   // verify and decrypt
   if ( d_verify_and_decrypt_introduce_2( intro_circuit->service, introduce_cell, num_extensions, client_pk, introduce_p, intro_circuit, &client_handshake_key ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to verify and decrypt RELAY_COMMAND_INTRODUCE2" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to verify and decrypt RELAY_COMMAND_INTRODUCE2" );
 
     ret = -1;
     goto finish;
@@ -418,17 +377,13 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   {
     if ( memcmp( db_rendezvous_cookie->rendezvous_cookie, ((DecryptedIntroduce2*)introduce_p)->rendezvous_cookie, 20 ) == 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Got a replay, silently dropping" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Got a replay, silently dropping" );
 
       goto finish;
     }
 
     db_rendezvous_cookie = db_rendezvous_cookie->next;
   }
-
-  ESP_LOGE( MINITOR_TAG, "Got new cookie" );
 
   db_rendezvous_cookie = malloc( sizeof( DoublyLinkedRendezvousCookie ) );
 
@@ -441,9 +396,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( wolf_succ != 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to make hs_handshake_key, error code %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to make hs_handshake_key, error code %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -451,13 +404,9 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   hs_crypto = malloc( sizeof( HsCrypto ) );
 
-  ESP_LOGE( MINITOR_TAG, "Finishing ntor handshake" );
-
   if ( d_hs_ntor_handshake_finish( introduce_cell, client_pk, intro_circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
 
     free( hs_crypto );
 
@@ -483,7 +432,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   // onion key type should be 1 for NTOR
   if ( ((IntroOnionKey*)introduce_p)->onion_key_type != ONION_NTOR )
   {
-    ESP_LOGE( MINITOR_TAG, "Failed to get KEY_NTOR for onion key type" );
+    MINITOR_LOG( MINITOR_TAG, "Failed to get KEY_NTOR for onion key type" );
 
     ret = -1;
     goto finish;
@@ -492,7 +441,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   // onion key length should be 32
   if ( ntohs( ((IntroOnionKey*)introduce_p)->onion_key_length ) != 32 )
   {
-    ESP_LOGE( MINITOR_TAG, "Failed to get 32 for onion key length" );
+    MINITOR_LOG( MINITOR_TAG, "Failed to get 32 for onion key length" );
 
     ret = -1;
     goto finish;
@@ -528,7 +477,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   }
 
   // MUTEX TAKE
-  xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
   rend_circuit = onion_circuits;
 
@@ -542,7 +491,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
     rend_circuit = rend_circuit->next;
   }
 
-  xSemaphoreGive( circuits_mutex );
+  MINITOR_MUTEX_GIVE( circuits_mutex );
   // MUTEX GIVE
 
   memcpy( hs_crypto->rendezvous_cookie, db_rendezvous_cookie->rendezvous_cookie, 20 );
@@ -551,16 +500,12 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( rend_circuit == NULL )
   {
-    ESP_LOGE( MINITOR_TAG, "Creating new rend circuit" );
-
     v_send_init_circuit( 2, CIRCUIT_RENDEZVOUS, intro_circuit->service, 0, 0, NULL, rend_relay, hs_crypto );
   }
   else
   {
     dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
     dl_relay->relay = rend_relay;
-
-    ESP_LOGE( MINITOR_TAG, "Using existing rend circuit" );
 
     v_add_relay_to_list( dl_relay, &rend_circuit->relay_list );
 
@@ -578,14 +523,15 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
       free( hs_crypto );
 
       // MUTEX TAKE
-      xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+      MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
       v_remove_circuit_from_list( rend_circuit, &onion_circuits );
 
-      xSemaphoreGive( circuits_mutex );
+      MINITOR_MUTEX_GIVE( circuits_mutex );
       // MUTEX GIVE
 
       d_destroy_onion_circuit( rend_circuit, or_connection );
+      // MUTEX GIVE
 
       free( rend_circuit );
 
@@ -601,7 +547,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
     if ( or_connection != NULL )
     {
-      xSemaphoreGive( connection_access_mutex[or_connection->mutex_index] );
+      MINITOR_MUTEX_GIVE( connection_access_mutex[or_connection->mutex_index] );
       // MUTEX GIVE
     }
   }
@@ -640,9 +586,7 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, DlConnection* or_conne
 
   if ( d_send_relay_cell_and_free( or_connection, rend_cell, &rend_circuit->relay_list, NULL ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send the RELAY_COMMAND_RENDEZVOUS1 cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send the RELAY_COMMAND_RENDEZVOUS1 cell" );
 
     return -1;
   }
@@ -687,10 +631,9 @@ int d_verify_and_decrypt_introduce_2(
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( &intro_circuit->intro_crypto->encrypt_key, client_handshake_key, working_intro_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 || idx != 32 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to compute shared secret, error code: %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != 32 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to compute shared secret, error code: %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -757,8 +700,6 @@ int d_verify_and_decrypt_introduce_2(
     wc_Sha3_256_Update( &reusable_sha3, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
     wc_Sha3_256_Update( &reusable_sha3, &num_extensions, 1 );
 
-    ESP_LOGE( MINITOR_TAG, "extension_count: %d", num_extensions );
-
     wc_Sha3_256_Update( &reusable_sha3, client_pk, PK_PUBKEY_LEN );
     wc_Sha3_256_Update( &reusable_sha3, encrypted_data, encrypted_length );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
@@ -766,7 +707,6 @@ int d_verify_and_decrypt_introduce_2(
     // compare the mac
     if ( memcmp( reusable_sha3_sum, introduce_cell->payload.relay.data + introduce_cell->payload.relay.length - MAC_LEN, WC_SHA3_256_DIGEST_SIZE ) == 0 )
     {
-      ESP_LOGE( MINITOR_TAG, "Got a match" );
       i = 0;
       break;
     }
@@ -774,9 +714,7 @@ int d_verify_and_decrypt_introduce_2(
 
   if ( i >= 2 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "The mac of the RELAY_COMMAND_INTRODUCE2 cell does not match our calculations" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "The mac of the RELAY_COMMAND_INTRODUCE2 cell does not match our calculations" );
 
     ret = -1;
     goto finish;
@@ -789,9 +727,7 @@ int d_verify_and_decrypt_introduce_2(
 
   if ( wolf_succ < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to decrypt RELAY_COMMAND_INTRODUCE2 encrypted data, error code: %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to decrypt RELAY_COMMAND_INTRODUCE2 encrypted data, error code: %d", wolf_succ );
 
     ret = -1;
   }
@@ -831,21 +767,16 @@ int d_hs_ntor_handshake_finish(
   int64_t reusable_length;
   unsigned char reusable_length_buffer[8];
 
-  ESP_LOGE( MINITOR_TAG, "Init" );
-
   wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
-
-  ESP_LOGE( MINITOR_TAG, "Shared secret" );
 
   // compute rend_secret_hs_input
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( hs_handshake_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 || idx != 32 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != 32 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -853,15 +784,12 @@ int d_hs_ntor_handshake_finish(
 
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  ESP_LOGE( MINITOR_TAG, "Shared secret" );
-
   idx = 32;
   wolf_succ = wc_curve25519_shared_secret_ex( &intro_circuit->intro_crypto->encrypt_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
 
-  if ( wolf_succ < 0 || idx != 32 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != 32 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -1025,7 +953,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     if ( hsdir_index_list == NULL )
     {
-      ESP_LOGE( MINITOR_TAG, "Failed to get hsdir_index_list" );
+      MINITOR_LOG( MINITOR_TAG, "Failed to get hsdir_index_list" );
 
       while ( target_relays->length > 0 )
       {
@@ -1158,9 +1086,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( plain_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", plain_file );
 
     return -1;
   }
@@ -1169,9 +1095,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( cipher_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", filename );
 
     close( plain_fd );
 
@@ -1182,9 +1106,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != HS_DESC_SIG_PREFIX_LENGTH )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1194,29 +1116,24 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( outer_layer_template_0 ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
   }
 
   if ( d_generate_packed_crosscert( tmp_buff, descriptor_signing_key->p, blinded_key, 0x08, valid_after ) < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   succ = write( plain_fd, tmp_buff, 187 );
 
   if ( succ != 187 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1226,9 +1143,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( outer_layer_template_1 ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1238,9 +1153,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( revision_counter_str ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1250,9 +1163,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( outer_layer_template_2 ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1269,9 +1180,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s", filename );
 
       ret = -1;
       goto finish;
@@ -1297,9 +1206,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
       ret = -1;
       goto finish;
@@ -1310,9 +1217,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( outer_layer_template_3 ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1321,12 +1226,12 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
   idx = ED25519_SIG_SIZE;
   wolf_succ = ed25519_sign_msg_custom( plain_fd, tmp_signature, &idx, descriptor_signing_key );
 
-  if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to sign the outer descriptor, error code: %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to sign the outer descriptor, error code: %d", wolf_succ );
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   v_base_64_encode( tmp_buff, tmp_signature, 64 );
@@ -1335,9 +1240,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != strlen( outer_layer_template_4 ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1347,9 +1250,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   if ( succ != 86 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
   }
@@ -1364,9 +1265,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
 
       return -1;
     }
@@ -1375,9 +1274,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename first plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename first plaintext" );
 
       return -1;
     }
@@ -1423,9 +1320,7 @@ int d_generate_first_plaintext( char* filename )
 
   if ( plain_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", plain_file );
 
     return -1;
   }
@@ -1434,9 +1329,7 @@ int d_generate_first_plaintext( char* filename )
 
   if ( cipher_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", filename );
 
     close( plain_fd );
 
@@ -1449,15 +1342,13 @@ int d_generate_first_plaintext( char* filename )
 
   if ( succ != strlen( first_layer_template ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
   }
 
-  esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+  MINITOR_FILL_RANDOM( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
   wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
   v_base_64_encode( tmp_buff, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
@@ -1467,9 +1358,7 @@ int d_generate_first_plaintext( char* filename )
 
   if ( succ != 44 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1481,27 +1370,25 @@ int d_generate_first_plaintext( char* filename )
 
     if ( succ != strlen( auth_client_template ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
       ret = -1;
       goto finish;
     }
 
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    MINITOR_FILL_RANDOM( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
     v_base_64_encode( tmp_buff, reusable_sha3_sum, 8 );
     tmp_buff[11] = ' ';
 
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    MINITOR_FILL_RANDOM( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
     v_base_64_encode( tmp_buff + 12, reusable_sha3_sum, 16 );
     tmp_buff[34] = ' ';
 
-    esp_fill_random( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
+    MINITOR_FILL_RANDOM( reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
     wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
     v_base_64_encode( tmp_buff + 35, reusable_sha3_sum, 16 );
@@ -1511,9 +1398,7 @@ int d_generate_first_plaintext( char* filename )
 
     if ( succ != sizeof( tmp_buff ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
       ret = -1;
       goto finish;
@@ -1524,9 +1409,7 @@ int d_generate_first_plaintext( char* filename )
 
   if ( succ != strlen( begin_encrypted ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
     goto finish;
@@ -1543,9 +1426,7 @@ int d_generate_first_plaintext( char* filename )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s", filename );
 
       ret = -1;
       goto finish;
@@ -1571,9 +1452,7 @@ int d_generate_first_plaintext( char* filename )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
       ret = -1;
       goto finish;
@@ -1584,9 +1463,7 @@ int d_generate_first_plaintext( char* filename )
 
   if ( succ != strlen( end_encrypted ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", plain_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", plain_file );
 
     ret = -1;
   }
@@ -1601,9 +1478,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
 
       return -1;
     }
@@ -1612,9 +1487,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename first plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename first plaintext" );
 
       return -1;
     }
@@ -1651,9 +1524,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
   if ( cipher_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", cipher_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", cipher_file );
 
     free( secret_input );
 
@@ -1664,9 +1535,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
   if ( plain_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", filename );
 
     free( secret_input );
     close( cipher_fd );
@@ -1678,7 +1547,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
   wc_InitShake256( &reusable_shake, NULL, INVALID_DEVID );
   wc_AesInit( &reusable_aes_key, NULL, INVALID_DEVID );
 
-  esp_fill_random( salt, 16 );
+  MINITOR_FILL_RANDOM( salt, 16 );
   wc_Sha3_256_Update( &reusable_sha3, salt, 16 );
   wc_Sha3_256_Final( &reusable_sha3, reusable_sha3_sum );
   memcpy( salt, reusable_sha3_sum, 16 );
@@ -1704,9 +1573,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
   if ( succ != 16 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", cipher_file );
 
     ret = -1;
     goto finish;
@@ -1738,8 +1605,6 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
   wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, sizeof( reusable_length_buffer ) );
   wc_Sha3_256_Update( &reusable_sha3, salt, 16 );
 
-  //memcpy( *ciphertext, salt, 16 );
-
   wc_AesSetKeyDirect( &reusable_aes_key, keys, AES_256_KEY_SIZE, keys + AES_256_KEY_SIZE, AES_ENCRYPTION );
 
   do
@@ -1753,9 +1618,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s", filename );
 
       ret = -1;
       goto finish;
@@ -1765,11 +1628,10 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
     if ( wolf_succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt descriptor plaintext, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to encrypt descriptor plaintext, error code: %d", wolf_succ );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     wc_Sha3_256_Update( &reusable_sha3, cipher_buff, succ );
@@ -1778,9 +1640,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", cipher_file );
 
       ret = -1;
       goto finish;
@@ -1793,15 +1653,11 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
   if ( succ != WC_SHA3_256_DIGEST_SIZE )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", cipher_file );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", cipher_file );
 
     ret = -1;
     goto finish;
   }
-
-  //memcpy( *ciphertext + 16 + plaintext_length, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
 
 finish:
   wc_Sha3_256_Free( &reusable_sha3 );
@@ -1818,9 +1674,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to unlink %s, errno: %d", filename, errno );
 
       return -1;
     }
@@ -1829,9 +1683,7 @@ finish:
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to rename cipher file %s to %s, errno: %d", cipher_file, filename, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to rename cipher file %s to %s, errno: %d", cipher_file, filename, errno );
 
       return -1;
     }
@@ -1868,9 +1720,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
   if ( fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s", filename );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s", filename );
 
     return -1;
   }
@@ -1879,9 +1729,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
   if ( succ != strlen( formats_s ) )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
     ret = -1;
     goto finish;
@@ -1894,9 +1742,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( intro_point_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1910,9 +1756,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != 43 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1923,9 +1767,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( onion_key_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1938,9 +1780,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != 44 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1951,9 +1791,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( auth_key_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1963,9 +1801,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( begin_ed_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -1976,9 +1812,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export intro circuit auth key, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to export intro circuit auth key, error code: %d", wolf_succ );
 
       ret = -1;
       goto finish;
@@ -1986,9 +1820,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x09, valid_after ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 
       ret = -1;
       goto finish;
@@ -1998,9 +1830,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != 187 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2010,9 +1840,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( end_ed_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2023,9 +1851,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( enc_ntor_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2036,9 +1862,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( wolf_succ != 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to export intro encrypt key, error code: %d", wolf_succ );
 
       ret = -1;
       goto finish;
@@ -2051,9 +1875,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != 44 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2064,9 +1886,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( enc_cert_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2076,9 +1896,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( begin_ed_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2088,9 +1906,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x0B, valid_after ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate the enc-key cross cert" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to generate the enc-key cross cert" );
 
       ret = -1;
       goto finish;
@@ -2100,9 +1916,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != 187 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2112,9 +1926,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     if ( succ != strlen( end_ed_s ) )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s", filename );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s", filename );
 
       ret = -1;
       goto finish;
@@ -2190,10 +2002,9 @@ int d_generate_packed_crosscert( char* destination, unsigned char* certified_key
   idx = ED25519_PUB_KEY_SIZE;
   wolf_succ = wc_ed25519_export_public( signing_key, tmp_body + 44, &idx );
 
-  if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
 
     res = -1;
     goto cleanup;
@@ -2203,9 +2014,7 @@ int d_generate_packed_crosscert( char* destination, unsigned char* certified_key
   wolf_succ = wc_ed25519_sign_msg( tmp_body, 76, tmp_body + 76, &idx, signing_key );
 
   if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to sign the ed crosscert, error code: %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to sign the ed crosscert, error code: %d", wolf_succ );
 
     res = -1;
     goto cleanup;
@@ -2215,6 +2024,7 @@ int d_generate_packed_crosscert( char* destination, unsigned char* certified_key
 
 cleanup:
   free( tmp_body );
+
   return res;
 }
 
@@ -2266,9 +2076,7 @@ int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection
 
   if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to export public auth_key, error code: %d", wolf_succ );
 
     ret = -1;
     goto finish;
@@ -2328,6 +2136,7 @@ int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection
 
   // make a temporary cell and prefix the prefix_str to it
   prefixed_cell = malloc( sizeof( unsigned char ) * ( strlen( prefix_str ) + 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN ) );
+
   memcpy( prefixed_cell, prefix_str, strlen( prefix_str ) );
   memcpy( prefixed_cell + strlen( prefix_str ), establish_cell->payload.relay.data, 3 + ED25519_PUB_KEY_SIZE + 1 + MAC_LEN );
 
@@ -2345,9 +2154,7 @@ int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection
 
   if ( wolf_succ < 0 || idx != ED25519_SIG_SIZE )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to generate establish intro signature, error code: %d", wolf_succ );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to generate establish intro signature, error code: %d", wolf_succ );
 
     free( establish_cell );
 
@@ -2355,13 +2162,9 @@ int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection
     goto finish;
   }
 
-  ESP_LOGE( MINITOR_TAG, "Sending establish intro to %d", circuit->relay_list.tail->relay->or_port );
-
   if ( d_send_relay_cell_and_free( or_connection, establish_cell, &circuit->relay_list, NULL ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_COMMAND_ESTABLISH_INTRO cell" );
 
     ret = -1;
   }
@@ -2395,22 +2198,21 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
 
   idx = ED25519_PRV_KEY_SIZE;
   idy = ED25519_PUB_KEY_SIZE;
+
   wolf_succ = wc_ed25519_export_key( master_key, out_priv_key, &idx, tmp_pub_key, &idy );
 
-  if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to export master key, error code: %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to export master key, error code: %d", wolf_succ );
 
     return -1;
   }
 
   wolf_succ = wc_Sha512Hash( out_priv_key, ED25519_KEY_SIZE, tmp_priv_key );
 
-  if ( wolf_succ < 0 ) {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to expand master key, error code: %d", wolf_succ );
-#endif
+  if ( wolf_succ < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to expand master key, error code: %d", wolf_succ );
 
     return -1;
   }
@@ -2418,7 +2220,8 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"Derive temporary signing key", strlen( "Derive temporary signing key" ) + 1 );
   wc_Sha3_256_Update( &reusable_sha3, tmp_pub_key, ED25519_PUB_KEY_SIZE );
 
-  if ( secret != NULL ) {
+  if ( secret != NULL )
+  {
     wc_Sha3_256_Update( &reusable_sha3, secret, secret_length );
   }
 
@@ -2477,6 +2280,7 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
 
 int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_directory )
 {
+  int ret = 0;
   int fd;
   int wolf_succ;
   unsigned int idx;
@@ -2499,18 +2303,15 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
-  /* rmdir( onion_service_directory ); */
-
   // directory doesn't exist, create the keys
   if ( stat( onion_service_directory, &st ) == -1 )
   {
     if ( mkdir( onion_service_directory, 0755 ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to create %s for onion service, errno: %d", onion_service_directory, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to create %s for onion service, errno: %d", onion_service_directory, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     wc_InitRng( &rng );
@@ -2525,11 +2326,10 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( wolf_succ < 0 || idx != ED25519_PRV_KEY_SIZE || idy != ED25519_PUB_KEY_SIZE )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export service master key, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to export service master key, error code: %d", wolf_succ );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)".onion checksum", strlen( ".onion checksum" ) );
@@ -2545,36 +2345,33 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     strcpy( onion_service->hostname, onion_address );
 
-    ESP_LOGE( MINITOR_TAG, "onion address: %s", onion_address );
-
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/hostname" );
 
     if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( write( fd, onion_address, sizeof( char ) * strlen( onion_address ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     strcpy( working_file, onion_service_directory );
@@ -2582,29 +2379,28 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( write( fd, tmp_pub_key, ED25519_PUB_KEY_SIZE ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     strcpy( working_file, onion_service_directory );
@@ -2612,29 +2408,28 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( write( fd, tmp_priv_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to write %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
   // directory exists, load the keys
   }
@@ -2645,29 +2440,28 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( read( fd, tmp_priv_key, sizeof( char ) * ED25519_PUB_KEY_SIZE ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     strcpy( working_file, onion_service_directory );
@@ -2675,41 +2469,39 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
 
     if ( read( fd, tmp_pub_key, sizeof( char ) * ED25519_PRV_KEY_SIZE ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     wolf_succ = wc_ed25519_import_private_key( tmp_priv_key, ED25519_PRV_KEY_SIZE, tmp_pub_key, ED25519_PUB_KEY_SIZE, &onion_service->master_key );
 
     if ( wolf_succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to import ed25519 key, error code: %d", wolf_succ );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to import ed25519 key, error code: %d", wolf_succ );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     strcpy( working_file, onion_service_directory );
@@ -2717,41 +2509,39 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
 
     if ( ( fd = open( working_file, O_RDONLY ) ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     if ( read( fd, onion_service->hostname, 62 ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      close( fd );
+
+      ret = -1;
+      goto finish;
     }
 
     onion_service->hostname[62] = 0;
 
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "onion servie hostname: %s", onion_service->hostname );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "onion servie hostname: %s", onion_service->hostname );
 
     if ( close( fd ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to close %s for onion service, errno: %d", working_file, errno );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
   }
 
+finish:
   wc_Sha3_256_Free( &reusable_sha3 );
 
-  return 0;
+  return ret;
 }
 
 int d_begin_hsdir( OnionCircuit* publish_circuit, DlConnection* or_connection )
@@ -2773,9 +2563,7 @@ int d_begin_hsdir( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
   if ( d_send_relay_cell_and_free( or_connection, begin_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_BEGIN_DIR cell" );
 
     return -1;
   }
@@ -2811,22 +2599,16 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
   if ( desc_fd < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
 
     return -1;
   }
 
   descriptor_length = lseek( desc_fd, 0, SEEK_END ) - HS_DESC_SIG_PREFIX_LENGTH;
 
-  ESP_LOGE( MINITOR_TAG, "desc length %d", descriptor_length );
-
   if ( descriptor_length < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
 
     ret = -1;
     goto finish;
@@ -2836,9 +2618,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
   if ( lseek( desc_fd, HS_DESC_SIG_PREFIX_LENGTH, SEEK_SET ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to seek %s for onion service, errno: %d", publish_circuit->service->hs_descs[publish_circuit->desc_index], errno );
 
     ret = -1;
     goto finish;
@@ -2848,16 +2628,9 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
   REQUEST = malloc( sizeof( char ) * ( strlen( REQUEST_CONST ) + strlen( ipv4_string ) + strlen( content_length ) ) );
 
-  /*
-  memcpy( REQUEST, REQUEST_CONST, 39 );
-  strcpy( REQUEST + 39, ipv4_string );
-  strcpy( REQUEST + 39 + strlen( ipv4_string ), REQUEST_CONST + 39 );
-  */
   sprintf( REQUEST, REQUEST_CONST, ipv4_string, content_length );
 
   free( ipv4_string );
-
-  //http_header_length = strlen( REQUEST ) + strlen( content_length ) + strlen( header_end );
 
   data_cell = malloc( MINITOR_CELL_LEN );
 
@@ -2873,16 +2646,16 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
   data_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + data_cell->payload.relay.length;
 
   memcpy( data_cell->payload.relay.data, REQUEST, strlen( REQUEST ) );
+
   http_header_length = strlen( REQUEST );
+
   free( REQUEST );
 
   succ = read( desc_fd, data_cell->payload.relay.data + http_header_length, RELAY_PAYLOAD_LEN - http_header_length );
 
   if ( succ != RELAY_PAYLOAD_LEN - http_header_length )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 
     free( data_cell );
 
@@ -2892,9 +2665,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
   if ( d_send_relay_cell_and_free( or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
 
     ret = -1;
     goto finish;
@@ -2916,9 +2687,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to read %s", publish_circuit->service->hs_descs[publish_circuit->desc_index] );
 
       free( data_cell );
 
@@ -2939,9 +2708,7 @@ int d_post_hs_desc( OnionCircuit* publish_circuit, DlConnection* or_connection )
 
     if ( d_send_relay_cell_and_free( or_connection, data_cell, &publish_circuit->relay_list, NULL ) < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
 
       ret = -1;
       goto finish;
@@ -2979,6 +2746,7 @@ void v_build_hsdir_circuits( OnionService* service, DoublyLinkedOnionRelayList* 
 
 int d_push_hsdir( OnionService* service )
 {
+  int ret = 0;
   int i;
   int wolf_succ;
   int succ;
@@ -3012,7 +2780,7 @@ int d_push_hsdir( OnionService* service )
   }
 
   //MUTEX TAKE
-  xSemaphoreTake( circuits_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
   tmp_circuit = onion_circuits;
 
@@ -3037,7 +2805,7 @@ int d_push_hsdir( OnionService* service )
     tmp_circuit = tmp_circuit->next;
   }
 
-  xSemaphoreGive( circuits_mutex );
+  MINITOR_MUTEX_GIVE( circuits_mutex );
   //MUTEX GIVE
 
   wc_InitRng( &rng );
@@ -3055,7 +2823,7 @@ int d_push_hsdir( OnionService* service )
   wc_FreeRng( &rng );
 
   // BEGIN mutex
-  xSemaphoreTake( network_consensus_mutex, portMAX_DELAY );
+  MINITOR_MUTEX_TAKE_BLOCKING( network_consensus_mutex );
 
   valid_after = network_consensus.valid_after;
   fresh_until = network_consensus.fresh_until;
@@ -3071,11 +2839,10 @@ int d_push_hsdir( OnionService* service )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to derive the blinded key" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to derive the blinded key" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     idx = ED25519_PUB_KEY_SIZE;
@@ -3083,26 +2850,24 @@ int d_push_hsdir( OnionService* service )
 
     if ( wolf_succ < 0 || idx != ED25519_PUB_KEY_SIZE )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to export blinded public key" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to export blinded public key" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     service->target_relays[i] = px_get_target_relays( network_consensus.hsdir_n_replicas, blinded_pub_keys[i], time_period + i, network_consensus.hsdir_interval, network_consensus.hsdir_spread_store, i );
 
     if ( service->target_relays[i] == NULL )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to get target_relays" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to get target_relays" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
   }
 
-  xSemaphoreGive( network_consensus_mutex );
+  MINITOR_MUTEX_GIVE( network_consensus_mutex );
   // END mutex
 
   service->hsdir_to_send = service->target_relays[0]->length + service->target_relays[1]->length;
@@ -3112,11 +2877,10 @@ int d_push_hsdir( OnionService* service )
 
   if ( revision_counter < 0 )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Failed to roll the revision_counter" );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Failed to roll the revision_counter" );
 
-    return -1;
+    ret = -1;
+    goto finish;
   }
 
   // i = 0 is first descriptor, 1 is second as per the spec
@@ -3136,11 +2900,10 @@ int d_push_hsdir( OnionService* service )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to generate second layer descriptor plaintext" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"credential", strlen( "credential" ) );
@@ -3174,22 +2937,20 @@ int d_push_hsdir( OnionService* service )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to encrypt second layer descriptor plaintext" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     succ = d_generate_first_plaintext( desc_file );
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to generate first layer descriptor plaintext" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     // encrypt first layer plaintext
@@ -3205,11 +2966,10 @@ int d_push_hsdir( OnionService* service )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to encrypt first layer descriptor plaintext" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     // create outer descriptor wrapper
@@ -3223,11 +2983,10 @@ int d_push_hsdir( OnionService* service )
 
     if ( succ < 0 )
     {
-#ifdef DEBUG_MINITOR
-      ESP_LOGE( MINITOR_TAG, "Failed to generate outer descriptor" );
-#endif
+      MINITOR_LOG( MINITOR_TAG, "Failed to generate outer descriptor" );
 
-      return -1;
+      ret = -1;
+      goto finish;
     }
 
     // send outer descriptor wrapper to the correct HSDIR nodes
@@ -3240,12 +2999,13 @@ int d_push_hsdir( OnionService* service )
   start_relay = px_get_random_fast_relay( 1, service->target_relays[0], NULL, NULL );
   v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, 0, 0, start_relay, service->target_relays[0]->head->relay, NULL );
 
+finish:
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_ed25519_free( &blinded_keys[0] );
   wc_ed25519_free( &blinded_keys[1] );
   wc_ed25519_free( &descriptor_signing_key );
 
-  return 0;
+  return ret;
 }
 
 void v_cleanup_service_hs_data( OnionService* service, int desc_index )
@@ -3257,9 +3017,7 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
 
   if ( service->hsdir_sent == service->hsdir_to_send )
   {
-#ifdef DEBUG_MINITOR
-    ESP_LOGE( MINITOR_TAG, "Hidden service ready at: %s", service->hostname );
-#endif
+    MINITOR_LOG( MINITOR_TAG, "Hidden service ready at: %s", service->hostname );
 
     v_set_hsdir_timer( service->hsdir_timer );
 

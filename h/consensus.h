@@ -21,8 +21,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "./structures/consensus.h"
 
-extern SemaphoreHandle_t fastest_cache_mutex;
+extern MinitorMutex fastest_cache_mutex;
 
+void v_handle_relay_fetch( void* pv_parameters );
+void v_handle_crypto_and_insert( void* pv_parameters );
 int d_get_hs_time_period( time_t fresh_until, time_t valid_after, int hsdir_interval );
 int d_set_next_consenus();
 int d_fetch_consensus_info();

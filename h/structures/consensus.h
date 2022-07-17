@@ -19,12 +19,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CONSENSUS_H
 #define MINITOR_STRUCTURES_CONSENSUS_H
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/aes.h"
+
+#include "../port_types.h"
 
 #include "../constants.h"
 
@@ -88,9 +87,9 @@ OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index )
 
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;
-extern SemaphoreHandle_t network_consensus_mutex;
-extern SemaphoreHandle_t crypto_insert_finish;
-extern TimerHandle_t consensus_timer;
-extern TimerHandle_t consensus_valid_timer;
+extern MinitorMutex network_consensus_mutex;
+extern MinitorMutex crypto_insert_finish;
+extern MinitorTimer consensus_timer;
+extern MinitorTimer consensus_valid_timer;
 
 #endif

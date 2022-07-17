@@ -19,7 +19,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../../h/structures/circuit.h"
 
 unsigned int circ_id_counter = 0x80000000;
-SemaphoreHandle_t circ_id_mutex;
+MinitorMutex circ_id_mutex;
 
 void v_add_circuit_to_list( OnionCircuit* circuit, OnionCircuit** list )
 {

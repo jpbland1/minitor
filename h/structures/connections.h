@@ -20,8 +20,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define MINITOR_STRUCTURES_CONNECTIONS_H
 
 #include "user_settings.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 

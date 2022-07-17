@@ -19,9 +19,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_ONION_SERVICE_H
 #define MINITOR_STRUCTURES_ONION_SERVICE_H
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-
 #include "user_settings.h"
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
@@ -51,7 +48,7 @@ typedef struct OnionService
   unsigned char previous_sub_credential[WC_SHA3_256_DIGEST_SIZE];
   DoublyLinkedRendezvousCookieList rendezvous_cookies;
   time_t rend_timestamp;
-  TimerHandle_t hsdir_timer;
+  MinitorTimer hsdir_timer;
   int intro_live_count;
   int hsdir_sent;
   int hsdir_to_send;
