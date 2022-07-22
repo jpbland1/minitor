@@ -33,7 +33,7 @@ int d_roll_revision_counter()
 
   if ( stat( FILESYSTEM_PREFIX "rev_counter", &st ) != 0 )
   {
-    fd = open( FILESYSTEM_PREFIX "rev_counter", O_CREAT | O_TRUNC | O_WRONLY );
+    fd = open( FILESYSTEM_PREFIX "rev_counter", O_CREAT | O_TRUNC | O_WRONLY, 0600 );
     count = -1;
   }
   else

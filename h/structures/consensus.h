@@ -19,7 +19,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CONSENSUS_H
 #define MINITOR_STRUCTURES_CONSENSUS_H
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/aes.h"
 
@@ -60,8 +61,8 @@ typedef struct OnionRelay {
 } OnionRelay;
 
 typedef struct RelayCrypto {
-  Sha running_sha_forward;
-  Sha running_sha_backward;
+  wc_Sha running_sha_forward;
+  wc_Sha running_sha_backward;
   Aes aes_forward;
   Aes aes_backward;
   unsigned char nonce[DIGEST_LEN];

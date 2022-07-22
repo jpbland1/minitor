@@ -19,9 +19,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CONNECTIONS_H
 #define MINITOR_STRUCTURES_CONNECTIONS_H
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/rsa.h"
+
+#include "../port.h"
 
 typedef enum ConnectionStatus
 {
@@ -52,13 +55,14 @@ typedef struct DlConnection
   int responder_rsa_identity_key_der_size;
   uint8_t* initiator_rsa_identity_key_der;
   int initiator_rsa_identity_key_der_size;
-  Sha256 initiator_sha;
-  Sha256 responder_sha;
+  wc_Sha256 initiator_sha;
+  wc_Sha256 responder_sha;
   RsaKey initiator_rsa_auth_key;
   bool has_versions;
   uint32_t cell_ring_start;
   uint32_t cell_ring_end;
   uint8_t* cell_ring_buf[20];
+  uint8_t master_secret[48];
 } DlConnection;
 
 void v_add_connection_to_list( DlConnection* connection, DlConnection** list );

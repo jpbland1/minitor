@@ -1,3 +1,16 @@
 *.swp
 *build
+*.o
+*.a
+*.deps
+*.dirstamp
+depcomp
+aclocal.m4
+autom4te.cache/
+install-sh
+compile
+config.log
+config.status
+Makefile.in
+configure~
 components/wifi_connect/include/wifi_connect.h

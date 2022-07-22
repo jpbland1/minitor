@@ -18,14 +18,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdlib.h>
 
-#include "user_settings.h"
-#include "wolfssl/wolfcrypt/rsa.h"
-#include "wolfssl/wolfcrypt/hmac.h"
-#include "wolfssl/internal.h"
-#include "wolfssl/wolfcrypt/error-crypt.h"
-
 #include "../include/config.h"
 #include "../h/port.h"
+
+#include "wolfssl/options.h"
+
+#include "wolfssl/ssl.h"
+#include "wolfssl/wolfcrypt/rsa.h"
+#include "wolfssl/wolfcrypt/hmac.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
+#include "../h/wolfssl_internal.h"
 
 #include "../h/connections.h"
 #include "../h/circuit.h"
@@ -1026,7 +1028,146 @@ int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_ce
   int ret = 0;
   CellVariable* authenticate_cell;
   WC_RNG rng;
-  Sha256 reusable_sha;
+  wc_Sha256 reusable_sha;
+  unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
+  WOLFSSL_X509* peer_cert;
+  Hmac tls_secrets_hmac;
+  int wolf_succ;
+  uint8_t* tmp_cert_buf;
+  int tmp_cert_len;
+  uint8_t client_random[32];
+  uint8_t server_random[32];
+
+  wc_InitRng( &rng );
+  wc_InitSha256( &reusable_sha );
+
+  wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)challenge_cell, length );
+
+  peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
+
+  if ( peer_cert == NULL )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed get peer cert" );
+
+    ret = -1;
+    goto finish;
+  }
+
+  // VARIABLE_CELL_HEADER_SIZE, 4 for the auth_type and auth_length and 352 for the auth body
+  authenticate_cell = malloc( VARIABLE_CELL_HEADER_SIZE + 4 + 352 );
+
+  // generate answer for auth challenge
+  authenticate_cell->circ_id = 0;
+  authenticate_cell->command = AUTHENTICATE;
+  authenticate_cell->length = 4 + 352;
+
+  authenticate_cell->payload.authenticate.auth_type = AUTH_ONE;
+  authenticate_cell->payload.authenticate.auth_length = 352;
+
+  // fill in type
+  memcpy( authenticate_cell->payload.authenticate.auth_1.type, AUTH_ONE_TYPE_STRING, 8 );
+
+  // create the hash of the clients identity key and fill the authenticate cell with it
+  wc_Sha256Update( &reusable_sha, or_connection->initiator_rsa_identity_key_der, or_connection->initiator_rsa_identity_key_der_size );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.client_id, reusable_sha_sum, 32 );
+
+  // create the hash of the server's identity key and fill the authenticate cell with it
+  wc_Sha256Update( &reusable_sha, or_connection->responder_rsa_identity_key_der, or_connection->responder_rsa_identity_key_der_size );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_id, reusable_sha_sum, 32 );
+
+  // create the hash of all server cells so far and fill the authenticate cell with it
+  wc_Sha256Final( &or_connection->responder_sha, reusable_sha_sum );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_log, reusable_sha_sum, 32 );
+
+  // create the hash of all cilent cells so far and fill the authenticate cell with it
+  wc_Sha256Final( &or_connection->initiator_sha, reusable_sha_sum );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.client_log, reusable_sha_sum, 32 );
+
+  // create a sha hash of the tls cert and copy it in
+  tmp_cert_buf = wolfSSL_X509_get_der( peer_cert, &tmp_cert_len );
+
+  MINITOR_LOG( MINITOR_TAG, "der memcmp %d %d %d", memcmp( tmp_cert_buf, peer_cert->derCert->buffer, tmp_cert_len ), tmp_cert_len, peer_cert->derCert->length );
+
+  wc_Sha256Update( &reusable_sha, tmp_cert_buf, tmp_cert_len );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+  memcpy( authenticate_cell->payload.authenticate.auth_1.server_cert, reusable_sha_sum, 32 );
+
+  MINITOR_LOG( MINITOR_TAG, "master memcmp %d %d %d", memcmp( or_connection->master_secret, or_connection->ssl->arrays->masterSecret, SECRET_LEN ), SECRET_LEN, sizeof( or_connection->master_secret ) );
+
+  // set the hmac key to the master secret that was negotiated
+  //wc_HmacSetKey( &tls_secrets_hmac, WC_SHA256, or_connection->master_secret, sizeof( or_connection->master_secret ) );
+  wc_HmacSetKey( &tls_secrets_hmac, WC_SHA256, or_connection->ssl->arrays->masterSecret, sizeof( or_connection->master_secret ) );
+
+  // update the hmac
+  wolfSSL_get_client_random( or_connection->ssl, client_random, sizeof( client_random ) );
+  wolfSSL_get_server_random( or_connection->ssl, server_random, sizeof( server_random ) );
+
+  MINITOR_LOG( MINITOR_TAG, "client_random memcmp %d", memcmp( client_random, or_connection->ssl->arrays->clientRandom, 32 ) );
+  MINITOR_LOG( MINITOR_TAG, "server_random memcmp %d", memcmp( server_random, or_connection->ssl->arrays->serverRandom, 32 ) );
+
+  wc_HmacUpdate( &tls_secrets_hmac, client_random, sizeof( client_random ) );
+  wc_HmacUpdate( &tls_secrets_hmac, server_random, sizeof( server_random ) );
+  wc_HmacUpdate( &tls_secrets_hmac, (unsigned char*)"Tor V3 handshake TLS cross-certification", strlen( "Tor V3 handshake TLS cross-certification" ) + 1 );
+  // finalize the hmac
+  wc_HmacFinal( &tls_secrets_hmac, reusable_sha_sum );
+  wc_HmacFree( &tls_secrets_hmac );
+  // free the temporary arrays
+  wolfSSL_FreeArrays( or_connection->ssl );
+
+  MINITOR_FILL_RANDOM( or_connection->master_secret, sizeof( or_connection->master_secret ) );
+
+  // copy the tls secrets digest in
+  memcpy( authenticate_cell->payload.authenticate.auth_1.tls_secrets, reusable_sha_sum, 32 );
+
+  // fill the rand array
+  wc_RNG_GenerateBlock( &rng, authenticate_cell->payload.authenticate.auth_1.rand, 24 );
+  // create the signature, exlucde the signature part of the structure
+  wc_Sha256Update( &reusable_sha, &(authenticate_cell->payload.authenticate.auth_1), sizeof( AuthenticationOne ) - 128 );
+  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
+
+  wc_RsaSSL_Sign( reusable_sha_sum, 32, authenticate_cell->payload.authenticate.auth_1.signature, 128, &or_connection->initiator_rsa_auth_key, &rng );
+
+  v_networkize_variable_cell( authenticate_cell );
+
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)authenticate_cell, VARIABLE_CELL_HEADER_SIZE + 4 + 352, 0 );
+
+  free( authenticate_cell );
+
+  if ( wolf_succ <= 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to send authenticate cell, error code: %d", wolfSSL_get_error( or_connection->ssl, wolf_succ ) );
+
+    ret = -1;
+  }
+
+finish:
+  wolfSSL_X509_free( peer_cert );
+
+  wc_Sha256Free( &reusable_sha );
+
+  // I need to free this in the fail states of the other steps of the handshake
+  free( or_connection->responder_rsa_identity_key_der );
+  free( or_connection->initiator_rsa_identity_key_der );
+
+  wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
+
+  wc_Sha256Free( &or_connection->responder_sha );
+  wc_Sha256Free( &or_connection->initiator_sha );
+
+  wc_FreeRng( &rng );
+
+  return ret;
+}
+
+/*
+int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_cell, int length )
+{
+  int ret = 0;
+  CellVariable* authenticate_cell;
+  WC_RNG rng;
+  wc_Sha256 reusable_sha;
   unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
   WOLFSSL_X509* peer_cert;
   Hmac tls_secrets_hmac;
@@ -1139,6 +1280,7 @@ finish:
 
   return ret;
 }
+*/
 
 int d_process_netinfo( DlConnection* or_connection, Cell* netinfo_cell )
 {
@@ -1239,8 +1381,26 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
   RsaKey responder_rsa_identity_key;
   uint8_t temp_array[128];
   TorCert* working_cert;
+  WOLFSSL_EVP_PKEY* peer_pubkey;
+  WOLFSSL_EVP_PKEY* tmp_pubkey;
+  uint8_t* tmp_cert_buf;
+  int tmp_cert_length = -1;
+
+  peer_pubkey = wolfSSL_X509_get_pubkey( peer_cert );
+
+  /*
+  // get the length
+  wolfSSL_X509_get_pubkey_buffer( peer_cert, NULL, &peer_pubkey_length );
+
+  peer_pubkey = malloc( peer_pubkey_length );
+
+  // now get the buffer
+  wolfSSL_X509_get_pubkey_buffer( peer_cert, peer_pubkey, &peer_pubkey_length );
+  */
 
   wc_InitRsaKey( &responder_rsa_identity_key, NULL );
+
+  //MINITOR_LOG( MINITOR_TAG, "pubkey len: %d %d", peer_pubkey_length, peer_cert->pubKey.length );
 
   // verify the certs
   time( &now );
@@ -1267,7 +1427,9 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
       goto finish;
     }
 
-    cert_date = ud_get_cert_date( certificate->notBefore.data, certificate->notBefore.length );
+    tmp_cert_buf = wolfSSL_X509_notBefore( certificate );
+
+    cert_date = ud_get_cert_date( tmp_cert_buf + 2, tmp_cert_buf[1] );
 
     if ( cert_date == 0 || cert_date > now )
     {
@@ -1277,7 +1439,9 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
       goto finish;
     }
 
-    cert_date = ud_get_cert_date( certificate->notAfter.data, certificate->notAfter.length );
+    tmp_cert_buf = wolfSSL_X509_notAfter( certificate );
+
+    cert_date = ud_get_cert_date( tmp_cert_buf + 2, tmp_cert_buf[1] );
 
     if ( cert_date == 0 || cert_date < now )
     {
@@ -1300,7 +1464,23 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
         goto finish;
       }
 
-      if ( memcmp( certificate->pubKey.buffer, peer_cert->pubKey.buffer, certificate->pubKey.length ) != 0 )
+      /*
+      // get the length
+      wolfSSL_X509_get_pubkey_buffer( certificate, NULL, &tmp_cert_length );
+
+      tmp_cert_buf = malloc( tmp_cert_length );
+
+      // now get the buffer
+      wolfSSL_X509_get_pubkey_buffer( certificate, tmp_cert_buf, &tmp_cert_length );
+      */
+
+      tmp_pubkey = wolfSSL_X509_get_pubkey( certificate );
+
+      wolf_succ = memcmp( tmp_pubkey->pkey.ptr, peer_pubkey->pkey.ptr, peer_pubkey->pkey_sz );
+
+      wolfSSL_EVP_PKEY_free( tmp_pubkey );
+
+      if ( wolf_succ != 0 )
       {
         MINITOR_LOG( MINITOR_TAG, "Failed to match LINK_KEY with tls key" );
 
@@ -1320,8 +1500,20 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
         goto finish;
       }
 
+      /*
+      // get the length
+      wolfSSL_X509_get_pubkey_buffer( certificate, NULL, &tmp_cert_length );
+
+      tmp_cert_buf = malloc( tmp_cert_length );
+
+      // now get the buffer
+      wolfSSL_X509_get_pubkey_buffer( certificate, tmp_cert_buf, &tmp_cert_length );
+      */
+
+      tmp_pubkey = wolfSSL_X509_get_pubkey( certificate );
+
       idx = 0;
-      wolf_succ = wc_RsaPublicKeyDecode( certificate->pubKey.buffer, &idx, &responder_rsa_identity_key, certificate->pubKey.length );
+      wolf_succ = wc_RsaPublicKeyDecode( tmp_pubkey->pkey.ptr, &idx, &responder_rsa_identity_key, tmp_pubkey->pkey_sz );
 
       if ( wolf_succ < 0 )
       {
@@ -1331,17 +1523,29 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
         goto finish;
       }
 
-      memcpy( responder_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
-      *responder_rsa_identity_key_der_size = certificate->pubKey.length;
+      memcpy( responder_rsa_identity_key_der, tmp_pubkey->pkey.ptr, tmp_pubkey->pkey_sz );
+      *responder_rsa_identity_key_der_size = tmp_pubkey->pkey_sz;
+
+      wolfSSL_EVP_PKEY_free( tmp_pubkey );
+
+      // get the length
+      wolfSSL_X509_get_signature( link_key_certificate, NULL, &tmp_cert_length );
+
+      tmp_cert_buf = malloc( tmp_cert_length );
+
+      // now get the buffer
+      wolfSSL_X509_get_signature( link_key_certificate, tmp_cert_buf, &tmp_cert_length );
 
       // verify the signatures on the keys
       wolf_succ = wc_RsaSSL_Verify(
-        link_key_certificate->sig.buffer,
-        link_key_certificate->sig.length,
+        tmp_cert_buf,
+        tmp_cert_length,
         temp_array,
         128,
         &responder_rsa_identity_key
       );
+
+      free( tmp_cert_buf );
 
       if ( wolf_succ <= 0 )
       {
@@ -1351,13 +1555,23 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
         goto finish;
       }
 
+      // get the length
+      wolfSSL_X509_get_signature( certificate, NULL, &tmp_cert_length );
+
+      tmp_cert_buf = malloc( tmp_cert_length );
+
+      // now get the buffer
+      wolfSSL_X509_get_signature( certificate, tmp_cert_buf, &tmp_cert_length );
+
       wolf_succ = wc_RsaSSL_Verify(
-        certificate->sig.buffer,
-        certificate->sig.length,
+        tmp_cert_buf,
+        tmp_cert_length,
         temp_array,
         128,
         &responder_rsa_identity_key
       );
+
+      free( tmp_cert_buf );
 
       if ( wolf_succ <= 0 )
       {
@@ -1398,6 +1612,7 @@ finish:
   }
 
   wc_FreeRsaKey( &responder_rsa_identity_key );
+  wolfSSL_EVP_PKEY_free( peer_pubkey );
 
   return ret;
 }
@@ -1441,7 +1656,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 
@@ -1534,7 +1749,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_cert_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_cert_der", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
 
@@ -1567,12 +1782,15 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    memcpy( initiator_rsa_identity_key_der, certificate->pubKey.buffer, certificate->pubKey.length );
-    *initiator_rsa_identity_key_der_size = certificate->pubKey.length;
+    // get the length
+    *initiator_rsa_identity_key_der_size = -1;
+    wolfSSL_X509_get_pubkey_buffer( certificate, NULL, initiator_rsa_identity_key_der_size );
+    // get the buffer
+    wolfSSL_X509_get_pubkey_buffer( certificate, initiator_rsa_identity_key_der, initiator_rsa_identity_key_der_size );
 
     wolfSSL_X509_free( certificate );
 
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 

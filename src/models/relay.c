@@ -24,8 +24,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <unistd.h>
 #include <errno.h>
 
-#include "user_settings.h"
-
 #include "../../include/config.h"
 #include "../../h/port.h"
 
@@ -510,7 +508,7 @@ static int d_reset_relay_list( const char* filename )
   int fd;
   time_t dummy_until = 0;
 
-  fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC );
+  fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC, 0600 );
 
   if ( fd < 0 )
   {

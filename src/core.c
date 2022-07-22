@@ -1288,7 +1288,8 @@ void v_minitor_daemon( void* pv_parameters )
       MINITOR_TASK_DELETE( NULL );
     }
 
-    MINITOR_LOG( CORE_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
+    //MINITOR_LOG( CORE_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
+    MINITOR_LOG( CORE_TAG, "command: %d", onion_message->type );
 
     switch ( onion_message->type )
     {

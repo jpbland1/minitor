@@ -19,7 +19,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_ONION_SERVICE_H
 #define MINITOR_STRUCTURES_ONION_SERVICE_H
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
 
@@ -54,7 +55,7 @@ typedef struct OnionService
   int hsdir_to_send;
   DoublyLinkedOnionRelayList* target_relays[2];
   char hostname[63];
-  char hs_descs[2][26];
+  char hs_descs[2][50];
 } OnionService;
 
 void v_add_service_to_list( OnionService* service, OnionService** list );

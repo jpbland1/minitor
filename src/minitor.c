@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/core.h"
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
+MinitorTask core_task;
 
 static void v_timer_trigger_timeout( MinitorTimer x_timer )
 {
@@ -40,7 +41,7 @@ static void v_timer_trigger_timeout( MinitorTimer x_timer )
   succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
-  if ( succ == pdFALSE )
+  if ( succ == false )
   {
     free( onion_message );
     MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
@@ -56,7 +57,7 @@ static void v_timer_trigger_consensus( MinitorTimer x_timer )
   succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
-  if ( succ == pdFALSE )
+  if ( succ == false )
   {
     free( onion_message );
     MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
@@ -72,7 +73,7 @@ static void v_timer_trigger_keepalive( MinitorTimer x_timer )
   succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
-  if ( succ == pdFALSE )
+  if ( succ == false )
   {
     free( onion_message );
     MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
@@ -84,12 +85,12 @@ static void v_timer_trigger_hsdir_update( MinitorTimer x_timer )
   int succ;
   OnionMessage* onion_message = malloc( sizeof( OnionMessage ) );
   onion_message->type = TIMER_HSDIR;
-  onion_message->data = pvTimerGetTimerID( x_timer );
+  onion_message->data = MINITOR_TIMER_GET_DATA( x_timer );
 
   succ = MINITOR_ENQUEUE_MS( core_task_queue, (void*)(&onion_message), 0 );
 
   // try again in half a second
-  if ( succ == pdFALSE )
+  if ( succ == false )
   {
     free( onion_message );
     MINITOR_TIMER_SET_MS_BLOCKING( x_timer, 500 );
@@ -108,7 +109,7 @@ int d_minitor_INIT()
 
   core_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
 
-  b_create_core_task( NULL );
+  b_create_core_task( &core_task );
 
   consensus_timer = MINITOR_TIMER_CREATE_MS(
     "CONSENSUS_TIMER",
@@ -138,7 +139,7 @@ int d_minitor_INIT()
   MINITOR_TIMER_RESET_BLOCKING( timeout_timer );
 
   wolfSSL_Init();
-  /* wolfSSL_Debugging_ON(); */
+  wolfSSL_Debugging_ON();
 
   //if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_3_client_method() ) ) == NULL )
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )

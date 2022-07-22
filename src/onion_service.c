@@ -16,11 +16,13 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#include "user_settings.h"
-#include "wolfssl/wolfcrypt/hash.h"
-
 #include "../include/config.h"
 #include "../h/port.h"
+
+#include "wolfssl/options.h"
+#include "wolfssl/wolfcrypt/hash.h"
+#include "wolfssl/wolfcrypt/fe_operations.h"
+#include "../h/custom_sc.h"
 
 #include "../h/onion_service.h"
 #include "../h/constants.h"
@@ -612,7 +614,7 @@ int d_verify_and_decrypt_introduce_2(
   Aes aes_key;
   unsigned char aes_iv[16] = { 0 };
   wc_Shake reusable_shake;
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   unsigned char* intro_secret_hs_input = malloc( sizeof( unsigned char ) * ( CURVE25519_KEYSIZE + ED25519_PUB_KEY_SIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + HS_PROTOID_LENGTH ) );
   unsigned char* working_intro_secret_hs_input = intro_secret_hs_input;
@@ -759,7 +761,7 @@ int d_hs_ntor_handshake_finish(
   unsigned char* rend_secret_hs_input = malloc( sizeof( unsigned char ) * ( CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + ED25519_PUB_KEY_SIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + CURVE25519_KEYSIZE + HS_PROTOID_LENGTH ) );
   unsigned char* working_rend_secret_hs_input = rend_secret_hs_input;
   unsigned char aes_iv[16] = { 0 };
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   wc_Shake reusable_shake;
   unsigned char* expanded_keys = malloc( sizeof( unsigned char ) * ( WC_SHA3_256_DIGEST_SIZE * 2 + AES_256_KEY_SIZE * 2 ) );
@@ -896,7 +898,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
     .tail = NULL,
     .length = 0,
   };
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   DoublyLinkedOnionRelayList* hsdir_index_list;
   DoublyLinkedOnionRelay* hsdir_relay_node;
   DoublyLinkedOnionRelay* next_hsdir_relay_node;
@@ -982,6 +984,7 @@ static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_re
 
     for ( ; j < hsdir_index_list->length; j++ )
     {
+      free( hsdir_relay_node->relay );
       free( hsdir_relay_node );
 
       hsdir_relay_node = hsdir_relay_node->next;
@@ -1082,7 +1085,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
 
   sprintf( plain_file, "%s_plain", filename );
 
-  plain_fd = open( plain_file, O_CREAT | O_RDWR | O_TRUNC );
+  plain_fd = open( plain_file, O_CREAT | O_RDWR | O_TRUNC, 0600 );
 
   if ( plain_fd < 0 )
   {
@@ -1294,7 +1297,7 @@ int d_generate_first_plaintext( char* filename )
   char plain_buff[340];
   char plain_file[60];
   int i;
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   char tmp_buff[58];
 
@@ -1316,7 +1319,7 @@ int d_generate_first_plaintext( char* filename )
 
   sprintf( plain_file, "%s_plain", filename );
 
-  plain_fd = open( plain_file, O_CREAT | O_WRONLY | O_TRUNC );
+  plain_fd = open( plain_file, O_CREAT | O_WRONLY | O_TRUNC, 0600 );
 
   if ( plain_fd < 0 )
   {
@@ -1511,7 +1514,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
   unsigned char reusable_length_buffer[8];
   unsigned char salt[16];
   unsigned char* secret_input = malloc( sizeof( unsigned char ) * ( secret_data_length + WC_SHA3_256_DIGEST_SIZE + sizeof( int64_t ) ) );
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   wc_Shake reusable_shake;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   unsigned char keys[AES_256_KEY_SIZE + AES_IV_SIZE + WC_SHA3_256_DIGEST_SIZE];
@@ -1520,7 +1523,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 
   sprintf( cipher_file, "%s_cipher", filename );
 
-  cipher_fd = open( cipher_file, O_CREAT | O_WRONLY | O_TRUNC );
+  cipher_fd = open( cipher_file, O_CREAT | O_WRONLY | O_TRUNC, 0600 );
 
   if ( cipher_fd < 0 )
   {
@@ -1716,7 +1719,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
   const char* begin_ed_s = "-----BEGIN ED25519 CERT-----\n";
   const char* end_ed_s = "-----END ED25519 CERT-----\n";
 
-  fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC );
+  fd = open( filename, O_CREAT | O_WRONLY | O_TRUNC, 0600 );
 
   if ( fd < 0 )
   {
@@ -2030,15 +2033,15 @@ cleanup:
 
 void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* input, int sign_bit )
 {
-  unsigned char one[F25519_SIZE] = { 1 };
-  unsigned char input_minus_1[F25519_SIZE];
-  unsigned char input_plus_1[F25519_SIZE];
-  unsigned char inverse_input_plus_1[F25519_SIZE];
+  unsigned char one[32] = { 1 };
+  unsigned char input_minus_1[32];
+  unsigned char input_plus_1[32];
+  unsigned char inverse_input_plus_1[32];
 
-  lm_sub( input_minus_1, input, one );
-  lm_add( input_plus_1, input, one );
-  lm_invert( inverse_input_plus_1, input_plus_1 );
-  lm_mul( output, input_minus_1, inverse_input_plus_1 );
+  fe_sub( input_minus_1, input, one );
+  fe_add( input_plus_1, input, one );
+  fe_invert( inverse_input_plus_1, input_plus_1 );
+  fe_mul( output, input_minus_1, inverse_input_plus_1 );
 
   output[31] = (!!sign_bit) << 7;
 }
@@ -2051,7 +2054,7 @@ int d_router_establish_intro( OnionCircuit* circuit, DlConnection* or_connection
   int64_t ordered_digest_length = (int64_t)DIGEST_LEN;
   unsigned char ordered_digest_length_buffer[8];
   WC_RNG rng;
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
   Cell* establish_cell;
   uint8_t* establish_cell_p;
@@ -2180,9 +2183,9 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
   int wolf_succ;
   unsigned int idx;
   unsigned int idy;
-  Sha3 reusable_sha3;
-  unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
-  Sha512 reusable_sha512;
+  wc_Sha3 reusable_sha3;
+  unsigned char reusable_sha3_sum[64] = { 0 };
+  wc_Sha512 reusable_sha512;
   unsigned char reusable_sha512_sum[WC_SHA512_DIGEST_SIZE];
   unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
   unsigned char tmp_priv_key[ED25519_PRV_KEY_SIZE];
@@ -2257,8 +2260,10 @@ int d_derive_blinded_key( ed25519_key* blinded_key, ed25519_key* master_key, int
 
   memcpy( reduced_priv_key, tmp_priv_key, 32 );
 
-  sc_reduce( reduced_priv_key );
-  sc_muladd( out_priv_key, reduced_priv_key, reusable_sha3_sum, zero );
+  //sc_reduce( reduced_priv_key );
+  //sc_reduce( reusable_sha3_sum );
+  //sc_muladd( out_priv_key, reduced_priv_key, reusable_sha3_sum, zero );
+  minitor_sc_muladd( out_priv_key, tmp_priv_key, reusable_sha3_sum, zero );
 
   wc_Sha512Update( &reusable_sha512, (unsigned char*)"Derive temporary signing key hash input", strlen( "Derive temporary signing key hash input" ) );
   wc_Sha512Update( &reusable_sha512, tmp_priv_key + 32, 32 );
@@ -2288,7 +2293,7 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
   unsigned char version = 0x03;
   struct stat st;
   WC_RNG rng;
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   unsigned char reusable_sha3_sum[WC_SHA3_256_DIGEST_SIZE];
   unsigned char tmp_pub_key[ED25519_PUB_KEY_SIZE];
   unsigned char tmp_priv_key[ED25519_PRV_KEY_SIZE];
@@ -2348,7 +2353,7 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/hostname" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
@@ -2377,7 +2382,7 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/public_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
@@ -2406,7 +2411,7 @@ int d_generate_hs_keys( OnionService* onion_service, const char* onion_service_d
     strcpy( working_file, onion_service_directory );
     strcat( working_file, "/private_key_ed25519" );
 
-    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC ) ) < 0 )
+    if ( ( fd = open( working_file, O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open %s for onion service, errno: %d", working_file, errno );
 
@@ -2761,7 +2766,7 @@ int d_push_hsdir( OnionService* service )
   WC_RNG rng;
   ed25519_key blinded_keys[2];
   ed25519_key descriptor_signing_key;
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
   int reusable_text_length;
   unsigned char* reusable_plaintext;
   unsigned char* reusable_ciphertext;
@@ -2772,7 +2777,7 @@ int d_push_hsdir( OnionService* service )
   OnionCircuit* tmp_circuit;
   OnionCircuit* intro_circuits[3];
   OnionRelay* start_relay;
-  char desc_file[26];
+  char desc_file[50];
 
   if ( service->intro_live_count < 3 )
   {
@@ -2888,12 +2893,13 @@ int d_push_hsdir( OnionService* service )
   {
     // null terminated
     // /sdcard/abcdefghij_desc_0\0
+    memset( desc_file, 0, sizeof( desc_file ) );
     strcpy( desc_file, FILESYSTEM_PREFIX );
-    memcpy( desc_file + 8, service->hostname, 10 );
-    desc_file[18] = 0;
+    memcpy( desc_file + strlen( FILESYSTEM_PREFIX ), service->hostname, 10 );
+    desc_file[strlen( FILESYSTEM_PREFIX ) + 10] = 0;
     strcat( desc_file, "_desc_" );
-    desc_file[24] = (char)(48 + i);
-    desc_file[25] = 0;
+    desc_file[strlen( desc_file ) + 1] = 0;
+    desc_file[strlen( desc_file )] = (char)(48 + i);
 
     // generate second layer plaintext
     succ = d_generate_second_plaintext( desc_file, intro_circuits, valid_after, &descriptor_signing_key );

@@ -19,7 +19,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CIRCUIT_H
 #define MINITOR_STRUCTURES_CIRCUIT_H
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
 #include "wolfssl/wolfcrypt/curve25519.h"
@@ -57,8 +58,8 @@ typedef struct IntroCrypto
 
 typedef struct HsCrypto
 {
-  Sha3 hs_running_sha_forward;
-  Sha3 hs_running_sha_backward;
+  wc_Sha3 hs_running_sha_forward;
+  wc_Sha3 hs_running_sha_backward;
   Aes hs_aes_forward;
   Aes hs_aes_backward;
   uint8_t rendezvous_cookie[20];

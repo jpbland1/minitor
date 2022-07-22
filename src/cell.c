@@ -19,7 +19,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdlib.h>
 #include <string.h>
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/wolfcrypt/aes.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/sha3.h"
@@ -507,8 +508,8 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
 {
   int i;
   int wolf_succ;
-  Sha tmp_sha;
-  Sha3 tmp_sha3;
+  wc_Sha tmp_sha;
+  wc_Sha3 tmp_sha3;
   DoublyLinkedOnionRelay* db_relay;
   unsigned char zeros[4] = { 0 };
   unsigned char tmp_digest[WC_SHA_DIGEST_SIZE];

@@ -19,9 +19,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdlib.h>
 #include <time.h>
 
-#include "user_settings.h"
-#include "wolfssl/wolfcrypt/sha3.h"
+#include "wolfssl/options.h"
+
 #include "wolfssl/wolfcrypt/sha.h"
+#include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 
 #include "../include/config.h"
@@ -57,7 +58,7 @@ typedef struct FetchDescriptorState
 static void v_get_id_hash( uint8_t* identity, uint8_t* id_hash, int time_period, int hsdir_interval, uint8_t* srv )
 {
   uint8_t tmp_64_buffer[8];
-  Sha3 reusable_sha3;
+  wc_Sha3 reusable_sha3;
 
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
@@ -428,7 +429,7 @@ static int d_finish_descriptor_fetch( FetchDescriptorState* fetch_state )
   int signing_key_64_length = 0;
   uint8_t der[141];
   uint8_t identity_digest[ID_LENGTH];
-  Sha tmp_sha;
+  wc_Sha tmp_sha;
 
   wc_InitSha( &tmp_sha );
 
@@ -611,7 +612,7 @@ void v_handle_relay_fetch( void* pv_parameters )
 {
   int i;
   int j;
-  int succ = pdFALSE;
+  int succ = false;
   OnionRelay* onion_relay;
   NetworkConsensus* working_consensus = (NetworkConsensus*)pv_parameters;
   FetchDescriptorState fetch_states[2];
@@ -632,7 +633,7 @@ void v_handle_relay_fetch( void* pv_parameters )
   {
     // need this to not be ambiguous since poll can set it to
     // any non-negative number, not just pdTRUE and false
-    succ = pdFALSE;
+    succ = false;
 
     // wait half a second at most before checking our polls
     if ( final_relay_hit == 0 && waiting_relay == 0 )
@@ -640,7 +641,7 @@ void v_handle_relay_fetch( void* pv_parameters )
       succ = MINITOR_DEQUEUE_MS( fetch_relays_queue, &onion_relay, 500 );
     }
 
-    if ( succ == pdTRUE || waiting_relay == 1 )
+    if ( succ == true || waiting_relay == 1 )
     {
       if ( onion_relay == NULL )
       {
@@ -766,7 +767,7 @@ static int d_parse_date_string( char* date_string )
   tmp_time.tm_min = atoi( date_string + 14 );
   tmp_time.tm_sec = atoi( date_string + 17 );
 
-  return mktime( &tmp_time );
+  return timegm( &tmp_time );
 }
 
 static int d_parse_line( int fd, char* line, int limit )
@@ -1196,7 +1197,7 @@ static int d_download_consensus()
     return -1;
   }
 
-  if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_CREAT | O_TRUNC ) ) < 0 )
+  if ( ( fd = open( FILESYSTEM_PREFIX "consensus", O_CREAT | O_TRUNC, 0600 ) ) < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "consensus, errno: %d", errno );
 
@@ -1372,7 +1373,7 @@ static int d_download_consensus()
   // take the semaphore so we know the crypto and insert task finished
   ret = MINITOR_MUTEX_TAKE_MS( crypto_insert_finish, 1000 * 60 );
 
-  if ( ret != pdTRUE )
+  if ( ret != true )
   {
     ret = -1;
     goto finish;
@@ -1423,8 +1424,8 @@ finish:
       MINITOR_TASK_DELETE( crypto_insert_handle );
     }
 
-    vQueueDelete( fetch_relays_queue );
-    vQueueDelete( insert_relays_queue );
+    MINITOR_QUEUE_DELETE( fetch_relays_queue );
+    MINITOR_QUEUE_DELETE( insert_relays_queue );
   }
 
   free( rx_buffer );

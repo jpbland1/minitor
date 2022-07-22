@@ -19,6 +19,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_MINITOR_H
 #define MINITOR_INTERNAL_H
 
+#include "wolfssl/ssl.h"
+
 extern WOLFSSL_CTX* xMinitorWolfSSL_Context;
 
 #endif

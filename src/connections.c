@@ -18,13 +18,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdlib.h>
 
-#include "user_settings.h"
+#include "wolfssl/options.h"
 
 #include "wolfssl/wolfcrypt/settings.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 #include "wolfssl/wolfcrypt/hmac.h"
-#include "wolfssl/internal.h"
 #include "wolfssl/wolfcrypt/error-crypt.h"
+#include "../h/wolfssl_internal.h"
 
 #include "../include/config.h"
 #include "../h/port.h"
@@ -42,7 +42,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 static const char* CONN_TAG = "CONNECTIONS DAEMON";
 
 uint32_t conn_id = 0;
-MinitorTask connections_daemon_task_handle;
+MinitorTask connections_daemon_task_handle = NULL;
 struct pollfd connections_poll[16];
 DlConnection* connections;
 MinitorMutex connections_mutex;
@@ -55,6 +55,30 @@ static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX
   }
 
   MINITOR_LOG( CONN_TAG, "SSL callback error %d", store->error );
+
+  return 0;
+}
+
+static int conn_secrects_cb( WOLFSSL* ssl, void* secret, int* secretSz, void* ctx )
+{
+  DlConnection* or_connection = ctx;
+
+  MINITOR_LOG( CONN_TAG, "SETTING master_secret memcmp: %d %d", memcmp( secret, ssl->arrays->masterSecret, 48 ), *secretSz );
+
+  {
+    int i;
+
+    printf( "\nsecret " );
+
+    for ( i = 0; i < 48; i++ )
+    {
+      printf( "%.2x", ((uint8_t*)secret)[i] );
+    }
+
+    printf( "\n" );
+  }
+
+  memcpy( or_connection->master_secret, secret, 48 );
 
   return 0;
 }
@@ -331,7 +355,7 @@ void v_connections_daemon( void* pv_parameters )
       // because of how file descriptors in ssl are handled, we must read all the
       // current contents in 1 go, otherwise the ssl connection will pull the data
       // out of the file descriptor and the next poll will report no read ready
-      if ( lwip_ioctl( ready_connections[i]->sock_fd, FIONREAD, &readable_bytes ) < 0 )
+      if ( MINITOR_GET_READABLE( ready_connections[i]->sock_fd, &readable_bytes ) < 0 )
       {
         MINITOR_LOG( CONN_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
 
@@ -379,6 +403,7 @@ void v_connections_daemon( void* pv_parameters )
 static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 {
   int i;
+  int succ;
   int sock_fd;
   struct sockaddr_in dest_addr;
   WOLFSSL* ssl;
@@ -419,28 +444,35 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
     return NULL;
   }
 
+  or_connection = malloc( sizeof( DlConnection ) );
+
+  memset( or_connection, 0, sizeof( DlConnection ) );
+
   wolfSSL_set_verify( ssl, SSL_VERIFY_NONE, NULL );
   wolfSSL_KeepArrays( ssl );
+  wolfSSL_set_session_secret_cb( ssl, conn_secrects_cb, or_connection );
 
-  if ( wolfSSL_set_fd( ssl, sock_fd ) != SSL_SUCCESS )
+  succ = wolfSSL_set_fd( ssl, sock_fd );
+
+  if ( succ != SSL_SUCCESS )
   {
-    MINITOR_LOG( CONN_TAG, "Failed to set ssl fd" );
+    MINITOR_LOG( CONN_TAG, "Failed to set ssl fd %d", succ );
 
+    free( or_connection );
     goto clean_ssl;
   }
 
-  if ( wolfSSL_connect( ssl ) != SSL_SUCCESS )
-  {
-    MINITOR_LOG( CONN_TAG, "Failed to wolfssl_connect" );
+  succ = wolfSSL_connect( ssl );
 
+  if ( succ != SSL_SUCCESS )
+  {
+    MINITOR_LOG( CONN_TAG, "Failed to wolfSSL_connect %d", wolfSSL_get_error( ssl, succ ) );
+
+    free( or_connection );
     goto clean_ssl;
   }
 
   MINITOR_LOG( CONN_TAG, "Starting handshake" );
-
-  or_connection = malloc( sizeof( DlConnection ) );
-
-  memset( or_connection, 0, sizeof( DlConnection ) );
 
   or_connection->address = address;
   or_connection->port = port;
