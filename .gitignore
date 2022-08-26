@@ -11,6 +11,8 @@
 depcomp
 compile
 install-sh
+configure
+libtool
 aclocal.m4
 autom4te.cache/
 config.log

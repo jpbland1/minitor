@@ -4,7 +4,7 @@ Minitor is an embedded implementation of Tor that allows an application to easil
 # Installation
 
 ## Installation on Linux
-Minitor requires that wolfSSL is installed separately on linux [click here](https://github.com/wolfSSL/wolfssl).  
+Minitor requires that wolfSSL is installed separately on linux, currently wolfSSL doesn't support expanded ed25519 keys that Tor requires so our port of wolfSSL must be used [click here](https://github.com/jpbland1/wolfssl-expanded-ed25519).  
 Then the linux port can be installed:
 ```
 git checkout linux
