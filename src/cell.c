@@ -131,6 +131,11 @@ void v_hostize_cell( Cell* cell )
 
           break;
 
+        case RELAY_COMMAND_INTRODUCE_ACK:
+          cell->payload.relay.intro_ack.status = ntohs( cell->payload.relay.intro_ack.status );
+
+          break;
+
         default:
           break;
       }
@@ -221,6 +226,11 @@ void v_networkize_cell( Cell* cell )
 
       switch ( cell->payload.relay.relay_command )
       {
+        case RELAY_BEGIN:
+          // flags of relay_begin are after the address string
+          ((uint32_t*)cell->payload.relay.data + strlen( (char*)cell->payload.relay.data ) + 1)[0] = htonl(((uint32_t*)cell->payload.relay.data + strlen( (char*)cell->payload.relay.data ) + 1)[0]);
+
+          break;
         case RELAY_CONNECTED:
           if ( cell->payload.relay.connected.address_4 != 0 )
           {
@@ -269,6 +279,11 @@ void v_networkize_cell( Cell* cell )
           //cell->payload.relay.establish_intro.auth_key_length = htons( cell->payload.relay.establish_intro.auth_key_length );
 
           break;
+        case RELAY_COMMAND_INTRODUCE1:
+          //cell->payload.relay.introduce2.auth_key_length = htons( cell->payload.relay.introduce2.auth_key_length );
+
+          break;
+
         default:
           //MINITOR_LOG( MINITOR_TAG, "unhandled relay command %d", cell->payload.relay.relay_command );
 

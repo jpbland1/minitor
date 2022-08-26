@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/port.h"
 
 #include "wolfssl/options.h"
+#include "wolfssl/wolfcrypt/settings.h"
 
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/rsa.h"
@@ -1161,127 +1162,6 @@ finish:
   return ret;
 }
 
-/*
-int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_cell, int length )
-{
-  int ret = 0;
-  CellVariable* authenticate_cell;
-  WC_RNG rng;
-  wc_Sha256 reusable_sha;
-  unsigned char reusable_sha_sum[WC_SHA256_DIGEST_SIZE];
-  WOLFSSL_X509* peer_cert;
-  Hmac tls_secrets_hmac;
-  int wolf_succ;
-
-  wc_InitRng( &rng );
-  wc_InitSha256( &reusable_sha );
-
-  wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)challenge_cell, length );
-
-  peer_cert = wolfSSL_get_peer_certificate( or_connection->ssl );
-
-  if ( peer_cert == NULL )
-  {
-    MINITOR_LOG( MINITOR_TAG, "Failed get peer cert" );
-
-    ret = -1;
-    goto finish;
-  }
-
-  // VARIABLE_CELL_HEADER_SIZE, 4 for the auth_type and auth_length and 352 for the auth body
-  authenticate_cell = malloc( VARIABLE_CELL_HEADER_SIZE + 4 + 352 );
-
-  // generate answer for auth challenge
-  authenticate_cell->circ_id = 0;
-  authenticate_cell->command = AUTHENTICATE;
-  authenticate_cell->length = 4 + 352;
-
-  authenticate_cell->payload.authenticate.auth_type = AUTH_ONE;
-  authenticate_cell->payload.authenticate.auth_length = 352;
-
-  // fill in type
-  memcpy( authenticate_cell->payload.authenticate.auth_1.type, AUTH_ONE_TYPE_STRING, 8 );
-
-  // create the hash of the clients identity key and fill the authenticate cell with it
-  wc_Sha256Update( &reusable_sha, or_connection->initiator_rsa_identity_key_der, or_connection->initiator_rsa_identity_key_der_size );
-  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( authenticate_cell->payload.authenticate.auth_1.client_id, reusable_sha_sum, 32 );
-
-  // create the hash of the server's identity key and fill the authenticate cell with it
-  wc_Sha256Update( &reusable_sha, or_connection->responder_rsa_identity_key_der, or_connection->responder_rsa_identity_key_der_size );
-  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( authenticate_cell->payload.authenticate.auth_1.server_id, reusable_sha_sum, 32 );
-
-  // create the hash of all server cells so far and fill the authenticate cell with it
-  wc_Sha256Final( &or_connection->responder_sha, reusable_sha_sum );
-  memcpy( authenticate_cell->payload.authenticate.auth_1.server_log, reusable_sha_sum, 32 );
-
-  // create the hash of all cilent cells so far and fill the authenticate cell with it
-  wc_Sha256Final( &or_connection->initiator_sha, reusable_sha_sum );
-  memcpy( authenticate_cell->payload.authenticate.auth_1.client_log, reusable_sha_sum, 32 );
-
-  // create a sha hash of the tls cert and copy it in
-  wc_Sha256Update( &reusable_sha, peer_cert->derCert->buffer, peer_cert->derCert->length );
-  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-  memcpy( authenticate_cell->payload.authenticate.auth_1.server_cert, reusable_sha_sum, 32 );
-
-  // set the hmac key to the master secret that was negotiated
-  wc_HmacSetKey( &tls_secrets_hmac, WC_SHA256, or_connection->ssl->arrays->masterSecret, SECRET_LEN );
-
-  // update the hmac
-  wc_HmacUpdate( &tls_secrets_hmac, or_connection->ssl->arrays->clientRandom, RAN_LEN );
-  wc_HmacUpdate( &tls_secrets_hmac, or_connection->ssl->arrays->serverRandom, RAN_LEN );
-  wc_HmacUpdate( &tls_secrets_hmac, (unsigned char*)"Tor V3 handshake TLS cross-certification", strlen( "Tor V3 handshake TLS cross-certification" ) + 1 );
-  // finalize the hmac
-  wc_HmacFinal( &tls_secrets_hmac, reusable_sha_sum );
-  wc_HmacFree( &tls_secrets_hmac );
-  // free the temporary arrays
-  wolfSSL_FreeArrays( or_connection->ssl );
-
-  // copy the tls secrets digest in
-  memcpy( authenticate_cell->payload.authenticate.auth_1.tls_secrets, reusable_sha_sum, 32 );
-
-  // fill the rand array
-  wc_RNG_GenerateBlock( &rng, authenticate_cell->payload.authenticate.auth_1.rand, 24 );
-  // create the signature, exlucde the signature part of the structure
-  wc_Sha256Update( &reusable_sha, &(authenticate_cell->payload.authenticate.auth_1), sizeof( AuthenticationOne ) - 128 );
-  wc_Sha256Final( &reusable_sha, reusable_sha_sum );
-
-  wc_RsaSSL_Sign( reusable_sha_sum, 32, authenticate_cell->payload.authenticate.auth_1.signature, 128, &or_connection->initiator_rsa_auth_key, &rng );
-
-  v_networkize_variable_cell( authenticate_cell );
-
-  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)authenticate_cell, VARIABLE_CELL_HEADER_SIZE + 4 + 352, 0 );
-
-  free( authenticate_cell );
-
-  if ( wolf_succ <= 0 )
-  {
-    MINITOR_LOG( MINITOR_TAG, "Failed to send authenticate cell, error code: %d", wolfSSL_get_error( or_connection->ssl, wolf_succ ) );
-
-    ret = -1;
-  }
-
-finish:
-  wolfSSL_X509_free( peer_cert );
-
-  wc_Sha256Free( &reusable_sha );
-
-  // I need to free this in the fail states of the other steps of the handshake
-  free( or_connection->responder_rsa_identity_key_der );
-  free( or_connection->initiator_rsa_identity_key_der );
-
-  wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
-
-  wc_Sha256Free( &or_connection->responder_sha );
-  wc_Sha256Free( &or_connection->initiator_sha );
-
-  wc_FreeRng( &rng );
-
-  return ret;
-}
-*/
-
 int d_process_netinfo( DlConnection* or_connection, Cell* netinfo_cell )
 {
   int i;
@@ -1624,7 +1504,8 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   int wolf_succ;
   unsigned int idx;
   RsaKey initiator_rsa_identity_key;
-  uint8_t tmp_initiator_rsa_identity_key_der[1024];
+  int initiator_rsa_identity_priv_key_der_length;
+  uint8_t initiator_rsa_identity_priv_key_der[1024];
   //unsigned char* tmp_initiator_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 1024 );
   Cert initiator_rsa_identity_cert;
   Cert initiator_rsa_auth_cert;
@@ -1635,7 +1516,7 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   wc_InitRsaKey( initiator_rsa_auth_key, NULL );
 
   // rsa identity key doesn't exist, create it and save it
-  if ( stat( FILESYSTEM_PREFIX "identity_rsa_key", &st ) == -1 )
+  if ( stat( FILESYSTEM_PREFIX "identity_rsa_key_der", &st ) == -1 )
   {
     // make and save the identity key to the file system
     wolf_succ = wc_MakeRsaKey( &initiator_rsa_identity_key, 1024, 65537, rng );
@@ -1647,7 +1528,9 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    wolf_succ = wc_RsaKeyToDer( &initiator_rsa_identity_key, tmp_initiator_rsa_identity_key_der, 1024 );
+    wolf_succ = wc_RsaKeyToDer( &initiator_rsa_identity_key, NULL, 0 );
+
+    initiator_rsa_identity_priv_key_der_length = wc_RsaKeyToDer( &initiator_rsa_identity_key, initiator_rsa_identity_priv_key_der, wolf_succ );
 
     if ( wolf_succ < 0 )
     {
@@ -1656,23 +1539,23 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
       goto fail;
     }
 
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
 
       goto fail;
     }
 
-    if ( write( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 )
+    if ( write( fd, initiator_rsa_identity_priv_key_der, initiator_rsa_identity_priv_key_der_length ) < 0 )
     {
-      MINITOR_LOG( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
+      MINITOR_LOG( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }
 
     if ( close( fd ) < 0 )
     {
-      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
+      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }
@@ -1680,29 +1563,29 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   }
   else
   {
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key", O_RDONLY ) ) < 0 )
+    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_RDONLY ) ) < 0 )
     {
-      MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
+      MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }
 
-    if ( read( fd, tmp_initiator_rsa_identity_key_der, sizeof( unsigned char ) * 1024 ) < 0 )
+    if ( ( initiator_rsa_identity_priv_key_der_length = read( fd, initiator_rsa_identity_priv_key_der, sizeof( unsigned char ) * 1024 ) ) <= 0 )
     {
-      MINITOR_LOG( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
+      MINITOR_LOG( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }
 
     if ( close( fd ) < 0 )
     {
-      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key, errno: %d", errno );
+      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }
 
     idx = 0;
-    wolf_succ = wc_RsaPrivateKeyDecode( tmp_initiator_rsa_identity_key_der, &idx, &initiator_rsa_identity_key, 1024 );
+    wolf_succ = wc_RsaPrivateKeyDecode( initiator_rsa_identity_priv_key_der, &idx, &initiator_rsa_identity_key, initiator_rsa_identity_priv_key_der_length );
 
     if ( wolf_succ < 0 )
     {
@@ -1710,6 +1593,17 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 
       goto fail;
     }
+  }
+
+  *initiator_rsa_identity_key_der_size = wc_RsaKeyToPublicDer_ex( &initiator_rsa_identity_key, NULL, 0, 0 );
+
+  wolf_succ = wc_RsaKeyToPublicDer_ex( &initiator_rsa_identity_key, initiator_rsa_identity_key_der, *initiator_rsa_identity_key_der_size, 0 );
+
+  if ( wolf_succ < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to wc_RsaKeyToPublicDer rsa identity key, error code: %d", wolf_succ );
+
+    goto fail;
   }
 
   // make and export the auth key
@@ -1769,49 +1663,8 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
 
       goto fail;
     }
-
-    certificate = wolfSSL_X509_load_certificate_buffer(
-      initiator_rsa_identity_cert_der,
-      *initiator_rsa_identity_cert_der_size,
-      WOLFSSL_FILETYPE_ASN1 );
-
-    if ( certificate == NULL )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Invalid identity certificate" );
-
-      goto fail;
-    }
-
-    // get the length
-    *initiator_rsa_identity_key_der_size = -1;
-    wolfSSL_X509_get_pubkey_buffer( certificate, NULL, initiator_rsa_identity_key_der_size );
-    // get the buffer
-    wolfSSL_X509_get_pubkey_buffer( certificate, initiator_rsa_identity_key_der, initiator_rsa_identity_key_der_size );
-
-    wolfSSL_X509_free( certificate );
-
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_CREAT | O_WRONLY | O_TRUNC, 0600 ) ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
-
-      goto fail;
-    }
-
-    if ( write( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * ( *initiator_rsa_identity_key_der_size ) ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to write " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
-
-      goto fail;
-    }
-
-    if ( close( fd ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
-
-      goto fail;
-    }
-  // rsa identity cert exists, load it from the file system
   }
+  // rsa identity cert exists, load it from the file system
   else
   {
     if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_cert_der", O_RDONLY ) ) < 0 )
@@ -1831,27 +1684,6 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
     if ( close( fd ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_cert_der, errno: %d", errno );
-
-      goto fail;
-    }
-
-    if ( ( fd = open( FILESYSTEM_PREFIX "identity_rsa_key_der", O_RDONLY ) ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
-
-      goto fail;
-    }
-
-    if ( ( *initiator_rsa_identity_key_der_size = read( fd, initiator_rsa_identity_key_der, sizeof( unsigned char ) * 2048 ) ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to read " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
-
-      goto fail;
-    }
-
-    if ( close( fd ) < 0 )
-    {
-      MINITOR_LOG( MINITOR_TAG, "Failed to close " FILESYSTEM_PREFIX "identity_rsa_key_der, errno: %d", errno );
 
       goto fail;
     }

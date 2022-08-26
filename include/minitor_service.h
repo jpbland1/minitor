@@ -16,13 +16,9 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#ifndef ENCODING_H
-#define ENCODING_H
+#ifndef MINITOR_SERVICE_H
+#define MINITOR_SERVICE_H
 
-int d_base_64_decode( uint8_t* destination, char* source, int source_length );
-void v_base_64_encode( char* destination, unsigned char* source, int source_length );
-void v_base_32_decode( uint8_t* destination, char* source, int source_length );
-void v_base_32_encode( char* destination, unsigned char* source, int source_length );
-char* pc_ipv4_to_string( unsigned int address );
+int d_setup_onion_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );
 
 #endif

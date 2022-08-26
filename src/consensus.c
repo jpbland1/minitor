@@ -533,7 +533,7 @@ static int d_finish_descriptor_fetch( FetchDescriptorState* fetch_state )
 
             if ( signing_key_64_length == 187 )
             {
-              v_base_64_decode( der, signing_key_64, 187 );
+              d_base_64_decode( der, signing_key_64, 187 );
               wc_ShaUpdate( &tmp_sha, der, 140 );
               wc_ShaFinal( &tmp_sha, identity_digest );
 
@@ -560,8 +560,8 @@ static int d_finish_descriptor_fetch( FetchDescriptorState* fetch_state )
 
         if ( master_key_found == -1 && ntor_onion_key_found == -1 && signing_key_found == -1 )
         {
-          v_base_64_decode( fetch_state->relays[matched_relay]->ntor_onion_key, ntor_onion_key_64, 43 );
-          v_base_64_decode( fetch_state->relays[matched_relay]->master_key, master_key_64, 43 );
+          d_base_64_decode( fetch_state->relays[matched_relay]->ntor_onion_key, ntor_onion_key_64, 43 );
+          d_base_64_decode( fetch_state->relays[matched_relay]->master_key, master_key_64, 43 );
 
           relays_set++;
           master_key_64_length = 0;
@@ -827,11 +827,11 @@ static int d_parse_network_consensus_from_file( int fd, NetworkConsensus* result
     }
     else if ( memcmp( line, "shared-rand-current-value ", strlen( "shared-rand-current-value " ) ) == 0 )
     {
-      v_base_64_decode( result_network_consensus->shared_rand, line + strlen( line ) - 44, 43 );
+      d_base_64_decode( result_network_consensus->shared_rand, line + strlen( line ) - 44, 43 );
     }
     else if ( memcmp( line, "shared-rand-previous-value ", strlen( "shared-rand-previous-value " ) ) == 0 )
     {
-      v_base_64_decode( result_network_consensus->previous_shared_rand, line + strlen( line ) - 44, 43 );
+      d_base_64_decode( result_network_consensus->previous_shared_rand, line + strlen( line ) - 44, 43 );
     }
     else if ( memcmp( line, "dir-source", strlen( "dir-source" ) ) == 0 )
     {
@@ -860,11 +860,11 @@ static int d_parse_line_to_consensus( NetworkConsensus* consensus, char* line )
   }
   else if ( memcmp( line, "shared-rand-current-value ", strlen( "shared-rand-current-value " ) ) == 0 )
   {
-    v_base_64_decode( consensus->shared_rand, line + strlen( line ) - 44, 43 );
+    d_base_64_decode( consensus->shared_rand, line + strlen( line ) - 44, 43 );
   }
   else if ( memcmp( line, "shared-rand-previous-value ", strlen( "shared-rand-previous-value " ) ) == 0 )
   {
-    v_base_64_decode( consensus->previous_shared_rand, line + strlen( line ) - 44, 43 );
+    d_base_64_decode( consensus->previous_shared_rand, line + strlen( line ) - 44, 43 );
   }
   else if ( memcmp( line, "dir-source", strlen( "dir-source" ) ) == 0 )
   {
@@ -882,11 +882,11 @@ static void v_parse_r_tag( OnionRelay* canidate_relay, char* line )
   for ( i = 2; i < strlen( line ); i++ ) {
     switch ( space_count ) {
       case 2:
-        v_base_64_decode( canidate_relay->identity, line + i, 27 );
+        d_base_64_decode( canidate_relay->identity, line + i, 27 );
         i += 27;
         break;
       case 3:
-        v_base_64_decode( canidate_relay->digest, line + i, 27 );
+        d_base_64_decode( canidate_relay->digest, line + i, 27 );
         i += 27;
         break;
       case 6:

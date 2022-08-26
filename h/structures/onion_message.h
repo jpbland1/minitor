@@ -35,6 +35,11 @@ typedef enum OnionMessageType
   TIMER_KEEPALIVE,
   TIMER_HSDIR,
   TIMER_CIRCUIT_TIMEOUT,
+  CLIENT_RENDEZVOUS_CIRCUIT_READY,
+  CLIENT_RELAY_CONNECTED,
+  CLIENT_RELAY_DATA,
+  CLIENT_RELAY_END,
+  CLIENT_CLOSED,
 } OnionMessageType;
 
 typedef struct OnionMessage
@@ -57,11 +62,16 @@ typedef struct CreateCircuitRequest
   int length;
   CircuitStatus target_status;
   OnionService* service;
+  OnionClient* client;
   int desc_index;
   int target_relay_index;
   OnionRelay* start_relay;
   OnionRelay* end_relay;
   HsCrypto* hs_crypto;
+  IntroCrypto* intro_crypto;
+  char* onion_address;
+  uint16_t onion_port;
+  MinitorQueue client_queue;
 } CreateCircuitRequest;
 
 #endif

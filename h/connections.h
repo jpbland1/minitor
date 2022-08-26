@@ -7,8 +7,11 @@
 extern MinitorMutex connections_mutex;
 extern MinitorMutex connection_access_mutex[16];
 extern DlConnection* connections;
+extern MinitorQueue connections_task_queue;
+extern MinitorQueue poll_task_queue;
 
 void v_cleanup_connection( DlConnection* dl_connection );
+void v_poll_daemon( void* pv_parameters );
 void v_connections_daemon( void* pv_parameters );
 int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circuit );
 int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t port );

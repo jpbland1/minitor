@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/consensus.h"
 #include "../h/circuit.h"
 #include "../h/onion_service.h"
+#include "../h/onion_client.h"
 #include "../h/connections.h"
 
 static const char* CORE_TAG = "MINITOR DAEMON";
@@ -36,9 +37,22 @@ MinitorTimer timeout_timer;
 OnionCircuit* onion_circuits = NULL;
 OnionService* onion_services = NULL;
 MinitorQueue core_task_queue;
+MinitorQueue core_internal_queue;
 MinitorMutex circuits_mutex;
 
-void v_send_init_circuit( int length, CircuitStatus target_status, OnionService* service, int desc_index, int target_relay_index, OnionRelay* start_relay, OnionRelay* end_relay, HsCrypto* hs_crypto )
+static void v_send_init_circuit(
+  int length,
+  CircuitStatus target_status,
+  OnionService* service,
+  OnionClient* client,
+  int desc_index,
+  int target_relay_index,
+  OnionRelay* start_relay,
+  OnionRelay* end_relay,
+  HsCrypto* hs_crypto,
+  IntroCrypto* intro_crypto,
+  MinitorQueue queue
+)
 {
   OnionMessage* onion_message;
 
@@ -49,13 +63,73 @@ void v_send_init_circuit( int length, CircuitStatus target_status, OnionService*
   ((CreateCircuitRequest*)onion_message->data)->length = length;
   ((CreateCircuitRequest*)onion_message->data)->target_status = target_status;
   ((CreateCircuitRequest*)onion_message->data)->service = service;
+  ((CreateCircuitRequest*)onion_message->data)->client = client;
   ((CreateCircuitRequest*)onion_message->data)->desc_index = desc_index;
   ((CreateCircuitRequest*)onion_message->data)->target_relay_index = target_relay_index;
   ((CreateCircuitRequest*)onion_message->data)->start_relay = start_relay;
   ((CreateCircuitRequest*)onion_message->data)->end_relay = end_relay;
   ((CreateCircuitRequest*)onion_message->data)->hs_crypto = hs_crypto;
+  ((CreateCircuitRequest*)onion_message->data)->intro_crypto = intro_crypto;
 
-  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+  MINITOR_ENQUEUE_BLOCKING( queue, (void*)(&onion_message) );
+}
+
+// called by the core task
+void v_send_init_circuit_internal(
+  int length,
+  CircuitStatus target_status,
+  OnionService* service,
+  OnionClient* client,
+  int desc_index,
+  int target_relay_index,
+  OnionRelay* start_relay,
+  OnionRelay* end_relay,
+  HsCrypto* hs_crypto,
+  IntroCrypto* intro_crypto
+)
+{
+  v_send_init_circuit(
+    length,
+    target_status,
+    service,
+    client,
+    desc_index,
+    target_relay_index,
+    start_relay,
+    end_relay,
+    hs_crypto,
+    intro_crypto,
+    core_internal_queue
+  );
+}
+
+// called by external tasks
+void v_send_init_circuit_external(
+  int length,
+  CircuitStatus target_status,
+  OnionService* service,
+  OnionClient* client,
+  int desc_index,
+  int target_relay_index,
+  OnionRelay* start_relay,
+  OnionRelay* end_relay,
+  HsCrypto* hs_crypto,
+  IntroCrypto* intro_crypto
+)
+{
+  v_send_init_circuit(
+    length,
+    target_status,
+    service,
+    client,
+    desc_index,
+    target_relay_index,
+    start_relay,
+    end_relay,
+    hs_crypto,
+    intro_crypto,
+    core_task_queue
+  );
 }
 
 void v_set_hsdir_timer( MinitorTimer hsdir_timer )
@@ -154,7 +228,7 @@ static void v_send_init_circuit_intro( OnionService* service )
     }
   } while ( ((CreateCircuitRequest*)onion_message->data)->end_relay == NULL );
 
-  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+  MINITOR_ENQUEUE_BLOCKING( core_internal_queue, (void*)(&onion_message) );
 }
 
 static int d_send_circuit_create( OnionCircuit* circuit, DlConnection* or_connection )
@@ -169,14 +243,17 @@ static int d_send_circuit_create( OnionCircuit* circuit, DlConnection* or_connec
   return 0;
 }
 
-static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* or_connection )
+void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* or_connection )
 {
+  int i;
   int retry_length;
   OnionRelay* retry_end_relay = NULL;
   OnionRelay* start_relay;
+  OnionMessage* onion_message;
+  IntroCrypto* intro_crypto = NULL;
 
   // if a fully built rend circuit is destroyed, it's up to the client to restart
-  if ( circuit->status != CIRCUIT_RENDEZVOUS )
+  if ( circuit->status != CIRCUIT_RENDEZVOUS && circuit->status != CIRCUIT_CLIENT_RENDEZVOUS )
   {
     if ( circuit->target_status == CIRCUIT_ESTABLISH_INTRO )
     {
@@ -201,14 +278,16 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* o
             {
               start_relay = px_get_random_fast_relay( 1, circuit->service->target_relays[circuit->desc_index + 1], NULL, NULL );
 
-              v_send_init_circuit(
+              v_send_init_circuit_internal(
                 3,
                 CIRCUIT_HSDIR_BEGIN_DIR,
                 circuit->service,
+                NULL,
                 circuit->desc_index + 1,
                 0,
                 start_relay,
                 circuit->service->target_relays[circuit->desc_index + 1]->head->relay,
+                NULL,
                 NULL
               );
             }
@@ -226,6 +305,54 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* o
           memcpy( retry_end_relay, circuit->relay_list.tail->relay, sizeof( OnionRelay ) );
         }
       }
+      else if ( circuit->target_status == CIRCUIT_CLIENT_HSDIR )
+      {
+        if ( circuit->relay_list.built_length >= 2 )
+        {
+          if ( circuit->target_relay_index == circuit->client->target_relays->length )
+          {
+            onion_message = NULL;
+            MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[0], &onion_message );
+            goto circuit_destroy;
+          }
+
+          retry_length = 3;
+          retry_end_relay = px_get_relay_by_index( circuit->client->target_relays, circuit->target_relay_index );
+        }
+        else
+        {
+          retry_length = 3;
+          retry_end_relay = malloc( sizeof( OnionRelay ) );
+          memcpy( retry_end_relay, circuit->relay_list.tail->relay, sizeof( OnionRelay ) );
+        }
+      }
+      else if ( circuit->target_status == CIRCUIT_CLIENT_INTRO )
+      {
+        if ( circuit->relay_list.built_length >= 2 )
+        {
+          circuit->target_relay_index++;
+          circuit->client->active_intro_relay = circuit->target_relay_index;
+
+          if ( circuit->target_relay_index == circuit->client->num_intro_relays )
+          {
+            onion_message = NULL;
+            MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[0], &onion_message );
+            goto circuit_destroy;
+          }
+
+          retry_length = 3;
+          retry_end_relay = circuit->client->intro_relays[circuit->target_relay_index];
+          circuit->client->intro_relays[circuit->target_relay_index] = NULL;
+          intro_crypto = circuit->client->intro_cryptos[circuit->target_relay_index];
+          circuit->client->intro_cryptos[circuit->target_relay_index] = NULL;
+        }
+        else
+        {
+          retry_length = 3;
+          retry_end_relay = malloc( sizeof( OnionRelay ) );
+          memcpy( retry_end_relay, circuit->relay_list.tail->relay, sizeof( OnionRelay ) );
+        }
+      }
       else if ( circuit->target_status == CIRCUIT_RENDEZVOUS )
       {
         retry_length = 2;
@@ -234,29 +361,60 @@ static void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* o
       }
       else
       {
-
         retry_length = circuit->relay_list.length;
         retry_end_relay = NULL;
       }
 
-      v_send_init_circuit(
+      v_send_init_circuit_internal(
         retry_length,
         circuit->target_status,
         circuit->service,
+        circuit->client,
         circuit->desc_index,
         circuit->target_relay_index,
         NULL,
         retry_end_relay,
-        circuit->hs_crypto
+        circuit->hs_crypto,
+        circuit->intro_crypto
       );
     }
   }
 
+  if ( circuit->status == CIRCUIT_CLIENT_RENDEZVOUS )
+  {
+    onion_message = malloc( sizeof( OnionMessage ) );
+    onion_message->type = CLIENT_CLOSED;
+
+    for ( i = 0; i < 16; i++ )
+    {
+      // the same onion message is used and the first to get it closes down the client
+      MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[0], &onion_message );
+    }
+  }
+
 circuit_destroy:
+  v_circuit_remove_destroy( circuit, or_connection );
+  // MUTEX GIVE
+}
+
+void v_circuit_remove_destroy( OnionCircuit* circuit, DlConnection* or_connection )
+{
   // MUTEX TAKE
   MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
 
   v_remove_circuit_from_list( circuit, &onion_circuits );
+
+  if ( circuit->client != NULL )
+  {
+    if ( circuit->client->intro_circuit == circuit )
+    {
+      circuit->client->intro_circuit = NULL;
+    }
+    else if ( circuit->client->rend_circuit == circuit )
+    {
+      circuit->client->rend_circuit = NULL;
+    }
+  }
 
   MINITOR_MUTEX_GIVE( circuits_mutex );
   // MUTEX GIVE
@@ -296,7 +454,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
-  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
+  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % RING_BUF_LEN;
 
   if ( cell == NULL )
   {
@@ -326,11 +484,13 @@ static void v_handle_tor_cell( uint32_t conn_id )
     return;
   }
 
+  MINITOR_LOG( CORE_TAG, "status %d target %d", working_circuit->status, working_circuit->target_status );
+
   time( &(working_circuit->last_action) );
 
   if ( cell->command == RELAY )
   {
-    if ( working_circuit->status == CIRCUIT_RENDEZVOUS )
+    if ( working_circuit->status == CIRCUIT_RENDEZVOUS || working_circuit->status == CIRCUIT_CLIENT_RENDEZVOUS_LIVE )
     {
       succ = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, working_circuit->hs_crypto );
     }
@@ -402,7 +562,6 @@ static void v_handle_tor_cell( uint32_t conn_id )
         MINITOR_LOG( CORE_TAG, "failed to get extended" );
         MINITOR_LOG( CORE_TAG, "circ_id: %x", working_circuit->circ_id );
         MINITOR_LOG( CORE_TAG, "command: %x relay command: %x", cell->command, cell->payload.relay.relay_command );
-        MINITOR_LOG( CORE_TAG, "circuit: %d %d %d", working_circuit->relay_list.head->relay->or_port, working_circuit->relay_list.head->next->relay->or_port, working_circuit->relay_list.tail->relay->or_port );
 
         goto circuit_rebuild;
       }
@@ -425,34 +584,67 @@ static void v_handle_tor_cell( uint32_t conn_id )
       }
       else
       {
-        if ( working_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
+        switch ( working_circuit->target_status )
         {
-          if ( d_begin_hsdir( working_circuit, or_connection ) < 0 )
-          {
-            goto circuit_rebuild;
-          }
+          case CIRCUIT_HSDIR_BEGIN_DIR:
+          case CIRCUIT_CLIENT_HSDIR:
+            if ( d_begin_hsdir( working_circuit, or_connection ) < 0 )
+            {
+              goto circuit_rebuild;
+            }
 
-          working_circuit->status = CIRCUIT_HSDIR_CONNECTED;
-        }
-        else if ( working_circuit->target_status == CIRCUIT_ESTABLISH_INTRO )
-        {
-          if ( d_router_establish_intro( working_circuit, or_connection ) < 0 )
-          {
-            goto circuit_rebuild;
-          }
+            working_circuit->status = CIRCUIT_HSDIR_CONNECTED;
 
-          working_circuit->status = CIRCUIT_INTRO_ESTABLISHED;
-        }
-        else if ( working_circuit->target_status == CIRCUIT_RENDEZVOUS )
-        {
-          if ( d_router_join_rendezvous( working_circuit, or_connection, working_circuit->hs_crypto->rendezvous_cookie, working_circuit->hs_crypto->point, working_circuit->hs_crypto->auth_input_mac ) < 0 )
-          {
-            MINITOR_LOG( CORE_TAG, "Failed to join rend" );
+            break;
+          case CIRCUIT_ESTABLISH_INTRO:
+            if ( d_router_establish_intro( working_circuit, or_connection ) < 0 )
+            {
+              goto circuit_rebuild;
+            }
 
-            goto circuit_rebuild;
-          }
+            working_circuit->status = CIRCUIT_INTRO_ESTABLISHED;
 
-          working_circuit->status = CIRCUIT_RENDEZVOUS;
+            break;
+          case CIRCUIT_RENDEZVOUS:
+            if ( d_router_join_rendezvous( working_circuit, or_connection, working_circuit->hs_crypto->rendezvous_cookie, working_circuit->hs_crypto->point, working_circuit->hs_crypto->auth_input_mac ) < 0 )
+            {
+              MINITOR_LOG( CORE_TAG, "Failed to join rend" );
+
+              goto circuit_rebuild;
+            }
+
+            working_circuit->status = CIRCUIT_RENDEZVOUS;
+
+            break;
+          case CIRCUIT_CLIENT_INTRO:
+            working_circuit->client->intro_built = true;
+
+            if ( working_circuit->client->rendezvous_ready == true )
+            {
+              if ( d_client_send_intro( working_circuit, or_connection ) < 0 )
+              {
+                MINITOR_LOG( CORE_TAG, "Failed to send intro" );
+
+                goto circuit_rebuild;
+              }
+
+              working_circuit->status = CIRCUIT_CLIENT_INTRO_ACK;
+            }
+
+            break;
+          case CIRCUIT_CLIENT_RENDEZVOUS:
+            if ( d_client_establish_rendezvous( working_circuit, or_connection ) < 0 )
+            {
+              MINITOR_LOG( CORE_TAG, "Failed to establish rend" );
+
+              goto circuit_rebuild;
+            }
+
+            working_circuit->status = CIRCUIT_CILENT_RENDEZVOUS_ESTABLISHED;
+
+            break;
+          default:
+            break;
         }
       }
 
@@ -467,9 +659,16 @@ static void v_handle_tor_cell( uint32_t conn_id )
         goto circuit_rebuild;
       }
 
-      if ( working_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
+      if ( working_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR || working_circuit->target_status == CIRCUIT_CLIENT_HSDIR )
       {
-        target_relay = px_get_relay_by_index( working_circuit->service->target_relays[working_circuit->desc_index], working_circuit->target_relay_index );
+        if ( working_circuit->target_status == CIRCUIT_HSDIR_BEGIN_DIR )
+        {
+          target_relay = px_get_relay_by_index( working_circuit->service->target_relays[working_circuit->desc_index], working_circuit->target_relay_index );
+        }
+        else
+        {
+          target_relay = px_get_relay_by_index( working_circuit->client->target_relays, working_circuit->target_relay_index );
+        }
 
         dl_relay = working_circuit->relay_list.tail;
 
@@ -482,52 +681,49 @@ static void v_handle_tor_cell( uint32_t conn_id )
 
           dl_relay = dl_relay->previous;
         }
+      }
+      else if ( working_circuit->target_status == CIRCUIT_CLIENT_RENDEZVOUS )
+      {
+        target_relay = px_get_random_fast_relay( 0, &working_circuit->relay_list, NULL, NULL );
 
-        // one of our relays matches, the target, make new circuit
-        if ( dl_relay != NULL )
+        dl_relay = NULL;
+      }
+
+      // one of our relays matches, the target, make new circuit
+      if ( dl_relay != NULL )
+      {
+        v_send_init_circuit_internal(
+          3,
+          working_circuit->target_status,
+          working_circuit->service,
+          working_circuit->client,
+          working_circuit->desc_index,
+          working_circuit->target_relay_index,
+          NULL,
+          target_relay,
+          NULL,
+          NULL
+        );
+
+        v_circuit_remove_destroy( working_circuit, or_connection );
+        // MUTEX GIVE
+
+        access_mutex = NULL;
+        working_circuit = NULL;
+      }
+      else
+      {
+        dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+        dl_relay->relay = target_relay;
+
+        v_add_relay_to_list( dl_relay, &working_circuit->relay_list );
+
+        if ( d_router_extend2( working_circuit, or_connection, working_circuit->relay_list.built_length ) < 0 )
         {
-          // MUTEX TAKE
-          MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
-
-          v_remove_circuit_from_list( working_circuit, &onion_circuits );
-
-          MINITOR_MUTEX_GIVE( circuits_mutex );
-          // MUTEX GIVE
-
-          d_destroy_onion_circuit( working_circuit, or_connection );
-          // MUTEX GIVE
-
-          access_mutex = NULL;
-
-          v_send_init_circuit(
-            3,
-            CIRCUIT_HSDIR_BEGIN_DIR,
-            working_circuit->service,
-            working_circuit->desc_index,
-            working_circuit->target_relay_index,
-            NULL,
-            target_relay,
-            NULL
-          );
-
-          free( working_circuit );
-
-          working_circuit = NULL;
+          goto circuit_rebuild;
         }
-        else
-        {
-          dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-          dl_relay->relay = target_relay;
 
-          v_add_relay_to_list( dl_relay, &working_circuit->relay_list );
-
-          if ( d_router_extend2( working_circuit, or_connection, working_circuit->relay_list.built_length ) < 0 )
-          {
-            goto circuit_rebuild;
-          }
-
-          working_circuit->status = CIRCUIT_EXTENDED;
-        }
+        working_circuit->status = CIRCUIT_EXTENDED;
       }
 
       break;
@@ -557,9 +753,20 @@ static void v_handle_tor_cell( uint32_t conn_id )
         goto circuit_rebuild;
       }
 
-      if ( d_post_hs_desc( working_circuit, or_connection ) < 0 )
+      if ( working_circuit->target_status == CIRCUIT_CLIENT_HSDIR )
       {
-        goto circuit_rebuild;
+        if ( d_get_hs_desc( working_circuit, or_connection ) < 0 )
+        {
+          goto circuit_rebuild;
+        }
+      }
+      else
+      {
+        if ( d_post_hs_desc( working_circuit, or_connection ) < 0 )
+        {
+          goto circuit_rebuild;
+        }
+
       }
 
       working_circuit->status = CIRCUIT_HSDIR_DATA;
@@ -573,82 +780,31 @@ static void v_handle_tor_cell( uint32_t conn_id )
         goto circuit_rebuild;
       }
 
-      // TODO check actual response for success
-
-      working_circuit->service->hsdir_sent++;
-      working_circuit->target_relay_index++;
-
-      if ( working_circuit->target_relay_index == working_circuit->service->target_relays[working_circuit->desc_index]->length)
+      if ( working_circuit->target_status == CIRCUIT_CLIENT_HSDIR )
       {
-        v_cleanup_service_hs_data( working_circuit->service, working_circuit->desc_index );
+        MINITOR_LOG( CORE_TAG, "trying parse" );
+        succ = d_parse_hsdesc( working_circuit, cell );
 
-        // TODO need to overhaul circuits to use the same mutexing as connections, this won't be safe if more than one core thread is running
-        // MUTEX TAKE
-        MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
-
-        v_remove_circuit_from_list( working_circuit, &onion_circuits );
-
-        MINITOR_MUTEX_GIVE( circuits_mutex );
-        // MUTEX GIVE
-
-        d_destroy_onion_circuit( working_circuit, or_connection );
-        // MUTEX GIVE
-
-        access_mutex = NULL;
-
-        if ( working_circuit->service->hsdir_sent != working_circuit->service->hsdir_to_send )
+        // couldn't parse or desc was invalid
+        if ( succ < 0 )
         {
-          start_relay = px_get_random_fast_relay( 1, working_circuit->service->target_relays[working_circuit->desc_index + 1], NULL, NULL );
+          working_circuit->target_relay_index++;
 
-          v_send_init_circuit(
-            3,
-            CIRCUIT_HSDIR_BEGIN_DIR,
-            working_circuit->service,
-            working_circuit->desc_index + 1,
-            0,
-            start_relay,
-            working_circuit->service->target_relays[working_circuit->desc_index + 1]->head->relay,
-            NULL
-          );
+          if ( working_circuit->target_relay_index == working_circuit->client->target_relays->length )
+          {
+            goto circuit_rebuild;
+          }
+        }
+        // success, we sent init for the intro circuit
+        else if ( succ == 0 )
+        {
+          working_circuit->client->rend_circuit = working_circuit;
+
+          working_circuit->target_status = CIRCUIT_CLIENT_RENDEZVOUS;
         }
 
-        free( working_circuit );
-
-        working_circuit = NULL;
-      }
-      else
-      {
-        if ( working_circuit->relay_early_count == 6 )
-        {
-          // MUTEX TAKE
-          MINITOR_MUTEX_TAKE_BLOCKING( circuits_mutex );
-
-          v_remove_circuit_from_list( working_circuit, &onion_circuits );
-
-          MINITOR_MUTEX_GIVE( circuits_mutex );
-          // MUTEX GIVE
-
-          d_destroy_onion_circuit( working_circuit, or_connection );
-          // MUTEX GIVE
-
-          access_mutex = NULL;
-
-          v_send_init_circuit(
-            3,
-            CIRCUIT_HSDIR_BEGIN_DIR,
-            working_circuit->service,
-            working_circuit->desc_index,
-            working_circuit->target_relay_index,
-            NULL,
-            px_get_relay_by_index( working_circuit->service->target_relays[working_circuit->desc_index], working_circuit->target_relay_index ),
-            NULL
-          );
-
-          free( working_circuit );
-
-          working_circuit = NULL;
-        }
-        else
+        // parsing but need more cells
+        if ( succ != 1 )
         {
           if ( d_router_truncate( working_circuit, or_connection, working_circuit->relay_list.built_length - 1 ) < 0 )
           {
@@ -658,6 +814,142 @@ static void v_handle_tor_cell( uint32_t conn_id )
           working_circuit->status = CIRCUIT_TRUNCATED;
         }
       }
+      else
+      {
+        // TODO check actual response for success
+
+        working_circuit->service->hsdir_sent++;
+        working_circuit->target_relay_index++;
+
+        if ( working_circuit->target_relay_index == working_circuit->service->target_relays[working_circuit->desc_index]->length)
+        {
+          v_cleanup_service_hs_data( working_circuit->service, working_circuit->desc_index );
+
+          if ( working_circuit->service->hsdir_sent != working_circuit->service->hsdir_to_send )
+          {
+            start_relay = px_get_random_fast_relay( 1, working_circuit->service->target_relays[working_circuit->desc_index + 1], NULL, NULL );
+
+            v_send_init_circuit_internal(
+              3,
+              CIRCUIT_HSDIR_BEGIN_DIR,
+              working_circuit->service,
+              NULL,
+              working_circuit->desc_index + 1,
+              0,
+              start_relay,
+              working_circuit->service->target_relays[working_circuit->desc_index + 1]->head->relay,
+              NULL,
+              NULL
+            );
+          }
+
+          // TODO need to overhaul circuits to use the same mutexing as connections, this won't be safe if more than one core thread is running
+          v_circuit_remove_destroy( working_circuit, or_connection );
+          // MUTEX GIVE
+
+          access_mutex = NULL;
+          working_circuit = NULL;
+        }
+        else
+        {
+          if ( working_circuit->relay_early_count == 6 )
+          {
+            v_circuit_remove_destroy( working_circuit, or_connection );
+            // MUTEX GIVE
+
+            v_send_init_circuit_internal(
+              3,
+              CIRCUIT_HSDIR_BEGIN_DIR,
+              working_circuit->service,
+              NULL,
+              working_circuit->desc_index,
+              working_circuit->target_relay_index,
+              NULL,
+              px_get_relay_by_index( working_circuit->service->target_relays[working_circuit->desc_index], working_circuit->target_relay_index ),
+              NULL,
+              NULL
+            );
+
+            access_mutex = NULL;
+            working_circuit = NULL;
+          }
+          else
+          {
+            if ( d_router_truncate( working_circuit, or_connection, working_circuit->relay_list.built_length - 1 ) < 0 )
+            {
+              goto circuit_rebuild;
+            }
+
+            working_circuit->status = CIRCUIT_TRUNCATED;
+          }
+        }
+      }
+
+      break;
+    case CIRCUIT_CLIENT_INTRO_ACK:
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_COMMAND_INTRODUCE_ACK )
+      {
+        MINITOR_LOG( CORE_TAG, "Failed to recv RELAY_COMMAND_INTRODUCE_ACK" );
+
+        goto circuit_rebuild;
+      }
+
+      if ( cell->payload.relay.intro_ack.status != 0 )
+      {
+        MINITOR_LOG( CORE_TAG, "Invalid intro ack status %d", cell->payload.relay.intro_ack.status );
+
+        goto circuit_rebuild;
+      }
+
+      working_circuit->client->intro_complete = true;
+      working_circuit->client->intro_cryptos[working_circuit->client->active_intro_relay] = working_circuit->intro_crypto;
+
+      v_circuit_remove_destroy( working_circuit, or_connection );
+      // MUTEX GIVE
+
+      access_mutex = NULL;
+      working_circuit = NULL;
+
+      break;
+    case CIRCUIT_CILENT_RENDEZVOUS_ESTABLISHED:
+      if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_COMMAND_RENDEZVOUS_ESTABLISHED )
+      {
+        MINITOR_LOG( CORE_TAG, "Failed to recv RELAY_COMMAND_RENDEZVOUS_ESTABLISHED" );
+
+        goto circuit_rebuild;
+      }
+
+      working_circuit->status = CIRCUIT_CLIENT_RENDEZVOUS;
+      working_circuit->client->rendezvous_ready = true;
+
+      if ( working_circuit->client->intro_built == true )
+      {
+        MINITOR_MUTEX_GIVE( access_mutex );
+        // MUTEX GIVE
+
+        working_circuit = working_circuit->client->intro_circuit;
+
+        // MUTEX TAKE
+        or_connection = px_get_conn_by_id_and_lock( working_circuit->conn_id );
+
+        access_mutex = connection_access_mutex[or_connection->mutex_index];
+
+        if ( d_client_send_intro( working_circuit, or_connection ) < 0 )
+        {
+          MINITOR_LOG( CORE_TAG, "Failed to send intro" );
+
+          goto circuit_rebuild;
+        }
+
+        working_circuit->status = CIRCUIT_CLIENT_INTRO_ACK;
+      }
+
+      break;
+    case CIRCUIT_CLIENT_RENDEZVOUS:
+    case CIRCUIT_CLIENT_RENDEZVOUS_LIVE:
+      v_onion_client_handle_cell( working_circuit, or_connection, cell );
+
+      access_mutex = NULL;
 
       break;
     case CIRCUIT_INTRO_LIVE:
@@ -669,9 +961,8 @@ static void v_handle_tor_cell( uint32_t conn_id )
 
       break;
     default:
-#ifdef DEBUG_MINITOR
       MINITOR_LOG( CORE_TAG, "Got an unknown circuit status in v_handle_tor_cell" );
-#endif
+
       break;
   }
 
@@ -791,10 +1082,24 @@ static void v_init_circuit( CreateCircuitRequest* create_request )
   new_circuit->status = CIRCUIT_CREATE;
   new_circuit->target_status = create_request->target_status;
   new_circuit->service = create_request->service;
+  new_circuit->client = create_request->client;
   new_circuit->desc_index = create_request->desc_index;
   new_circuit->target_relay_index = create_request->target_relay_index;
   new_circuit->hs_crypto = create_request->hs_crypto;
+  new_circuit->intro_crypto = create_request->intro_crypto;
   new_circuit->want_action = false;
+
+  if ( new_circuit->client != NULL )
+  {
+    if ( new_circuit->target_status == CIRCUIT_CLIENT_INTRO )
+    {
+      new_circuit->client->intro_circuit = new_circuit;
+    }
+    else if ( new_circuit->target_status == CIRCUIT_CLIENT_RENDEZVOUS )
+    {
+      new_circuit->client->rend_circuit = new_circuit;
+    }
+  }
 
   if ( d_prepare_onion_circuit( new_circuit, create_request->length, create_request->start_relay, create_request->end_relay ) < 0 )
   {
@@ -861,15 +1166,17 @@ fail:
   d_destroy_onion_circuit( new_circuit, or_connection );
   // MUTEX GIVE
 
-  v_send_init_circuit(
+  v_send_init_circuit_internal(
     create_request->length,
     create_request->target_status,
     create_request->service,
+    create_request->client,
     create_request->desc_index,
     create_request->target_relay_index,
     start_relay,
     end_relay,
-    create_request->hs_crypto
+    create_request->hs_crypto,
+    create_request->intro_crypto
   );
 
   free( create_request );
@@ -1039,7 +1346,7 @@ static void v_init_service( OnionService* service )
     ((CreateCircuitRequest*)onion_message->data)->target_status = CIRCUIT_STANDBY;
     ((CreateCircuitRequest*)onion_message->data)->service = service;
 
-    MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+    MINITOR_ENQUEUE_BLOCKING( core_internal_queue, (void*)(&onion_message) );
   }
 
   for ( i = 0; i < 3; i++ )
@@ -1086,7 +1393,7 @@ static void v_init_service( OnionService* service )
       memcpy( final_identities[i], ((CreateCircuitRequest*)onion_message->data)->end_relay->identity, ID_LENGTH );
     }
 
-    MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+    MINITOR_ENQUEUE_BLOCKING( core_internal_queue, (void*)(&onion_message) );
   }
 }
 
@@ -1175,7 +1482,7 @@ void v_handle_conn_handshake( uint32_t conn_id, uint32_t length )
 
   or_connection->cell_ring_buf[or_connection->cell_ring_start] = NULL;
 
-  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % 20;
+  or_connection->cell_ring_start = ( or_connection->cell_ring_start + 1 ) % RING_BUF_LEN;
 
   if ( cell == NULL )
   {
@@ -1277,10 +1584,22 @@ void v_minitor_daemon( void* pv_parameters )
 {
   OnionMessage* onion_message;
 
+  core_internal_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+
   MINITOR_LOG( CORE_TAG, "Starting core" );
 
-  while ( MINITOR_DEQUEUE_BLOCKING( core_task_queue, &onion_message ) )
+  while ( 1 )
   {
+    // if we didn't get an internal message
+    if ( MINITOR_DEQUEUE_NONBLOCKING( core_internal_queue, &onion_message ) == false )
+    {
+      // try the external queue
+      if ( MINITOR_DEQUEUE_BLOCKING( core_task_queue, &onion_message ) == false )
+      {
+        continue;
+      }
+    }
+
     // got a null, time to shutdown
     if ( onion_message == NULL )
     {

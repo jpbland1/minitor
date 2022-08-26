@@ -298,6 +298,25 @@ typedef struct __attribute__((__packed__)) DecryptedIntroduce2
   uint8_t extensions[];
 } DecryptedIntroduce2;
 
+typedef struct __attribute__((__packed__)) TorCrosscert
+{
+  uint8_t version;
+  uint8_t cert_type;
+  uint32_t epoch_hours;
+  uint8_t cert_key_type;
+  uint8_t certified_key[32];
+  uint8_t num_extensions;
+  uint8_t extensions[];
+} TorCrosscert;
+
+typedef struct __attribute__((__packed__)) TorCrosscertExtension
+{
+  uint16_t ext_length;
+  uint8_t ext_type;
+  uint8_t ext_flags;
+  uint8_t ext_data[];
+} TorCrosscertExtension;
+
 typedef union __attribute__((__packed__)) CellPayload
 {
   struct __attribute__((__packed__))
@@ -424,7 +443,20 @@ typedef union __attribute__((__packed__)) CellPayload
         uint8_t rendezvous_cookie[20];
         uint8_t public_key[PK_PUBKEY_LEN];
         uint8_t auth[MAC_LEN];
+      } rend1;
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t public_key[PK_PUBKEY_LEN];
+        uint8_t auth[MAC_LEN];
       } rend2;
+
+      struct __attribute__((__packed__))
+      {
+        uint16_t status;
+        uint8_t num_extensions;
+        uint8_t extensions[];
+      } intro_ack;
 
       uint8_t destroy_code;
 

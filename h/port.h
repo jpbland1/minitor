@@ -27,6 +27,7 @@
 // DEFINE FUNCTIONS
 bool b_create_core_task( MinitorTask* handle );
 bool b_create_connections_task( MinitorTask* handle );
+bool b_create_poll_task( MinitorTask* handle );
 bool b_create_fetch_task( MinitorTask* handle, void* consensus );
 bool b_create_insert_task( MinitorTask* handle, void* consensus );
 void port_task_delete( MinitorTask task );
@@ -40,6 +41,7 @@ void port_timer_stop( MinitorTimer timer );
 MinitorQueue port_queue_create( int length, int size );
 bool port_queue_enqueue( MinitorQueue queue, void** pointer );
 bool port_queue_dequeue( MinitorQueue queue, void** pointer );
+bool port_queue_dequeue_nonblocking( MinitorQueue queue, void** pointer );
 int port_messages_waiting( MinitorQueue queue );
 void port_queue_delete( MinitorQueue queue );
 
@@ -62,6 +64,7 @@ void port_fill_random( uint8_t* dest, int length );
 #define MINITOR_ENQUEUE_BLOCKING( queue, pointer ) port_queue_enqueue( queue, pointer )
 #define MINITOR_DEQUEUE_MS( queue, pointer, ms ) port_queue_dequeue( queue, pointer )
 #define MINITOR_DEQUEUE_BLOCKING( queue, pointer ) port_queue_dequeue( queue, pointer )
+#define MINITOR_DEQUEUE_NONBLOCKING( queue, pointer ) port_queue_dequeue_nonblocking( queue, pointer )
 #define MINITOR_QUEUE_MESSAGES_WAITING( queue ) port_messages_waiting( queue )
 #define MINITOR_QUEUE_DELETE( queue ) port_queue_delete( queue )
 

@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define MINITOR_STRUCTURES_CIRCUIT_H
 
 #include "wolfssl/options.h"
+#include "wolfssl/wolfcrypt/settings.h"
 
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/ed25519.h"
@@ -31,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "./cell.h"
 #include "./connections.h"
 #include "./onion_service.h"
+#include "./onion_client.h"
 
 // status tells us what kind of cell the circuit is looking for
 // so CIRCUIT_CREATED means it expects to see a CREATED2 cell
@@ -48,6 +50,12 @@ typedef enum CircuitStatus
   CIRCUIT_STANDBY,
   CIRCUIT_INTRO_LIVE,
   CIRCUIT_RENDEZVOUS,
+  CIRCUIT_CLIENT_HSDIR,
+  CIRCUIT_CLIENT_INTRO,
+  CIRCUIT_CLIENT_INTRO_ACK,
+  CIRCUIT_CLIENT_RENDEZVOUS,
+  CIRCUIT_CILENT_RENDEZVOUS_ESTABLISHED,
+  CIRCUIT_CLIENT_RENDEZVOUS_LIVE,
 } CircuitStatus;
 
 typedef struct IntroCrypto
@@ -82,6 +90,7 @@ typedef struct OnionCircuit
   HsCrypto* hs_crypto;
   IntroCrypto* intro_crypto;
   OnionService* service;
+  struct OnionClient* client;
   int desc_index;
   int target_relay_index;
   int relay_early_count;

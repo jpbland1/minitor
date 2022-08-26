@@ -406,7 +406,8 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   hs_crypto = malloc( sizeof( HsCrypto ) );
 
-  if ( d_hs_ntor_handshake_finish( introduce_cell, client_pk, intro_circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
+  if ( d_hs_ntor_handshake_finish( intro_circuit->intro_crypto->auth_key.p, &intro_circuit->intro_crypto->encrypt_key, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac, false ) < 0 )
+  //if ( d_hs_ntor_handshake_finish( introduce_cell, client_pk, intro_circuit, &hs_handshake_key, &client_handshake_key, hs_crypto, auth_input_mac ) < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to finish the RELAY_COMMAND_INTRODUCE2 ntor handshake" );
 
@@ -502,7 +503,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   if ( rend_circuit == NULL )
   {
-    v_send_init_circuit( 2, CIRCUIT_RENDEZVOUS, intro_circuit->service, 0, 0, NULL, rend_relay, hs_crypto );
+    v_send_init_circuit_internal( 2, CIRCUIT_RENDEZVOUS, intro_circuit->service, NULL, 0, 0, NULL, rend_relay, hs_crypto, NULL );
   }
   else
   {
@@ -582,9 +583,9 @@ int d_router_join_rendezvous( OnionCircuit* rend_circuit, DlConnection* or_conne
 
   rend_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + rend_cell->payload.relay.length;
 
-  memcpy( rend_cell->payload.relay.rend2.rendezvous_cookie, rendezvous_cookie, 20 );
-  memcpy( rend_cell->payload.relay.rend2.public_key, hs_pub_key, PK_PUBKEY_LEN );
-  memcpy( rend_cell->payload.relay.rend2.auth, auth_input_mac, MAC_LEN );
+  memcpy( rend_cell->payload.relay.rend1.rendezvous_cookie, rendezvous_cookie, 20 );
+  memcpy( rend_cell->payload.relay.rend1.public_key, hs_pub_key, PK_PUBKEY_LEN );
+  memcpy( rend_cell->payload.relay.rend1.auth, auth_input_mac, MAC_LEN );
 
   if ( d_send_relay_cell_and_free( or_connection, rend_cell, &rend_circuit->relay_list, NULL ) < 0 )
   {
@@ -737,6 +738,7 @@ int d_verify_and_decrypt_introduce_2(
 finish:
   wc_Shake256_Free( &reusable_shake );
   wc_Sha3_256_Free( &reusable_sha3 );
+  wc_AesFree( &aes_key );
 
   free( intro_secret_hs_input );
   free( info );
@@ -746,13 +748,13 @@ finish:
 }
 
 int d_hs_ntor_handshake_finish(
-  Cell* introduce_cell,
-  uint8_t* client_pk,
-  OnionCircuit* intro_circuit,
+  uint8_t* auth_pub_key,
+  curve25519_key* encrypt_key,
   curve25519_key* hs_handshake_key,
   curve25519_key* client_handshake_key,
   HsCrypto* hs_crypto,
-  uint8_t* auth_input_mac
+  uint8_t* auth_input_mac,
+  bool is_client
 )
 {
   int ret = 0;
@@ -773,39 +775,71 @@ int d_hs_ntor_handshake_finish(
   wc_InitSha3_256( &reusable_sha3, NULL, INVALID_DEVID );
 
   // compute rend_secret_hs_input
-  idx = 32;
-  wolf_succ = wc_curve25519_shared_secret_ex( hs_handshake_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
-
-  if ( wolf_succ < 0 || idx != 32 )
+  if ( is_client == true )
   {
-    MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+    idx = 32;
+    wolf_succ = wc_curve25519_shared_secret_ex( client_handshake_key, hs_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
 
-    ret = -1;
-    goto finish;
+    if ( wolf_succ < 0 || idx != 32 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+
+      ret = -1;
+      goto finish;
+    }
+  }
+  else
+  {
+    idx = 32;
+    wolf_succ = wc_curve25519_shared_secret_ex( hs_handshake_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
+
+    if ( wolf_succ < 0 || idx != 32 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+
+      ret = -1;
+      goto finish;
+    }
   }
 
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  idx = 32;
-  wolf_succ = wc_curve25519_shared_secret_ex( &intro_circuit->intro_crypto->encrypt_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
-
-  if ( wolf_succ < 0 || idx != 32 )
+  if ( is_client == true )
   {
-    MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+    idx = 32;
+    wolf_succ = wc_curve25519_shared_secret_ex( client_handshake_key, encrypt_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
 
-    ret = -1;
-    goto finish;
+    if ( wolf_succ < 0 || idx != 32 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+
+      ret = -1;
+      goto finish;
+    }
+  }
+  else
+  {
+    idx = 32;
+    wolf_succ = wc_curve25519_shared_secret_ex( encrypt_key, client_handshake_key, working_rend_secret_hs_input, &idx, EC25519_LITTLE_ENDIAN );
+
+    if ( wolf_succ < 0 || idx != 32 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute EXP(X,y), error code %d", wolf_succ );
+
+      ret = -1;
+      goto finish;
+    }
   }
 
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  memcpy( working_rend_secret_hs_input, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
-  working_rend_secret_hs_input += introduce_cell->payload.relay.introduce2.auth_key_length;
+  memcpy( working_rend_secret_hs_input, auth_pub_key, ED25519_PUB_KEY_SIZE );
+  working_rend_secret_hs_input += ED25519_PUB_KEY_SIZE;
 
-  memcpy( working_rend_secret_hs_input, intro_circuit->intro_crypto->encrypt_key.p.point, CURVE25519_KEYSIZE );
+  memcpy( working_rend_secret_hs_input, encrypt_key->p.point, CURVE25519_KEYSIZE );
   working_rend_secret_hs_input += CURVE25519_KEYSIZE;
 
-  memcpy( working_rend_secret_hs_input, client_pk, PK_PUBKEY_LEN );
+  memcpy( working_rend_secret_hs_input, client_handshake_key->p.point, CURVE25519_KEYSIZE );
   working_rend_secret_hs_input += PK_PUBKEY_LEN;
 
   memcpy( working_rend_secret_hs_input, hs_handshake_key->p.point, CURVE25519_KEYSIZE );
@@ -848,10 +882,10 @@ int d_hs_ntor_handshake_finish(
 
   wc_Sha3_256_Update( &reusable_sha3, reusable_length_buffer, 8 );
   wc_Sha3_256_Update( &reusable_sha3, reusable_sha3_sum, WC_SHA3_256_DIGEST_SIZE );
-  wc_Sha3_256_Update( &reusable_sha3, introduce_cell->payload.relay.introduce2.auth_key, introduce_cell->payload.relay.introduce2.auth_key_length );
-  wc_Sha3_256_Update( &reusable_sha3, intro_circuit->intro_crypto->encrypt_key.p.point, CURVE25519_KEYSIZE );
+  wc_Sha3_256_Update( &reusable_sha3, auth_pub_key, ED25519_PUB_KEY_SIZE );
+  wc_Sha3_256_Update( &reusable_sha3, encrypt_key->p.point, CURVE25519_KEYSIZE );
   wc_Sha3_256_Update( &reusable_sha3, hs_handshake_key->p.point, CURVE25519_KEYSIZE );
-  wc_Sha3_256_Update( &reusable_sha3, client_pk, CURVE25519_KEYSIZE );
+  wc_Sha3_256_Update( &reusable_sha3, client_handshake_key->p.point, CURVE25519_KEYSIZE );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID, HS_PROTOID_LENGTH );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)"Server", strlen( "Server" ) );
   wc_Sha3_256_Update( &reusable_sha3, (unsigned char*)HS_PROTOID_MAC, HS_PROTOID_MAC_LENGTH );
@@ -867,13 +901,22 @@ int d_hs_ntor_handshake_finish(
   wc_AesInit( &hs_crypto->hs_aes_forward, NULL, INVALID_DEVID );
   wc_AesInit( &hs_crypto->hs_aes_backward, NULL, INVALID_DEVID );
 
-  wc_Sha3_256_Update( &hs_crypto->hs_running_sha_forward, expanded_keys, WC_SHA3_256_DIGEST_SIZE );
-
-  wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, expanded_keys + WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256_DIGEST_SIZE );
-
-  wc_AesSetKeyDirect( &hs_crypto->hs_aes_forward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ), AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
-
-  wc_AesSetKeyDirect( &hs_crypto->hs_aes_backward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ) + AES_256_KEY_SIZE, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+  // TODO its possible we should change the send and decrypt functions instead
+  // of setting up keys backwards for clients
+  if ( is_client == false )
+  {
+    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_forward, expanded_keys, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, expanded_keys + WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256_DIGEST_SIZE );
+    wc_AesSetKeyDirect( &hs_crypto->hs_aes_forward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ), AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+    wc_AesSetKeyDirect( &hs_crypto->hs_aes_backward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ) + AES_256_KEY_SIZE, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+  }
+  else
+  {
+    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_backward, expanded_keys, WC_SHA3_256_DIGEST_SIZE );
+    wc_Sha3_256_Update( &hs_crypto->hs_running_sha_forward, expanded_keys + WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256_DIGEST_SIZE );
+    wc_AesSetKeyDirect( &hs_crypto->hs_aes_backward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ), AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+    wc_AesSetKeyDirect( &hs_crypto->hs_aes_forward, expanded_keys + ( WC_SHA3_256_DIGEST_SIZE * 2 ) + AES_256_KEY_SIZE, AES_256_KEY_SIZE, aes_iv, AES_ENCRYPTION );
+  }
 
 finish:
   wc_Sha3_256_Free( &reusable_sha3 );
@@ -886,7 +929,7 @@ finish:
   return ret;
 }
 
-static DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
+DoublyLinkedOnionRelayList* px_get_target_relays( unsigned int hsdir_n_replicas, unsigned char* blinded_pub_key, int time_period, unsigned int hsdir_interval, unsigned int hsdir_spread_store, int next )
 {
   int i;
   int j;
@@ -1004,46 +1047,6 @@ cleanup:
   return target_relays;
 }
 
-static char* pc_ipv4_to_string( unsigned int address )
-{
-  int i;
-  int length = 0;
-  char* result = malloc( sizeof( char ) * 16 );
-  int tmp_length = 0;
-  unsigned char tmp_byte;
-
-  for ( i = 0; i < 4; i++ )
-  {
-    tmp_byte = ( address >> ( 8 * i ) ) & 0xff;
-
-    if ( tmp_byte < 10 )
-    {
-      tmp_length = 1;
-    }
-    else if ( tmp_byte < 100 )
-    {
-      tmp_length = 2;
-    }
-    else
-    {
-      tmp_length = 3;
-    }
-
-    sprintf( result + length, "%d", tmp_byte );
-    length += tmp_length;
-
-    if ( i != 3 )
-    {
-      result[length] = '.';
-      length++;
-    }
-  }
-
-  result[length] = 0;
-
-  return result;
-}
-
 int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing_key, long int valid_after, ed25519_key* blinded_key, int revision_counter )
 {
   int ret = 0;
@@ -1125,7 +1128,7 @@ int d_generate_outer_descriptor( char* filename, ed25519_key* descriptor_signing
     goto finish;
   }
 
-  if ( d_generate_packed_crosscert( tmp_buff, descriptor_signing_key->p, blinded_key, 0x08, valid_after ) < 0 ) {
+  if ( d_generate_packed_crosscert( tmp_buff, descriptor_signing_key->p, blinded_key, 0x08, 1, valid_after ) < 0 ) {
     MINITOR_LOG( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 
     ret = -1;
@@ -1665,6 +1668,7 @@ int d_encrypt_descriptor_plaintext( char* filename, unsigned char* secret_data, 
 finish:
   wc_Sha3_256_Free( &reusable_sha3 );
   wc_Shake256_Free( &reusable_shake );
+  wc_AesFree( &reusable_aes_key );
 
   free( secret_input );
 
@@ -1821,7 +1825,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
       goto finish;
     }
 
-    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x09, valid_after ) < 0 )
+    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x09, 1, valid_after ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to generate the auth_key cross cert" );
 
@@ -1907,7 +1911,7 @@ int d_generate_second_plaintext( char* filename, OnionCircuit** intro_circuits, 
 
     v_ed_pubkey_from_curve_pubkey( tmp_pub_key, intro_circuits[i]->intro_crypto->encrypt_key.p.point, 0 );
 
-    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x0B, valid_after ) < 0 )
+    if ( d_generate_packed_crosscert( tmp_buff, tmp_pub_key, descriptor_signing_key, 0x0B, 1, valid_after ) < 0 )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to generate the enc-key cross cert" );
 
@@ -1953,10 +1957,10 @@ void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed
   // set the length
   packed_link_specifiers[2] = 6;
   // set the address and port
-  packed_link_specifiers[6] = (unsigned char)( relay->address >> 24 );
-  packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 );
-  packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 );
   packed_link_specifiers[3] = (unsigned char)relay->address;
+  packed_link_specifiers[4] = (unsigned char)( relay->address >> 8 );
+  packed_link_specifiers[5] = (unsigned char)( relay->address >> 16 );
+  packed_link_specifiers[6] = (unsigned char)( relay->address >> 24 );
   packed_link_specifiers[7] = (unsigned char)( relay->or_port >> 8 );
   packed_link_specifiers[8] = (unsigned char)relay->or_port;
 
@@ -1969,7 +1973,7 @@ void v_generate_packed_link_specifiers( OnionRelay* relay, unsigned char* packed
   memcpy( packed_link_specifiers + 11, relay->identity, ID_LENGTH );
 }
 
-int d_generate_packed_crosscert( char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, long int valid_after )
+int d_generate_packed_crosscert( char* destination, unsigned char* certified_key, ed25519_key* signing_key, unsigned char cert_type, uint8_t cert_key_type, long int valid_after )
 {
   int res = 0;
 
@@ -1988,8 +1992,8 @@ int d_generate_packed_crosscert( char* destination, unsigned char* certified_key
   tmp_body[3] = (unsigned char)( epoch_hours >> 16 );
   tmp_body[4] = (unsigned char)( epoch_hours >> 8 );
   tmp_body[5] = (unsigned char)epoch_hours;
-  // set the cert key type, same a cert type
-  tmp_body[6] = cert_type;
+  // set the cert key type
+  tmp_body[6] = cert_key_type;
   // copy the certified key
   memcpy( tmp_body + 7, certified_key, 32 );
   // set n extensions to 1
@@ -2001,6 +2005,7 @@ int d_generate_packed_crosscert( char* destination, unsigned char* certified_key
   tmp_body[42] = 0x04;
   // set ext flag to 1
   tmp_body[43] = 0x01;
+
   // copy the signing key
   idx = ED25519_PUB_KEY_SIZE;
   wolf_succ = wc_ed25519_export_public( signing_key, tmp_body + 44, &idx );
@@ -2741,7 +2746,7 @@ void v_build_hsdir_circuits( OnionService* service, DoublyLinkedOnionRelayList* 
     tmp_node = malloc( sizeof( OnionRelay ) );
     memcpy( tmp_node, start_node, sizeof( OnionRelay ) );
 
-    v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, desc_index, 0, tmp_node, target_dl_relay->relay, NULL );
+    v_send_init_circuit_internal( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, NULL, desc_index, 0, tmp_node, target_dl_relay->relay, NULL, NULL );
 
     target_dl_relay = target_dl_relay->next;
   }
@@ -3003,7 +3008,7 @@ int d_push_hsdir( OnionService* service )
   }
 
   start_relay = px_get_random_fast_relay( 1, service->target_relays[0], NULL, NULL );
-  v_send_init_circuit( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, 0, 0, start_relay, service->target_relays[0]->head->relay, NULL );
+  v_send_init_circuit_internal( 3, CIRCUIT_HSDIR_BEGIN_DIR, service, NULL, 0, 0, start_relay, service->target_relays[0]->head->relay, NULL, NULL );
 
 finish:
   wc_Sha3_256_Free( &reusable_sha3 );
@@ -3032,12 +3037,14 @@ void v_cleanup_service_hs_data( OnionService* service, int desc_index )
     for ( ; i < 2; i++ )
     {
       // create a standby circuit
-      v_send_init_circuit(
+      v_send_init_circuit_internal(
         1,
         CIRCUIT_STANDBY,
         NULL,
+        NULL,
         0,
         0,
+        NULL,
         NULL,
         NULL,
         NULL

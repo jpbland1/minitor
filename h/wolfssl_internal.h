@@ -19,10 +19,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
 
-
-#ifndef WOLFSSL_INT_H
-#define WOLFSSL_INT_H
+#ifndef MINITOR_WOLFSSL_INT_H
+#define MINITOR_WOLFSSL_INT_H
 
 #include <wolfssl/wolfcrypt/types.h>
 #include <wolfssl/ssl.h>

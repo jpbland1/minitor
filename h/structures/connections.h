@@ -35,6 +35,8 @@ typedef enum ConnectionStatus
   CONNECTION_LIVE,
 } ConnectionStatus;
 
+#define RING_BUF_LEN 30
+
 typedef struct DlConnection
 {
   uint32_t conn_id;
@@ -61,7 +63,7 @@ typedef struct DlConnection
   bool has_versions;
   uint32_t cell_ring_start;
   uint32_t cell_ring_end;
-  uint8_t* cell_ring_buf[20];
+  uint8_t* cell_ring_buf[RING_BUF_LEN];
   uint8_t master_secret[48];
 } DlConnection;
 

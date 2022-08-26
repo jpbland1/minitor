@@ -16,13 +16,15 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#ifndef ENCODING_H
-#define ENCODING_H
+#ifndef MINITOR_CLIENT_H
+#define MINITOR_CLIENT_H
 
-int d_base_64_decode( uint8_t* destination, char* source, int source_length );
-void v_base_64_encode( char* destination, unsigned char* source, int source_length );
-void v_base_32_decode( uint8_t* destination, char* source, int source_length );
-void v_base_32_encode( char* destination, unsigned char* source, int source_length );
-char* pc_ipv4_to_string( unsigned int address );
+#include <stdint.h>
+
+struct OnionClient* px_create_onion_client( const char* onion_address );
+int d_connect_onion_client( struct OnionClient* client, uint16_t port );
+int d_write_onion_client( struct OnionClient* client, int stream_id, uint8_t* write_buf, uint32_t length );
+int d_read_onion_client( struct OnionClient* client, int stream_id, uint8_t* read_buf, uint32_t length );
+int d_close_onion_client_stream( struct OnionClient* client, int stream_id );
 
 #endif

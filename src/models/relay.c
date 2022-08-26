@@ -128,7 +128,7 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to open " FILESYSTEM_PREFIX "hsdir_list, errno: %d", errno );
 
-    return -1;
+    return NULL;
   }
 
   succ = lseek( fd, sizeof( time_t ), SEEK_SET );

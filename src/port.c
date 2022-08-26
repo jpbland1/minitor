@@ -188,6 +188,36 @@ bool port_queue_dequeue( MinitorQueue queue, void** pointer )
   return true;
 }
 
+bool port_queue_dequeue_nonblocking( MinitorQueue queue, void** pointer )
+{
+  int ret;
+
+  // MUTEX TAKE
+  pthread_mutex_lock( &( queue->mutex ) );
+
+  if ( queue->size == 0 )
+  {
+    pthread_mutex_unlock( &( queue->mutex ) );
+    // MUTEX GIVE
+
+    return false;
+  }
+
+  memcpy( pointer, &( queue->buffer[queue->out] ), sizeof( void* ) );
+
+  queue->size--;
+  queue->out++;
+
+  queue->out %= queue->capacity;
+
+  pthread_mutex_unlock( &( queue->mutex ) );
+  // MUTEX GIVE
+
+  pthread_cond_broadcast( &( queue->cond_full ) );
+
+  return true;
+}
+
 int port_messages_waiting( MinitorQueue queue )
 {
   int ret;
@@ -230,6 +260,7 @@ bool b_create_core_task( MinitorTask* handle )
   else
   {
     MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
+    return false;
   }
 }
 
@@ -251,6 +282,29 @@ bool b_create_connections_task( MinitorTask* handle )
   else
   {
     MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
+    return false;
+  }
+}
+
+bool b_create_poll_task( MinitorTask* handle )
+{
+  int ret;
+
+  ret = pthread_create(
+    handle,
+    NULL,
+    v_poll_daemon,
+    NULL
+  );
+
+  if ( ret == 0 )
+  {
+    return true;
+  }
+  else
+  {
+    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
+    return false;
   }
 }
 
@@ -272,6 +326,7 @@ bool b_create_fetch_task( MinitorTask* handle, void* consensus )
   else
   {
     MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
+    return false;
   }
 }
 
@@ -293,6 +348,7 @@ bool b_create_insert_task( MinitorTask* handle, void* consensus )
   else
   {
     MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
+    return false;
   }
 }
 

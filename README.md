@@ -1,14 +1,25 @@
 # Minitor
-Minitor is an embedded implementation of Tor that allows a Tor onion service to run on a microcontroller, though it does require an sd card or some form of filesystem.  
-To get a minitor capable devboard, visit shop.3layer.dev [click here](https://shop.3layer.dev).  
+Minitor is an embedded implementation of Tor that allows an application to easily run or connect to Tor Onion Services. Minitor was written to be much smaller than mainline Tor, allowing cheap microcontrollers with little memory to host their own Onion Service. To get a minitor capable devboard, visit shop.3layer.dev [click here](https://shop.3layer.dev).  
 
 # Installation
-Install on Linux or else.  
-Minitor currently only runs on the esp32 and requires the esp-idf to be installed. It uses freeRTOS to run concurrently and requires wolfSSL to handle the cryptography.  
+
+## Installation on Linux
+Minitor requires that wolfSSL is installed separately on linux [click here](https://github.com/wolfSSL/wolfssl).  
+Then the linux port can be installed:
+```
+git checkout linux
+./configure
+make
+sudo make install
+```
+
+## Installation on ESP-32
+Currently the only microcontroller Minitor supports is the esp32, which requires the esp-idf to be installed.  
 First, install and setup the esp-idf [click here](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html).  
-Once you have sourced the export script from the esp-idf `. ./esp-idf/export.sh` clone this repository into your components folder `git clone https://github.com/jpbland1/Minitor`.  
+Once you have sourced the export script from the esp-idf `. ./esp-idf/export.sh` clone this repository into your components folder `git clone https://github.com/jpbland1/minitor`.  
 Do the same for the wolfSSL component `git clone https://github.com/jpbland1/wolfssl`.  
-Minitor requires a filesystem and an up to date time system, in this snippet we use an sdcard and ntp client provided by the esp-idf:  
+Checkout the esp32 branch of Minitor `cd components/minitor && git checkout esp32`
+Minitor requires a filesystem and an up to date time system, in this snippet we use an sdcard and ntp client provided by the esp-idf:
 ```
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
@@ -78,17 +89,28 @@ Minitor requires a filesystem and an up to date time system, in this snippet we 
     localtime_r( &now, &time_info );
   } while ( time_info.tm_year < (2016 - 1900) );
 ```
-The path you mounted the sdcard to the filesystem, `/sdcard/` in this snippet MUST match `FILESYSTEM_PREFIX` in `minitor/include.h`  
+
+The path you mounted the sdcard to the filesystem, `/sdcard/` in this snippet MUST match `FILESYSTEM_PREFIX`
+
+# Using Minitor
+
+Before using minitor we need to set the `FILESYSTEM_PREFIX` definition in `minitor/include/config.h` to where you want Minitor to store consensus data and keys.
+
 ```
-#define FILESYSTEM_PREFIX "/sdcard/"
+#define FILESYSTEM_PREFIX "./local_data/"
 ```
-Finally, include Minitor in your main task and call these functions 
+
+Now we can include Minitor in our application and use it to either host an Onion Service or connect to one.
+
+## Hosting an Onion Service
+
 ```
-#include "minitor.h"
+#include <minitor.h>
+#include <minitor_service.h>
 ...
   if ( d_minitor_INIT() < 0 )
   {
-    ESP_LOGE( TAG, "Failed to init" );
+    printf( "Failed to d_minitor_INIT" );
 
     // while loop is fine since we want to hang to inspect our error
     while ( 1 )
@@ -96,19 +118,107 @@ Finally, include Minitor in your main task and call these functions
     }
   }
 
-  if ( d_setup_onion_service( 8080, 80, "/sdcard/test_service" ) < 0 )
+  if ( d_setup_onion_service( 8080, 80, "./local_data/test_service" ) < 0 )
   {
-    ESP_LOGE( TAG, "Failed to setup hidden service" );
+    printf( "Failed to setup hidden service" );
   }
 ```
-When `d\_minitor\_INIT()` is called, all the necessary global variables, queues, semaphores and files will be created to run minitor, and the Tor network consensus documents will be fetched.  
-The fetch process usually takes around 300 seconds but can vary based on the number of Tor nodes online.  
-Once Minitor has the consensus documents, they are saved on the file system and don't need to be re-fetched until they expire, meaning you can restart the esp32 without having to wait again.  
-When `d_setup_onion_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory )` is called, Minitor will then setup the hidden service and run in the background, the main task may continue on but the onion service won't be ready to connect until it has finished sending its hidden service descriptors, which typically takes a few minutes.  
-When finished, an onion service will be setup and will proxy a web server running on the esp32 on localhost port `local_port` to port `exit_port` of the onion service.  
-It will print the address of the onion service to the console but if you miss it or are running headless the onion address will be saved to the sdcard at `/sdcard/test_service/hostname`.  
-This example assumes your sd card is mounted at /sdcard/ and a web server is running on localhost 8080 but you can adjust the parameters as you need.  
-If you want an example project that already has the sdcard and web server, run `git clone --recurse-submodules https://github.com/jpbland1/code-me-not` which clones the code-me-not project. code-me-not is a program that lets you control the esp32's pins from a web interface without writing any code and by default it runs an onion service.  
+
+When `d_minitor_INIT()` is called, the Tor network consensus and relay descriptors are fetched and the core daemon is started.
+The fetch process usually takes around 300 seconds but can vary based on the number of Tor nodes online.
+Once Minitor has the consensus documents, they are saved on the file system and don't need to be re-fetched until they expire, meaning you can restart the process without having to wait again.
+When `d_setup_onion_service( 8080, 80, "./local_data/test_service" )` is called, a message is sent to the Minitor core daemon to setup and start the Onion Service.
+Starting the Onion Service may take several minutes on the esp32, but since the core task is handling everything the main task can continue on without waiting.
+When finished, an Onion Service will be setup and will proxy a web server on localhost port `8080` to port `80` of the onion service.  
+Minitor will print the address of the onion service to the console but if you miss it or are running headless the onion address will be saved to the filesystem at `./local_data/test_service`.  
+
+## Connecting to an Onion Service
+
+```
+#include <minitor.h>
+#include <minitor_client.h>
+
+const char* REQUEST =
+"GET / HTTP/1.0\r\n"
+"Host: 127.0.0.1\r\n"
+"User-Agent: esp-idf/1.0 esp3266\r\n"
+"Content-Type: text/plain\r\n"
+"\r\n\r\n";
+
+int i;
+OnionClient* client;
+int stream;
+int ret;
+char read_buf[512];
+
+if ( d_minitor_INIT() < 0 )
+{
+  printf( "Failed to init" );
+
+  while ( 1 )
+  {
+  }
+}
+
+// create a rendezvous circuit with the service
+client = px_create_onion_client( "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion" );
+
+if ( client == NULL )
+{
+  while ( 1 )
+  {
+    printf( "Failed to create client\n" );
+    sleep( 1 );
+  }
+}
+
+// create a stream on the circuit
+stream = d_connect_onion_client( client, 80 )
+
+if ( stream < 0 )
+{
+  while ( 1 )
+  {
+    printf( "Failed to connect client\n" );
+    sleep( 1 );
+  }
+}
+
+// write to the http request to the stream
+if ( d_write_onion_client( client, stream, REQUEST, strlen( REQUEST ) ) != strlen( REQUEST ) )
+{
+  while ( 1 )
+  {
+    printf( "Failed to write client\n" );
+    sleep( 1 );
+  }
+}
+
+do
+{
+  ret = d_read_onion_client( client, stream, read_buf, sizeof( read_buf ) );
+
+  if ( ret < 0 )
+  {
+    printf( "Failed to read on stream\n" );
+    break;
+  }
+
+  printf( "ret %d\n", ret );
+
+  for ( i = 0; i < ret; i++ )
+  {
+    printf( "read_buf[%d] %c\n", i, read_buf[i] );
+  }
+} while ( ret == sizeof( read_buf ) );
+```
+
+This example connects to the duckduckgo hidden service and prints out each byte of the homepage.
+`d_minitor_INIT` is called to fetch the consensus and start the core daemon.
+`px_create_onion_client` creates a rendezvous circuit to the onion service address passed in, it will block until the circuit is ready or fails to create.
+`d_connect_onion_client` creates a relay stream on the rendezvous circuit to the specified port.
+`d_write_onion_client` takes the client and stream and allows the stream to be written to just like a socket file descriptor
+`d_read_onion_client` takes the client and stream and allows the stream to be read from just like a socket file descriptor
 
 # Running with Chutney
 If you are contribuing to Minitor (<3) you will need to run Chutney [click here](https://github.com/torproject/chutney).  
@@ -123,4 +233,3 @@ You also need to un-comment `#define MINITOR_CHUTNEY` to enable chutney.
 #define MINITOR_CHUTNEY_ADDRESS 0x7602a8c0
 #define MINITOR_CHUTNEY_ADDRESS_STR "192.168.2.118"
 ```
-Then flash and run the esp32, it will now connect to your chutney network instead of real Tor.  

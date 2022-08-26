@@ -38,10 +38,10 @@ MINITOR_CHUTNEY_ADDRESS_STR " dirport=7002"
 //
 // Generated on: Fri, 04 Feb 2022 15:49:02 +0000
 
-"88.196.80.132 dirport=80",
+"194.5.96.42 dirport=80",
+"199.249.230.174 dirport=80",
 "81.169.180.28 dirport=9030",
-"54.36.112.244 dirport=9030",
-"89.58.34.53 dirport=9030",
-"185.184.192.252 dirport=9030",
+"194.50.94.247 dirport=9030",
+"135.23.97.216 dirport=9030",
 #endif
 };

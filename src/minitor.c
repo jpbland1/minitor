@@ -108,6 +108,9 @@ int d_minitor_INIT()
   fastest_cache_mutex = MINITOR_MUTEX_CREATE();
 
   core_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+  core_internal_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+  connections_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+  poll_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
 
   b_create_core_task( &core_task );
 
@@ -139,7 +142,7 @@ int d_minitor_INIT()
   MINITOR_TIMER_RESET_BLOCKING( timeout_timer );
 
   wolfSSL_Init();
-  wolfSSL_Debugging_ON();
+  //wolfSSL_Debugging_ON();
 
   //if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_3_client_method() ) ) == NULL )
   if ( ( xMinitorWolfSSL_Context = wolfSSL_CTX_new( wolfTLSv1_2_client_method() ) ) == NULL )

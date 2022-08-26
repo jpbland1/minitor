@@ -15,11 +15,12 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
-
+#include <unistd.h>
 #include <stdlib.h>
 
 #include "wolfssl/options.h"
 
+#include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/settings.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 #include "wolfssl/wolfcrypt/hmac.h"
@@ -47,6 +48,8 @@ struct pollfd connections_poll[16];
 DlConnection* connections;
 MinitorMutex connections_mutex;
 MinitorMutex connection_access_mutex[16];
+MinitorQueue connections_task_queue;
+MinitorQueue poll_task_queue;
 
 static WC_INLINE int d_ignore_ca_callback( int preverify, WOLFSSL_X509_STORE_CTX* store )
 {
@@ -97,10 +100,11 @@ static void v_cleanup_connection_in_lock( DlConnection* dl_connection )
     onion_message->type = CONN_CLOSE;
     onion_message->data = dl_connection->conn_id;
 
-    wolfSSL_shutdown( dl_connection->ssl );
+    // TODO this should work need to figure out why it breaks things
+    //wolfSSL_shutdown( dl_connection->ssl );
     wolfSSL_free( dl_connection->ssl );
 
-    for ( i = 0; i < 20; i++ )
+    for ( i = 0; i < RING_BUF_LEN; i++ )
     {
       if ( dl_connection->cell_ring_buf[i] != NULL )
       {
@@ -165,16 +169,17 @@ void v_cleanup_connection( DlConnection* dl_connection )
   // MUTEX GIVE
 }
 
-static int d_recv_on_or_connection( DlConnection* or_connection )
+static OnionMessage* px_recv_on_or_connection( DlConnection* or_connection )
 {
   int succ;
   uint8_t* cell;
-  OnionMessage* onion_message;
+  OnionMessage* onion_message = NULL;
+  int read_before;
+  int read_after;
 
-  if ( ( or_connection->cell_ring_end + 1 ) % 20 == or_connection->cell_ring_start )
+  if ( ( or_connection->cell_ring_end + 1 ) % RING_BUF_LEN == or_connection->cell_ring_start )
   {
-    succ = -1;
-    goto finish;
+    return NULL;
   }
 
   if ( or_connection->has_versions == false )
@@ -190,8 +195,7 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
 
   if ( succ <= 0 )
   {
-    succ = -1;
-    goto finish;
+    return NULL;
   }
 
   or_connection->cell_ring_buf[or_connection->cell_ring_end] = cell;
@@ -209,18 +213,15 @@ static int d_recv_on_or_connection( DlConnection* or_connection )
     onion_message->type = CONN_HANDSHAKE;
   }
 
-  or_connection->cell_ring_end = ( or_connection->cell_ring_end + 1 ) % 20;
+  or_connection->cell_ring_end = ( or_connection->cell_ring_end + 1 ) % RING_BUF_LEN;
 
-  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
-
-finish:
-  return succ;
+  return onion_message;
 }
 
-static int d_recv_on_local_connection( DlConnection* local_connection )
+static OnionMessage* px_recv_on_local_connection( DlConnection* local_connection )
 {
   int succ;
-  OnionMessage* onion_message;
+  OnionMessage* onion_message = NULL;
 
   onion_message = malloc( sizeof( OnionMessage ) );
 
@@ -242,25 +243,51 @@ static int d_recv_on_local_connection( DlConnection* local_connection )
     ( (ServiceTcpTraffic*)onion_message->data )->length = succ;
   }
 
-  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
-
-  return succ;
+  return onion_message;
 }
 
-static int d_recv_on_connection( DlConnection* dl_connection )
+static bool b_recv_on_connection( DlConnection* dl_connection )
 {
-  int succ;
+  OnionMessage* onion_message;
 
   if ( dl_connection->is_or == 1 )
   {
-    succ = d_recv_on_or_connection( dl_connection );
+    onion_message = px_recv_on_or_connection( dl_connection );
   }
   else
   {
-    succ = d_recv_on_local_connection( dl_connection );
+    onion_message = px_recv_on_local_connection( dl_connection );
   }
 
-  return succ;
+  MINITOR_MUTEX_GIVE( connection_access_mutex[dl_connection->mutex_index] );
+  // MUTEX GIVE
+
+  if ( onion_message == NULL )
+  {
+    return false;
+  }
+
+  MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+
+  return true;
+}
+
+void v_poll_daemon( void* pv_parameters )
+{
+  int count;
+  bool ready = true;
+
+  while ( 1 )
+  {
+    count = poll( connections_poll, 16, -1 );
+
+    if ( count > 0 )
+    {
+      MINITOR_ENQUEUE_BLOCKING( connections_task_queue, (void*)(&ready) );
+    }
+
+    MINITOR_DEQUEUE_BLOCKING( poll_task_queue, &count );
+  }
 }
 
 void v_connections_daemon( void* pv_parameters )
@@ -268,29 +295,32 @@ void v_connections_daemon( void* pv_parameters )
   int i;
   time_t now;
   int want_next;
-  int succ;
+  bool ready;
+  bool read_success;
   int readable_bytes;
   uint8_t* rx_buffer;
   MinitorMutex access_mutex;
   OnionMessage* onion_message;
   DlConnection* dl_connection;
   DlConnection* tmp_connection;
-  DlConnection* ready_connections[16];
+  int ready_connids[16];
+  DlConnection* ready_connection;
+  MinitorTask poll_daemon_task_handle = NULL;
 
-  while ( 1 )
+  b_create_poll_task( &poll_daemon_task_handle );
+
+  MINITOR_LOG( CONN_TAG, "made poll task" );
+
+  while ( MINITOR_DEQUEUE_BLOCKING( connections_task_queue, &ready ) )
   {
-    succ = poll( connections_poll, 16, 500 );
+    //MINITOR_LOG( CONN_TAG, "got message %d", ready );
 
-    if ( succ <= 0 )
+    // restart the poll task to include new connections
+    if ( ready == false )
     {
-      if ( succ < 0 )
-      {
-        MINITOR_LOG( CONN_TAG, "Failed to poll local connections" );
-      }
-    }
+      MINITOR_TASK_DELETE( poll_daemon_task_handle );
+      b_create_poll_task( &poll_daemon_task_handle );
 
-    if ( MINITOR_QUEUE_MESSAGES_WAITING( core_task_queue ) >= 15 )
-    {
       continue;
     }
 
@@ -304,99 +334,91 @@ void v_connections_daemon( void* pv_parameters )
 
     while ( dl_connection != NULL )
     {
-      if ( ( connections_poll[dl_connection->poll_index].revents & connections_poll[dl_connection->poll_index].events ) != 0 )
+      if ( ( connections_poll[dl_connection->poll_index].revents & POLLERR ) != 0 || ( connections_poll[dl_connection->poll_index].revents & POLLHUP ) != 0 )
       {
-        ready_connections[i] = dl_connection;
-        i++;
-      }
-      // need to send local connection timeout to the core task
-      // as a 0 length tcp event
-      else if ( dl_connection->is_or == 0 && now > dl_connection->last_action && now - dl_connection->last_action >= 5 )
-      {
-        onion_message = malloc( sizeof( OnionMessage ) );
-
-        onion_message->type = SERVICE_TCP_DATA;
-        onion_message->data = malloc( sizeof( ServiceTcpTraffic ) );
-        ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
-        ( (ServiceTcpTraffic*)onion_message->data )->circ_id = dl_connection->circ_id;
-        ( (ServiceTcpTraffic*)onion_message->data )->stream_id = dl_connection->stream_id;
-
-        MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
-
-        tmp_connection = dl_connection->next;
-
-        access_mutex = connection_access_mutex[dl_connection->mutex_index];
-
         // MUTEX TAKE
-        MINITOR_MUTEX_TAKE_BLOCKING( access_mutex );
+        MINITOR_MUTEX_TAKE_BLOCKING( connection_access_mutex[dl_connection->mutex_index] );
 
         v_cleanup_connection_in_lock( dl_connection );
 
-        MINITOR_MUTEX_GIVE( access_mutex );
+        MINITOR_MUTEX_GIVE( connection_access_mutex[dl_connection->mutex_index] );
         // MUTEX GIVE
-
-        access_mutex = NULL;
-
-        dl_connection = tmp_connection;
-
-        continue;
+      }
+      else if
+      (
+        ( connections_poll[dl_connection->poll_index].revents & connections_poll[dl_connection->poll_index].events ) != 0 ||
+        ( dl_connection->is_or == 1 && wolfSSL_pending( dl_connection->ssl ) > 0 )
+      )
+      {
+        ready_connids[i] = dl_connection->conn_id;
+        i++;
       }
 
       dl_connection = dl_connection->next;
     }
 
-    for ( i = i - 1; i >= 0; i-- )
-    {
-      access_mutex = connection_access_mutex[ready_connections[i]->mutex_index];
-
-      // MUTEX TAKE
-      MINITOR_MUTEX_TAKE_BLOCKING( access_mutex );
-
-      // because of how file descriptors in ssl are handled, we must read all the
-      // current contents in 1 go, otherwise the ssl connection will pull the data
-      // out of the file descriptor and the next poll will report no read ready
-      if ( MINITOR_GET_READABLE( ready_connections[i]->sock_fd, &readable_bytes ) < 0 )
-      {
-        MINITOR_LOG( CONN_TAG, "Failed to ioctl on connection fd, errno: %d", errno );
-
-        continue;
-      }
-
-      do
-      {
-        if ( MINITOR_QUEUE_MESSAGES_WAITING( core_task_queue ) >= 15 )
-        {
-          break;
-        }
-
-        succ = d_recv_on_connection( ready_connections[i] );
-
-        if ( succ <= 0 )
-        {
-          v_cleanup_connection_in_lock( ready_connections[i] );
-          ready_connections[i] = NULL;
-
-          break;
-        }
-
-        readable_bytes -= succ;
-      } while (
-        ( ready_connections[i]->is_or == 0 && readable_bytes > 0 ) ||
-        ( ready_connections[i]->is_or == 1 && ( readable_bytes >= CELL_LEN || ( ready_connections[i]->status == CONNECTION_WANT_CERTS && readable_bytes >= 0 ) ) )
-      );
-
-      if ( ready_connections[i] != NULL && ready_connections[i]->is_or == 0 )
-      {
-        time( &now );
-        ready_connections[i]->last_action = now;
-      }
-
-      MINITOR_MUTEX_GIVE( access_mutex );
-      // MUTEX GIVE
-    }
-
     MINITOR_MUTEX_GIVE( connections_mutex );
     // MUTEX GIVE
+
+    for ( i = i - 1; i >= 0; i-- )
+    {
+      // read until there's nothing left to read
+      while ( 1 )
+      {
+        // MUTEX TAKE
+        ready_connection = px_get_conn_by_id_and_lock( ready_connids[i] );
+
+        if ( ready_connection == NULL )
+        {
+          break;
+        }
+
+        access_mutex = connection_access_mutex[ready_connection->mutex_index];
+
+        // check if our ready connection can still be read
+        if ( MINITOR_GET_READABLE( ready_connection->sock_fd, &readable_bytes ) < 0 )
+        {
+          MINITOR_MUTEX_GIVE( access_mutex );
+          // MUTEX GIVE
+
+          break;
+        }
+
+        // check pending in case it's no longer on the fd
+        if ( ready_connection->is_or == 1 && ( readable_bytes < CELL_LEN && ( ready_connection->status != CONNECTION_WANT_CERTS || readable_bytes <= 0 ) ) )
+        {
+          readable_bytes += wolfSSL_pending( ready_connection->ssl );
+        }
+
+        //MINITOR_LOG( CONN_TAG, "readable_bytes %d", readable_bytes );
+
+        // if we don't have enough bytes to read to make a cell, give up
+        if (
+          ( ready_connection->is_or == 0 && readable_bytes <= 0 ) ||
+          ( ready_connection->is_or == 1 && ( readable_bytes < CELL_LEN && ( ready_connection->status != CONNECTION_WANT_CERTS || readable_bytes <= 0 ) ) )
+        )
+        {
+          MINITOR_MUTEX_GIVE( access_mutex );
+          // MUTEX GIVE
+
+          break;
+        }
+
+        // read and send to core, block if need be
+        read_success = b_recv_on_connection( ready_connection );
+        // MUTEX GIVE
+
+        // if the read failed, destroy the connection
+        if ( read_success == false )
+        {
+          v_cleanup_connection( ready_connection );
+
+          break;
+        }
+      }
+    }
+
+    MINITOR_ENQUEUE_BLOCKING( poll_task_queue, (void*)(&ready) );
   }
 }
 
@@ -405,6 +427,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
   int i;
   int succ;
   int sock_fd;
+  bool ready;
   struct sockaddr_in dest_addr;
   WOLFSSL* ssl;
   DlConnection* or_connection;
@@ -450,7 +473,7 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
 
   wolfSSL_set_verify( ssl, SSL_VERIFY_NONE, NULL );
   wolfSSL_KeepArrays( ssl );
-  wolfSSL_set_session_secret_cb( ssl, conn_secrects_cb, or_connection );
+  //wolfSSL_set_session_secret_cb( ssl, conn_secrects_cb, or_connection );
 
   succ = wolfSSL_set_fd( ssl, sock_fd );
 
@@ -524,6 +547,13 @@ static DlConnection* px_create_or_connection( uint32_t address, uint16_t port )
   if ( connections_daemon_task_handle == NULL )
   {
     b_create_connections_task( &connections_daemon_task_handle );
+  }
+  // need to reset poll now that a connection has been added
+  else
+  {
+    ready = false;
+
+    MINITOR_ENQUEUE_BLOCKING( connections_task_queue, (void*)(&ready) );
   }
 
   return or_connection;
