@@ -2,6 +2,7 @@
 #include <string.h>
 #include <minitor.h>
 #include <minitor_client.h>
+
 void main()
 {
   const char* REQUEST =
