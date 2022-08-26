@@ -1,0 +1,2 @@
+#!/bin/bash
+gcc service_example.c /usr/local/lib/libminitor.so /usr/local/lib/libwolfssl.so.34 -o service_example.out
