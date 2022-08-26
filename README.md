@@ -8,6 +8,7 @@ Minitor requires that wolfSSL is installed separately on linux [click here](http
 Then the linux port can be installed:
 ```
 git checkout linux
+./autogen.sh
 ./configure
 make
 sudo make install
