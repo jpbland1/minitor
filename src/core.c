@@ -309,6 +309,10 @@ void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* or_conne
       {
         if ( circuit->relay_list.built_length >= 2 )
         {
+          // use next relay in target list
+          circuit->target_relay_index++;
+
+          // if we have exausted all targets send error to api consumer
           if ( circuit->target_relay_index == circuit->client->target_relays->length )
           {
             onion_message = NULL;
@@ -1063,6 +1067,7 @@ static void v_handle_conn_close( uint32_t conn_id )
 
   for ( i = i - 1; i >= 0; i-- )
   {
+    MINITOR_LOG( CORE_TAG, "conn closed status: %d target_status: %d", closed_circuits[i]->status, closed_circuits[i]->target_status );
     v_circuit_rebuild_or_destroy( closed_circuits[i], NULL );
   }
 }
@@ -1228,6 +1233,9 @@ static void v_handle_conn_ready( uint32_t conn_id )
 
   for ( f = i, i = i - 1; i >= 0; i-- )
   {
+    ready_circuits[i]->want_action = true;
+    time( &(ready_circuits[i]->last_action) );
+
     if ( ready_circuits[i]->status == CIRCUIT_CREATE && d_send_circuit_create( ready_circuits[i], or_connection ) < 0 )
     {
       f--;
@@ -1399,13 +1407,25 @@ static void v_init_service( OnionService* service )
 
 void v_handle_circuit_timeout()
 {
+  /*
+  struct CircIdStreamId
+  {
+    uint32_t circ_id;
+    uint16_t stream_id;
+  };
+  */
+
   int i = 0;
   time_t now;
   time_t elapsed;
   time_t min_left = 30;
   OnionCircuit* circuit;
-  OnionCircuit* timed_out[20];
-  DlConnection* or_connection;
+  OnionCircuit* timed_out_circuits[20];
+  DlConnection* dl_connection;
+  /*
+  struct CircIdStreamId timed_out_local[20];
+  OnionMessage* onion_message;
+  */
 
   // first get all the circuits protected by the mutex
   // MUTEX TAKE
@@ -1421,18 +1441,18 @@ void v_handle_circuit_timeout()
     {
       elapsed = now - circuit->last_action;
 
-      if ( elapsed >= 30 )
+      if ( elapsed >= WATCHDOG_TIMEOUT_PERIOD )
       {
         MINITOR_LOG( CORE_TAG, "timeout status: %d target_status: %d", circuit->status, circuit->target_status );
 
-        timed_out[i] = circuit;
+        timed_out_circuits[i] = circuit;
         i++;
       }
       else
       {
-        if ( 30 - elapsed < min_left )
+        if ( WATCHDOG_TIMEOUT_PERIOD - elapsed < min_left )
         {
-          min_left = 30 - elapsed;
+          min_left = WATCHDOG_TIMEOUT_PERIOD - elapsed;
         }
       }
     }
@@ -1447,16 +1467,75 @@ void v_handle_circuit_timeout()
   for ( i = i - 1; i >= 0; i-- )
   {
     // MUTEX TAKE
-    or_connection = px_get_conn_by_id_and_lock( timed_out[i]->conn_id );
+    dl_connection = px_get_conn_by_id_and_lock( timed_out_circuits[i]->conn_id );
 
-    if ( or_connection == NULL )
+    if ( dl_connection == NULL )
     {
       continue;
     }
 
-    v_circuit_rebuild_or_destroy( timed_out[i], or_connection );
+    v_circuit_rebuild_or_destroy( timed_out_circuits[i], dl_connection );
     // MUTEX GIVE
   }
+
+  /*
+  i = 0;
+
+  // now check local connections to see if they've timed out
+  // MUTEX TAKE
+  MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
+
+  time( &now );
+
+  dl_connection = connections;
+
+  while ( dl_connection != NULL )
+  {
+    if ( dl_connection->is_or == 0 )
+    {
+      elapsed = now - dl_connection->last_action;
+
+      if ( elapsed >= WATCHDOG_TIMEOUT_PERIOD )
+      {
+        timed_out_local[i].circ_id = dl_connection->circ_id;
+        timed_out_local[i].stream_id = dl_connection->stream_id;
+        i++;
+      }
+      else
+      {
+        if ( WATCHDOG_TIMEOUT_PERIOD - elapsed < min_left )
+        {
+          min_left = WATCHDOG_TIMEOUT_PERIOD - elapsed;
+        }
+      }
+    }
+
+    dl_connection = dl_connection->next;
+  }
+
+  MINITOR_MUTEX_GIVE( connections_mutex );
+  // MUTEX GIVE
+
+  // now queue the relay end and cleanup the local connection
+  for ( i = i - 1; i >= 0; i-- )
+  {
+    // send a 0 length tcp message
+    onion_message = malloc( sizeof( OnionMessage ) );
+
+    onion_message->type = SERVICE_TCP_DATA;
+    onion_message->data = malloc( sizeof( ServiceTcpTraffic ) );
+
+    ( (ServiceTcpTraffic*)onion_message->data )->length = 0;
+    ( (ServiceTcpTraffic*)onion_message->data )->circ_id = timed_out_local[i].circ_id;
+    ( (ServiceTcpTraffic*)onion_message->data )->stream_id = timed_out_local[i].stream_id;
+
+    // use internal queue
+    MINITOR_ENQUEUE_BLOCKING( core_internal_queue, &onion_message );
+
+    // cleanup the local connection
+    v_cleanup_local_connection( timed_out_local[i].circ_id, timed_out_local[i].stream_id );
+  }
+  */
 
   // this should also start the timer
   MINITOR_TIMER_SET_MS_BLOCKING( timeout_timer, 1000 * min_left );

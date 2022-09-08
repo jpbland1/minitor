@@ -19,6 +19,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_SERVICE_H
 #define MINITOR_SERVICE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int d_setup_onion_service( unsigned short local_port, unsigned short exit_port, const char* onion_service_directory );
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -19,12 +19,25 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_CLIENT_H
 #define MINITOR_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
-struct OnionClient* px_create_onion_client( const char* onion_address );
-int d_connect_onion_client( struct OnionClient* client, uint16_t port );
-int d_write_onion_client( struct OnionClient* client, int stream_id, uint8_t* write_buf, uint32_t length );
-int d_read_onion_client( struct OnionClient* client, int stream_id, uint8_t* read_buf, uint32_t length );
-int d_close_onion_client_stream( struct OnionClient* client, int stream_id );
+#define MINITOR_ERROR -1
+#define MINITOR_CLIENT_ERROR -2
+#define MINITOR_STREAM_ERROR -3
+
+void* px_create_onion_client( const char* onion_address );
+int d_connect_onion_client( void* client_p, uint16_t port );
+int d_write_onion_client( void* client_p, int stream_id, uint8_t* write_buf, uint32_t length );
+int d_read_onion_client( void* client_p, int stream_id, uint8_t* read_buf, uint32_t length );
+int d_close_onion_client_stream( void* client_p, int stream_id );
+void v_close_onion_client( void* client_p );
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

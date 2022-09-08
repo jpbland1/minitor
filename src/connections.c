@@ -68,19 +68,6 @@ static int conn_secrects_cb( WOLFSSL* ssl, void* secret, int* secretSz, void* ct
 
   MINITOR_LOG( CONN_TAG, "SETTING master_secret memcmp: %d %d", memcmp( secret, ssl->arrays->masterSecret, 48 ), *secretSz );
 
-  {
-    int i;
-
-    printf( "\nsecret " );
-
-    for ( i = 0; i < 48; i++ )
-    {
-      printf( "%.2x", ((uint8_t*)secret)[i] );
-    }
-
-    printf( "\n" );
-  }
-
   memcpy( or_connection->master_secret, secret, 48 );
 
   return 0;
@@ -286,7 +273,13 @@ void v_poll_daemon( void* pv_parameters )
       MINITOR_ENQUEUE_BLOCKING( connections_task_queue, (void*)(&ready) );
     }
 
-    MINITOR_DEQUEUE_BLOCKING( poll_task_queue, &count );
+    MINITOR_DEQUEUE_BLOCKING( poll_task_queue, &ready );
+
+    // if false was on queue we need to delete ourself
+    if ( ready == false )
+    {
+      MINITOR_TASK_DELETE( NULL );
+    }
   }
 }
 
@@ -301,12 +294,14 @@ void v_connections_daemon( void* pv_parameters )
   uint8_t* rx_buffer;
   MinitorMutex access_mutex;
   OnionMessage* onion_message;
-  DlConnection* dl_connection;
+  DlConnection* dl_connection = NULL;
   DlConnection* tmp_connection;
   int ready_connids[16];
   DlConnection* ready_connection;
   MinitorTask poll_daemon_task_handle = NULL;
 
+  // create the poll queue and task
+  poll_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   b_create_poll_task( &poll_daemon_task_handle );
 
   MINITOR_LOG( CONN_TAG, "made poll task" );
@@ -318,11 +313,21 @@ void v_connections_daemon( void* pv_parameters )
     // restart the poll task to include new connections
     if ( ready == false )
     {
+      // delete the poll task
       MINITOR_TASK_DELETE( poll_daemon_task_handle );
+      // delete the poll queue in case the poll task was blocked on it
+      MINITOR_QUEUE_DELETE( poll_task_queue );
+
+      // create the poll queue and task
+      poll_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
       b_create_poll_task( &poll_daemon_task_handle );
+
+      MINITOR_LOG( CONN_TAG, "made poll task" );
 
       continue;
     }
+
+    dl_connection = NULL;
 
     // MUTEX TAKE
     MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
@@ -334,24 +339,27 @@ void v_connections_daemon( void* pv_parameters )
 
     while ( dl_connection != NULL )
     {
-      if ( ( connections_poll[dl_connection->poll_index].revents & POLLERR ) != 0 || ( connections_poll[dl_connection->poll_index].revents & POLLHUP ) != 0 )
+      if ( dl_connection->is_or == 1 )
       {
-        // MUTEX TAKE
-        MINITOR_MUTEX_TAKE_BLOCKING( connection_access_mutex[dl_connection->mutex_index] );
+        if ( ( connections_poll[dl_connection->poll_index].revents & POLLERR ) != 0 || ( connections_poll[dl_connection->poll_index].revents & POLLHUP ) != 0 )
+        {
+          // MUTEX TAKE
+          MINITOR_MUTEX_TAKE_BLOCKING( connection_access_mutex[dl_connection->mutex_index] );
 
-        v_cleanup_connection_in_lock( dl_connection );
+          v_cleanup_connection_in_lock( dl_connection );
 
-        MINITOR_MUTEX_GIVE( connection_access_mutex[dl_connection->mutex_index] );
-        // MUTEX GIVE
-      }
-      else if
-      (
-        ( connections_poll[dl_connection->poll_index].revents & connections_poll[dl_connection->poll_index].events ) != 0 ||
-        ( dl_connection->is_or == 1 && wolfSSL_pending( dl_connection->ssl ) > 0 )
-      )
-      {
-        ready_connids[i] = dl_connection->conn_id;
-        i++;
+          MINITOR_MUTEX_GIVE( connection_access_mutex[dl_connection->mutex_index] );
+          // MUTEX GIVE
+        }
+        else if
+        (
+          ( connections_poll[dl_connection->poll_index].revents & connections_poll[dl_connection->poll_index].events ) != 0 ||
+          ( dl_connection->is_or == 1 && wolfSSL_pending( dl_connection->ssl ) > 0 )
+        )
+        {
+          ready_connids[i] = dl_connection->conn_id;
+          i++;
+        }
       }
 
       dl_connection = dl_connection->next;
@@ -390,8 +398,6 @@ void v_connections_daemon( void* pv_parameters )
           readable_bytes += wolfSSL_pending( ready_connection->ssl );
         }
 
-        //MINITOR_LOG( CONN_TAG, "readable_bytes %d", readable_bytes );
-
         // if we don't have enough bytes to read to make a cell, give up
         if (
           ( ready_connection->is_or == 0 && readable_bytes <= 0 ) ||
@@ -415,9 +421,15 @@ void v_connections_daemon( void* pv_parameters )
 
           break;
         }
+
+        if ( ready_connection->is_or == 0 )
+        {
+          time( &( ready_connection->last_action ) );
+        }
       }
     }
 
+    ready = true;
     MINITOR_ENQUEUE_BLOCKING( poll_task_queue, (void*)(&ready) );
   }
 }
@@ -615,13 +627,40 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
   return 0;
 }
 
+void v_handle_local_connection( void* pv_parameters )
+{
+  int len;
+  uint8_t data_buf[RELAY_PAYLOAD_LEN];
+  DlConnection* local_connection = pv_parameters;
+  OnionMessage* onion_message;
+
+  while ( 1 )
+  {
+    onion_message = px_recv_on_local_connection( local_connection );
+
+    if ( onion_message == NULL )
+    {
+      MINITOR_TASK_DELETE( NULL );
+    }
+
+    MINITOR_ENQUEUE_BLOCKING( core_task_queue, (void*)(&onion_message) );
+
+    if ( ( (ServiceTcpTraffic*)onion_message->data )->length == 0 )
+    {
+      MINITOR_TASK_DELETE( NULL );
+    }
+  }
+}
+
 int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t port )
 {
   int i;
   int succ;
+  bool ready;
   int sock_fd;
   struct sockaddr_in dest_addr;
   DlConnection* local_connection;
+  MinitorTask* dummy_handle;
 
   // MUTEX TAKE
   MINITOR_MUTEX_TAKE_BLOCKING( connections_mutex );
@@ -661,42 +700,9 @@ int d_create_local_connection( uint32_t circ_id, uint16_t stream_id, uint16_t po
   local_connection->last_action = INT_MAX;
   local_connection->conn_id = conn_id++;
 
-  if ( connections_daemon_task_handle == NULL )
-  {
-    for ( i = 0; i < 16; i++ )
-    {
-      connections_poll[i].fd = -1;
-      connection_access_mutex[i] = MINITOR_MUTEX_CREATE();
-    }
-  }
-
-  for ( i = 0; i < 16; i++ )
-  {
-    if ( connections_poll[i].fd == -1 )
-    {
-      local_connection->poll_index = i;
-      local_connection->mutex_index = i;
-      connections_poll[i].fd = sock_fd;
-      connections_poll[i].events = POLLIN;
-
-      break;
-    }
-  }
-
-  if ( i >= 16 )
-  {
-    MINITOR_LOG( CONN_TAG, "couldn't find an open poll spot" );
-
-    free( local_connection );
-    goto clean_socket;
-  }
-
   v_add_connection_to_list( local_connection, &connections );
 
-  if ( connections_daemon_task_handle == NULL )
-  {
-    b_create_connections_task( &connections_daemon_task_handle );
-  }
+  b_create_local_connection_handler( &dummy_handle, local_connection );
 
   MINITOR_MUTEX_GIVE( connections_mutex );
   // MUTEX GIVE

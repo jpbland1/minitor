@@ -26,7 +26,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "../include/minitor_client.h"
 
-int v_close_onion_client( OnionClient* client );
 void v_cleanup_client_data( OnionClient* client );
 int d_derive_blinded_pubkey( ed25519_key* blinded_key, uint8_t* master_pubkey, int64_t period_number, int64_t period_length, uint8_t* secret, int secret_length );
 int d_get_hs_desc( OnionCircuit* circuit, DlConnection* or_connection );

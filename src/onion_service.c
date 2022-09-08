@@ -79,84 +79,89 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connec
 
   access_mutex = connection_access_mutex[or_connection->mutex_index];
 
-  switch( relay_cell->command )
+  if ( relay_cell->command != RELAY )
   {
-    case RELAY:
-      switch( relay_cell->payload.relay.relay_command )
+    MINITOR_LOG( MINITOR_TAG, "Invalid cell command %d", relay_cell->command );
+
+    goto circuit_rebuild;
+  }
+
+  switch( relay_cell->payload.relay.relay_command )
+  {
+    case RELAY_BEGIN:
+      MINITOR_MUTEX_GIVE( access_mutex );
+      // MUTEX GIVE
+
+      access_mutex = NULL;
+
+      if ( d_onion_service_handle_relay_begin( circuit, or_connection, relay_cell ) < 0 )
       {
-        case RELAY_BEGIN:
-          MINITOR_MUTEX_GIVE( access_mutex );
-          // MUTEX GIVE
+        MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
 
-          access_mutex = NULL;
+        goto circuit_rebuild;
+      }
 
-          if ( d_onion_service_handle_relay_begin( circuit, or_connection, relay_cell ) < 0 )
-          {
-            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_BEGIN cell" );
-          }
+      break;
+    case RELAY_DATA:
+      if
+      (
+        d_forward_to_local_connection(
+          relay_cell->circ_id,
+          relay_cell->payload.relay.stream_id,
+          relay_cell->payload.relay.data,
+          relay_cell->payload.relay.length
+        ) < 0
+      )
+      {
+        MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_DATA cell" );
 
-          break;
-        case RELAY_DATA:
-          if
-          (
-            d_forward_to_local_connection(
-              relay_cell->circ_id,
-              relay_cell->payload.relay.stream_id,
-              relay_cell->payload.relay.data,
-              relay_cell->payload.relay.length
-            ) < 0
-          )
-          {
-            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_DATA cell" );
-          }
+        goto circuit_rebuild;
+      }
 
-          break;
-        case RELAY_END:
-          MINITOR_MUTEX_GIVE( access_mutex );
-          // MUTEX GIVE
+      break;
+    case RELAY_END:
+      MINITOR_MUTEX_GIVE( access_mutex );
+      // MUTEX GIVE
 
-          access_mutex = NULL;
+      access_mutex = NULL;
 
-          v_cleanup_local_connection( relay_cell->circ_id, relay_cell->payload.relay.stream_id );
+      v_cleanup_local_connection( relay_cell->circ_id, relay_cell->payload.relay.stream_id );
 
-          break;
-        case RELAY_TRUNCATED:
-          MINITOR_MUTEX_GIVE( access_mutex );
-          // MUTEX GIVE
+      break;
+    case RELAY_TRUNCATED:
+      MINITOR_MUTEX_GIVE( access_mutex );
+      // MUTEX GIVE
 
-          access_mutex = NULL;
+      access_mutex = NULL;
 
-          if ( d_onion_service_handle_relay_truncated( circuit, or_connection, relay_cell ) < 0 )
-          {
-            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_END cell" );
-          }
+      if ( d_onion_service_handle_relay_truncated( circuit, or_connection, relay_cell ) < 0 )
+      {
+        MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_END cell" );
 
-          break;
-        case RELAY_DROP:
-          break;
-        // when an intro request comes in, respond to it
-        case RELAY_COMMAND_INTRODUCE2:
-          MINITOR_MUTEX_GIVE( access_mutex );
-          // MUTEX GIVE
+        goto circuit_rebuild;
+      }
 
-          access_mutex = NULL;
+      break;
+    case RELAY_DROP:
+      break;
+    // when an intro request comes in, respond to it
+    case RELAY_COMMAND_INTRODUCE2:
+      MINITOR_MUTEX_GIVE( access_mutex );
+      // MUTEX GIVE
 
-          if ( d_onion_service_handle_introduce_2( circuit, relay_cell ) < 0 )
-          {
-            MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
-          }
+      access_mutex = NULL;
 
-          break;
-        default:
-#ifdef DEBUG_MINITOR
-          MINITOR_LOG( MINITOR_TAG, "Unequiped to handle relay command %d", relay_cell->payload.relay.relay_command );
-#endif
+      if ( d_onion_service_handle_introduce_2( circuit, relay_cell ) < 0 )
+      {
+        MINITOR_LOG( MINITOR_TAG, "Failed to handle RELAY_COMMAND_INTRODUCE2 cell" );
+
+        goto circuit_rebuild;
       }
 
       break;
     default:
 #ifdef DEBUG_MINITOR
-      MINITOR_LOG( MINITOR_TAG, "Unequiped to handle cell command %d", relay_cell->command );
+      MINITOR_LOG( MINITOR_TAG, "Unequiped to handle relay command %d", relay_cell->payload.relay.relay_command );
 #endif
   }
 
@@ -165,6 +170,13 @@ void v_onion_service_handle_cell( OnionCircuit* circuit, DlConnection* or_connec
     MINITOR_MUTEX_GIVE( access_mutex );
     // MUTEX GIVE
   }
+
+  return;
+
+circuit_rebuild:
+  // this will give the mutex
+  v_circuit_rebuild_or_destroy( circuit, or_connection );
+  // MUTEX GIVE
 }
 
 int d_onion_service_handle_relay_begin( OnionCircuit* rend_circuit, DlConnection* or_connection, Cell* begin_cell )
@@ -299,7 +311,7 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
   time( &now );
 
-  if ( now - intro_circuit->service->rend_timestamp < 20 )
+  if ( now - intro_circuit->service->rend_timestamp < 5 )
   {
 #ifdef DEBUG_MINITOR
     MINITOR_LOG( MINITOR_TAG, "Rate limit in effect, dropping intro" );

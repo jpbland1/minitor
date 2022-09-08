@@ -25,9 +25,14 @@ MinitorMutex port_mutex_create()
 
 static void port_timer_task( MinitorTimer timer )
 {
+  struct timespec ts;
+
+  ts.tv_sec = timer->ms / 1000;
+  ts.tv_nsec = ( timer->ms % 1000 ) * 1000000;
+
   while ( 1 )
   {
-    sleep( timer->ms );
+    nanosleep( &ts, NULL );
 
     timer->function( timer );
 
@@ -57,14 +62,10 @@ MinitorTimer port_timer_create( int ms, bool repeat, void* timer_p, void* functi
     timer
   );
 
-  if ( ret != 0 )
+  if ( ret < 0 )
   {
     free( timer );
     timer = NULL;
-  }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
   }
 
   return timer;
@@ -85,13 +86,9 @@ void port_timer_set_ms( MinitorTimer timer, int ms )
     timer
   );
 
-  if ( ret != 0 )
+  if ( ret < 0 )
   {
     free( timer );
-  }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
   }
 }
 
@@ -257,11 +254,8 @@ bool b_create_core_task( MinitorTask* handle )
   {
     return true;
   }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
-    return false;
-  }
+
+  return false;
 }
 
 bool b_create_connections_task( MinitorTask* handle )
@@ -279,11 +273,8 @@ bool b_create_connections_task( MinitorTask* handle )
   {
     return true;
   }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
-    return false;
-  }
+
+  return false;
 }
 
 bool b_create_poll_task( MinitorTask* handle )
@@ -301,11 +292,27 @@ bool b_create_poll_task( MinitorTask* handle )
   {
     return true;
   }
-  else
+
+  return false;
+}
+
+bool b_create_local_connection_handler( MinitorTask* handle, void* local_connection )
+{
+  int ret;
+
+  ret = pthread_create(
+    handle,
+    NULL,
+    v_handle_local_connection,
+    local_connection
+  );
+
+  if ( ret == 0 )
   {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
-    return false;
+    return true;
   }
+
+  return false;
 }
 
 bool b_create_fetch_task( MinitorTask* handle, void* consensus )
@@ -323,11 +330,8 @@ bool b_create_fetch_task( MinitorTask* handle, void* consensus )
   {
     return true;
   }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
-    return false;
-  }
+
+  return false;
 }
 
 bool b_create_insert_task( MinitorTask* handle, void* consensus )
@@ -345,11 +349,8 @@ bool b_create_insert_task( MinitorTask* handle, void* consensus )
   {
     return true;
   }
-  else
-  {
-    MINITOR_LOG( PORT_TAG, "pthread err: %d", ret );
-    return false;
-  }
+
+  return false;
 }
 
 void port_task_delete( MinitorTask task )

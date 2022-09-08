@@ -28,6 +28,7 @@
 bool b_create_core_task( MinitorTask* handle );
 bool b_create_connections_task( MinitorTask* handle );
 bool b_create_poll_task( MinitorTask* handle );
+bool b_create_local_connection_handler( MinitorTask* handle, void* local_connection );
 bool b_create_fetch_task( MinitorTask* handle, void* consensus );
 bool b_create_insert_task( MinitorTask* handle, void* consensus );
 void port_task_delete( MinitorTask task );

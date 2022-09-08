@@ -37,7 +37,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 const char* CLIENT_TAG = "MINITOR_CLIENT";
 
-OnionClient* px_create_onion_client( const char* onion_address )
+void* px_create_onion_client( const char* onion_address )
 {
   int idx;
   int succ;
@@ -133,31 +133,6 @@ OnionClient* px_create_onion_client( const char* onion_address )
   memcpy( client->onion_pubkey, decoded_address, 32 );
   client->stream_queues[0] = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
 
-  {
-    int i;
-
-    printf( "master pubkey\n" );
-
-    for ( i = 0; i < 32; i++ )
-    {
-      printf( "%.2x ", client->onion_pubkey[i] );
-    }
-
-    printf( "\n" );
-
-    printf( "blinded pubkey\n" );
-
-    for ( i = 0; i < 32; i++ )
-    {
-      printf( "%.2x ", blinded_pubkey[i] );
-    }
-
-    printf( "\n" );
-
-    printf( "time_period %d\n", time_period );
-    printf( "hsdir_interval %d\n", network_consensus.hsdir_interval );
-  }
-
   v_send_init_circuit_external( 3, CIRCUIT_CLIENT_HSDIR, NULL, client, 0, 0, NULL, client->target_relays->head->relay, NULL, NULL );
 
   // wait for the connected or failed response
@@ -179,7 +154,7 @@ OnionClient* px_create_onion_client( const char* onion_address )
 finish:
   wc_Sha3_256_Free( &address_sha3 );
 
-  return client;
+  return (void*)client;
 }
 
 void v_cleanup_client_data( OnionClient* client )
@@ -246,11 +221,12 @@ void v_cleanup_client_data( OnionClient* client )
   wc_ed25519_free( &client->blinded_key );
 }
 
-int d_connect_onion_client( OnionClient* client, uint16_t port )
+int d_connect_onion_client( void* client_p, uint16_t port )
 {
   int i;
   int succ;
   int stream_id;
+  OnionClient* client = client_p;
   Cell* begin_cell;
   DlConnection* or_connection;
   OnionMessage* onion_message;
@@ -277,7 +253,7 @@ int d_connect_onion_client( OnionClient* client, uint16_t port )
 
   if ( or_connection == NULL )
   {
-    return -1;
+    return MINITOR_ERROR;
   }
 
   access_mutex = connection_access_mutex[or_connection->mutex_index];
@@ -314,7 +290,7 @@ int d_connect_onion_client( OnionClient* client, uint16_t port )
 
   if ( succ < 0 )
   {
-    stream_id = -1;
+    stream_id = MINITOR_CLIENT_ERROR;
     goto finish;
   }
 
@@ -322,7 +298,12 @@ int d_connect_onion_client( OnionClient* client, uint16_t port )
 
   if ( onion_message == NULL || onion_message->type != CLIENT_RELAY_CONNECTED )
   {
-    stream_id = -1;
+    stream_id = MINITOR_CLIENT_ERROR;
+
+    if ( onion_message == NULL )
+    {
+      goto finish;
+    }
   }
 
   free( onion_message );
@@ -331,10 +312,11 @@ finish:
   return stream_id;
 }
 
-int d_write_onion_client( OnionClient* client, int stream_id, uint8_t* write_buf, uint32_t length )
+int d_write_onion_client( void* client_p, int stream_id, uint8_t* write_buf, uint32_t length )
 {
   int i = 0;
   int succ;
+  OnionClient* client = client_p;
   Cell* data_cell;
   DlConnection* or_connection;
   MinitorMutex access_mutex = NULL;
@@ -342,6 +324,11 @@ int d_write_onion_client( OnionClient* client, int stream_id, uint8_t* write_buf
   if ( length == 0 )
   {
     return -1;
+  }
+
+  if ( client->stream_queues[stream_id] == NULL )
+  {
+    return MINITOR_STREAM_ERROR;
   }
 
   // MUTEX TAKE
@@ -391,10 +378,11 @@ int d_write_onion_client( OnionClient* client, int stream_id, uint8_t* write_buf
   return i;
 }
 
-int d_read_onion_client( OnionClient* client, int stream_id, uint8_t* read_buf, uint32_t length )
+int d_read_onion_client( void* client_p, int stream_id, uint8_t* read_buf, uint32_t length )
 {
   int i = 0;
   int succ;
+  OnionClient* client = client_p;
   OnionMessage* onion_message;
 
   if ( length == 0 )
@@ -404,7 +392,7 @@ int d_read_onion_client( OnionClient* client, int stream_id, uint8_t* read_buf, 
 
   if ( client->stream_queues[stream_id] == NULL )
   {
-    return -1;
+    return MINITOR_STREAM_ERROR;
   }
 
   if ( client->read_leftover != NULL )
@@ -437,8 +425,20 @@ int d_read_onion_client( OnionClient* client, int stream_id, uint8_t* read_buf, 
 
     if ( onion_message == NULL || onion_message->type != CLIENT_RELAY_DATA || onion_message->length == 0 )
     {
+      if ( onion_message == NULL || onion_message->type != CLIENT_RELAY_END )
+      {
+        // client is dead and must be restarted
+        i = MINITOR_CLIENT_ERROR;
+      }
+
       if ( onion_message != NULL )
       {
+        if ( onion_message->type == CLIENT_RELAY_END )
+        {
+          MINITOR_QUEUE_DELETE( client->stream_queues[stream_id] );
+          client->stream_queues[stream_id] = NULL;
+        }
+
         free( onion_message );
         break;
       }
@@ -473,8 +473,9 @@ int d_read_onion_client( OnionClient* client, int stream_id, uint8_t* read_buf, 
   return i;
 }
 
-int d_close_onion_client_stream( OnionClient* client, int stream_id )
+int d_close_onion_client_stream( void* client_p, int stream_id )
 {
+  OnionClient* client = client_p;
   Cell* end_cell;
   DlConnection* or_connection;
   MinitorMutex access_mutex = NULL;
@@ -527,25 +528,16 @@ int d_close_onion_client_stream( OnionClient* client, int stream_id )
   return 0;
 }
 
-int v_close_onion_client( OnionClient* client )
+void v_close_onion_client( void* client_p )
 {
   int i;
+  OnionClient* client = client_p;
   Cell* close_cell;
   DlConnection* or_connection;
 
-  for ( i = 0; i < 15; i++ )
-  {
-    MINITOR_QUEUE_DELETE( client->stream_queues[i] );
-    client->stream_queues[i] = NULL;
-  }
+  v_cleanup_client_data( client );
 
-  // MUTEX TAKE
-  or_connection = px_get_conn_by_id_and_lock( client->rend_circuit->conn_id );
-
-  v_circuit_remove_destroy( client->rend_circuit, or_connection );
-  // MUTEX GIVE
-
-  free( client );
+  // MUST be freed elsewhere
 }
 
 int d_derive_blinded_pubkey( ed25519_key* blinded_key, uint8_t* master_pubkey, int64_t period_number, int64_t period_length, uint8_t* secret, int secret_length )
@@ -660,19 +652,6 @@ int d_get_hs_desc( OnionCircuit* circuit, DlConnection* or_connection )
     MINITOR_LOG( CLIENT_TAG, "Failed to export blinded public key d_get_hs_desc" );
 
     return -1;
-  }
-
-  {
-    int i;
-
-    printf( "blinded_pub_key" );
-
-    for ( i = 0; i < ED25519_PUB_KEY_SIZE; i++ )
-    {
-      printf( "%.2x", blinded_pub_key[i] );
-    }
-
-    printf( "\n" );
   }
 
   v_base_64_encode( encoded_pub_key, blinded_pub_key, ED25519_PUB_KEY_SIZE );

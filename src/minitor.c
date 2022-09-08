@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 WOLFSSL_CTX* xMinitorWolfSSL_Context;
 MinitorTask core_task;
+int global_init_status = 0;
 
 static void v_timer_trigger_timeout( MinitorTimer x_timer )
 {
@@ -100,6 +101,14 @@ static void v_timer_trigger_hsdir_update( MinitorTimer x_timer )
 // intialize tor
 int d_minitor_INIT()
 {
+  // if we have already inited
+  if ( global_init_status == 1 )
+  {
+    return 0;
+  }
+
+  global_init_status = 1;
+
   circ_id_mutex = MINITOR_MUTEX_CREATE();
   network_consensus_mutex = MINITOR_MUTEX_CREATE();
   crypto_insert_finish = MINITOR_MUTEX_CREATE();
@@ -110,7 +119,6 @@ int d_minitor_INIT()
   core_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   core_internal_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   connections_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
-  poll_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
 
   b_create_core_task( &core_task );
 

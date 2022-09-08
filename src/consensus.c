@@ -1026,6 +1026,17 @@ static int d_download_consensus()
   bool insert_finished = false;
   MinitorTask fetch_handles[2];
   MinitorTask crypto_insert_handle;
+  struct stat st;
+
+  if ( stat( FILESYSTEM_PREFIX, &st ) == -1 )
+  {
+    if ( mkdir( FILESYSTEM_PREFIX, 0755 ) < 0 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to create %s for onion service, errno: %d", FILESYSTEM_PREFIX, errno );
+
+      return -1;
+    }
+  }
 
 #ifndef MINITOR_CHUTNEY
   // check if our current consensus is still fresh, no need to re-download
