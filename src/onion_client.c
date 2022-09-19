@@ -427,8 +427,11 @@ int d_read_onion_client( void* client_p, int stream_id, uint8_t* read_buf, uint3
     {
       if ( onion_message == NULL || onion_message->type != CLIENT_RELAY_END )
       {
-        // client is dead and must be restarted
-        i = MINITOR_CLIENT_ERROR;
+        if ( i == 0 )
+        {
+          // client is dead and must be restarted
+          i = MINITOR_CLIENT_ERROR;
+        }
       }
 
       if ( onion_message != NULL )
@@ -770,8 +773,6 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
         if ( content_length_found == strlen( content_length_string ) )
         {
           circuit->client->hsdesc_content_length = atoi( cell->payload.relay.data + i + 1 );
-
-          MINITOR_LOG( CLIENT_TAG, "content length %d", circuit->client->hsdesc_content_length );
         }
       }
       else if ( cell->payload.relay.data[i] == http_header_finish[circuit->client->hsdesc_header_finish_found] )
@@ -795,14 +796,9 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
       memcpy( circuit->client->hsdesc + circuit->client->hsdesc_size, cell->payload.relay.data + i, cell->payload.relay.length - i );
       circuit->client->hsdesc_size += cell->payload.relay.length - i;
 
-      MINITOR_LOG( CLIENT_TAG, "relay length %d", cell->payload.relay.length );
-
       break;
     }
   }
-
-  MINITOR_LOG( CLIENT_TAG, "hsdesc_size %d", circuit->client->hsdesc_size );
-  MINITOR_LOG( CLIENT_TAG, "need %d", circuit->client->hsdesc_content_length + HS_DESC_SIG_PREFIX_LENGTH );
 
   if ( circuit->client->hsdesc_size == circuit->client->hsdesc_content_length + HS_DESC_SIG_PREFIX_LENGTH )
   {
@@ -1483,17 +1479,6 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
                     if ( enc_key_found == strlen( enc_key_string ) )
                     {
                       d_base_64_decode( enc_pub_key, second_layer + i + 1, 43 );
-
-                      {
-                        int g;
-
-                        MINITOR_LOG( CLIENT_TAG, "%.*s", 43, second_layer + i + 1 );
-
-                        for ( g = 0; g < 32; g++ )
-                        {
-                          MINITOR_LOG( CLIENT_TAG, "%.2x ", enc_pub_key[g] );
-                        }
-                      }
 
                       if ( wc_curve25519_import_public_ex( enc_pub_key, CURVE25519_KEYSIZE, &( circuit->client->intro_cryptos[circuit->client->num_intro_relays]->encrypt_key ), EC25519_LITTLE_ENDIAN ) < 0 )
                       {

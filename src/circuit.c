@@ -866,15 +866,12 @@ int d_start_v3_handshake( DlConnection* or_connection )
   int initiator_rsa_identity_cert_der_size;
   unsigned char* initiator_rsa_auth_cert_der = malloc( sizeof( unsigned char ) * 2048 );
   int initiator_rsa_auth_cert_der_size;
-  WC_RNG rng;
 
   or_connection->responder_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 2048 );
   or_connection->initiator_rsa_identity_key_der = malloc( sizeof( unsigned char ) * 2048 );
 
   wc_InitSha256( &or_connection->initiator_sha );
   wc_InitSha256( &or_connection->responder_sha );
-
-  wc_InitRng( &rng );
 
   versions_cell = malloc( LEGACY_CIRCID_LEN + 3 + 4 );
 
@@ -902,7 +899,7 @@ int d_start_v3_handshake( DlConnection* or_connection )
   }
 
   // generate certs for certs cell
-  if ( d_generate_certs( &or_connection->initiator_rsa_identity_key_der_size, or_connection->initiator_rsa_identity_key_der, initiator_rsa_identity_cert_der, &initiator_rsa_identity_cert_der_size, initiator_rsa_auth_cert_der, &initiator_rsa_auth_cert_der_size, &or_connection->initiator_rsa_auth_key, &rng ) < 0 )
+  if ( d_generate_certs( &or_connection->initiator_rsa_identity_key_der_size, or_connection->initiator_rsa_identity_key_der, initiator_rsa_identity_cert_der, &initiator_rsa_identity_cert_der_size, initiator_rsa_auth_cert_der, &initiator_rsa_auth_cert_der_size, &or_connection->initiator_rsa_auth_key ) < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to generate rsa certificates" );
 
@@ -944,8 +941,6 @@ int d_start_v3_handshake( DlConnection* or_connection )
     goto fail_certs;
   }
 
-  wc_FreeRng( &rng );
-
   free( initiator_rsa_identity_cert_der );
   free( initiator_rsa_auth_cert_der );
 
@@ -957,8 +952,6 @@ int d_start_v3_handshake( DlConnection* or_connection )
 fail_certs:
   wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
 fail:
-  wc_FreeRng( &rng );
-
   free( initiator_rsa_identity_cert_der );
   free( initiator_rsa_auth_cert_der );
 
@@ -1497,7 +1490,7 @@ finish:
   return ret;
 }
 
-int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng )
+int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key )
 {
   struct stat st;
   int fd;
@@ -1510,6 +1503,9 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   Cert initiator_rsa_identity_cert;
   Cert initiator_rsa_auth_cert;
   WOLFSSL_X509* certificate = NULL;
+  WC_RNG rng[1];
+
+  wc_InitRng( rng );
 
   // init the rsa keys
   wc_InitRsaKey( &initiator_rsa_identity_key, NULL );
@@ -1724,12 +1720,14 @@ int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* i
   *initiator_rsa_auth_cert_der_size = wolf_succ;
 
   wc_FreeRsaKey( &initiator_rsa_identity_key );
+  wc_FreeRng( rng );
 
   return 0;
 
 fail:
   wc_FreeRsaKey( &initiator_rsa_identity_key );
   wc_FreeRsaKey( initiator_rsa_auth_key );
+  wc_FreeRng( rng );
 
   return -1;
 }

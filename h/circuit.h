@@ -44,7 +44,7 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
 int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key );
 int d_router_handshake( WOLFSSL* ssl );
 int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* responder_rsa_identity_key_der_size, unsigned char* responder_rsa_identity_key_der );
-int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key, WC_RNG* rng );
+int d_generate_certs( int* initiator_rsa_identity_key_der_size, unsigned char* initiator_rsa_identity_key_der, unsigned char* initiator_rsa_identity_cert_der, int* initiator_rsa_identity_cert_der_size, unsigned char* initiator_rsa_auth_cert_der, int* initiator_rsa_auth_cert_der_size, RsaKey* initiator_rsa_auth_key );
 void v_destroy_onion_circuit( int circ_id );
 int d_start_v3_handshake( DlConnection* or_connection );
 void v_process_versions( DlConnection* or_connection, CellShortVariable* versions_cell, int length );
