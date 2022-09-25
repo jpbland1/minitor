@@ -19,7 +19,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../include/config.h"
 #include "../h/port.h"
 
-#include "wolfssl/options.h"
 #include "wolfssl/wolfcrypt/hash.h"
 #include "wolfssl/wolfcrypt/fe_operations.h"
 #include "../h/custom_sc.h"
@@ -39,7 +38,7 @@ const char* CLIENT_TAG = "MINITOR_CLIENT";
 
 void* px_create_onion_client( const char* onion_address )
 {
-  int idx;
+  uint32_t idx;
   int succ;
   uint8_t blinded_pubkey[ED25519_PUB_KEY_SIZE];
   uint8_t decoded_address[35];
@@ -225,7 +224,7 @@ int d_connect_onion_client( void* client_p, uint16_t port )
 {
   int i;
   int succ;
-  int stream_id;
+  int stream_id = 0;
   OnionClient* client = client_p;
   Cell* begin_cell;
   DlConnection* or_connection;
@@ -271,15 +270,15 @@ int d_connect_onion_client( void* client_p, uint16_t port )
   MINITOR_LOG( CLIENT_TAG, "stream_id: %d", begin_cell->payload.relay.stream_id );
 
   // set the addrport
-  sprintf( begin_cell->payload.relay.data, ":%d", port );
+  sprintf( (char*)begin_cell->payload.relay.data, ":%d", port );
 
   // set the flags to 0
-  begin_cell->payload.relay.data[strlen( begin_cell->payload.relay.data ) + 1] = 0;
-  begin_cell->payload.relay.data[strlen( begin_cell->payload.relay.data ) + 2] = 0;
-  begin_cell->payload.relay.data[strlen( begin_cell->payload.relay.data ) + 3] = 0;
-  begin_cell->payload.relay.data[strlen( begin_cell->payload.relay.data ) + 4] = 0;
+  begin_cell->payload.relay.data[strlen( (char*)begin_cell->payload.relay.data ) + 1] = 0;
+  begin_cell->payload.relay.data[strlen( (char*)begin_cell->payload.relay.data ) + 2] = 0;
+  begin_cell->payload.relay.data[strlen( (char*)begin_cell->payload.relay.data ) + 3] = 0;
+  begin_cell->payload.relay.data[strlen( (char*)begin_cell->payload.relay.data ) + 4] = 0;
 
-  begin_cell->payload.relay.length = strlen( begin_cell->payload.relay.data ) + 1 + 4;
+  begin_cell->payload.relay.length = strlen( (char*)begin_cell->payload.relay.data ) + 1 + 4;
 
   begin_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + begin_cell->payload.relay.length;
 
@@ -644,7 +643,7 @@ int d_get_hs_desc( OnionCircuit* circuit, DlConnection* or_connection )
   uint8_t blinded_pub_key[ED25519_PUB_KEY_SIZE];
   // 32 * 4 / 3 = 43, 44 for the NULL terminator
   char encoded_pub_key[44];
-  int idx;
+  uint32_t idx;
   Cell* data_cell;
 
   idx = ED25519_PUB_KEY_SIZE;
@@ -701,12 +700,12 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 {
   int i;
   int j;
-  int idx;
+  uint32_t idx;
   int succ;
   int wolf_succ;
-  uint8_t* first_layer;
-  uint8_t* first_layer_p;
-  int first_layer_length;
+  uint8_t* first_layer = NULL;
+  uint8_t* first_layer_p = NULL;
+  int first_layer_length = 0;
   time_t now;
   const char* http_header_finish = "\r\n\r\n";
   const char* http_ok = "HTTP/1.0 200 OK\r\n";
@@ -721,7 +720,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
   int signing_key_cert_found = 0;
   const char* end_key_cert_string = "-----END ED25519 CERT-----\n";
   int end_key_cert_found = 0;
-  int cert_start;
+  int cert_start = 0;
   const char* revision_counter_string = "revision-counter ";
   int revision_counter_found = 0;
   uint64_t revision_counter = 0;
@@ -736,9 +735,9 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
   uint8_t blinded_pubkey[ED25519_PUB_KEY_SIZE];
   ed25519_key descriptor_signing_key;
   uint8_t signature[64];
-  int unpacked_crosscert_length;
-  TorCrosscert* unpacked_crosscert;
-  TorCrosscertExtension* extension;
+  int unpacked_crosscert_length = 0;
+  TorCrosscert* unpacked_crosscert = NULL;
+  TorCrosscertExtension* extension = NULL;
   int alloced_relays = 0;
 
   for ( i = 0; i < cell->payload.relay.length; i++ )
@@ -772,7 +771,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
         if ( content_length_found == strlen( content_length_string ) )
         {
-          circuit->client->hsdesc_content_length = atoi( cell->payload.relay.data + i + 1 );
+          circuit->client->hsdesc_content_length = atoi( (char*)( cell->payload.relay.data + i + 1 ) );
         }
       }
       else if ( cell->payload.relay.data[i] == http_header_finish[circuit->client->hsdesc_header_finish_found] )
@@ -789,7 +788,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
       if ( circuit->client->hsdesc_size == 0 )
       {
         circuit->client->hsdesc = malloc( circuit->client->hsdesc_content_length + HS_DESC_SIG_PREFIX_LENGTH );
-        strcpy( circuit->client->hsdesc, HS_DESC_SIG_PREFIX );
+        strcpy( (char*)circuit->client->hsdesc, HS_DESC_SIG_PREFIX );
         circuit->client->hsdesc_size = HS_DESC_SIG_PREFIX_LENGTH;
       }
 
@@ -830,7 +829,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
         if ( lifetime_found == strlen( lifetime_string ) )
         {
-          desc_lifetime = atoi( circuit->client->hsdesc + i + 1 ) * 60;
+          desc_lifetime = atoi( (char*)( circuit->client->hsdesc + i + 1 ) ) * 60;
         }
       }
       else if ( signing_key_cert_found < strlen( signing_key_cert_string ) )
@@ -872,7 +871,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
           unpacked_crosscert = malloc( unpacked_crosscert_length );
 
           // adding 1 makes it the length, not the end positon
-          d_base_64_decode( unpacked_crosscert, circuit->client->hsdesc + cert_start, i - cert_start - strlen( end_key_cert_string ) + 1 );
+          d_base_64_decode( unpacked_crosscert, (char*)( circuit->client->hsdesc + cert_start ), i - cert_start - strlen( end_key_cert_string ) + 1 );
 
           if ( unpacked_crosscert->version != 1 )
           {
@@ -973,7 +972,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
         if ( revision_counter_found == strlen( revision_counter_string ) )
         {
           //revision_counter = atoi( circuit->client->hsdesc + i + 1 );
-          revision_counter = atol( circuit->client->hsdesc + i + 1 );
+          revision_counter = atol( (char*)( circuit->client->hsdesc + i + 1 ) );
         }
       }
       else if ( superencrypted_found < strlen( superencrypted_string ) )
@@ -1029,7 +1028,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
         if ( signature_found == strlen( signature_string ) )
         {
-          d_base_64_decode( signature, circuit->client->hsdesc + i + 1, 86 );
+          d_base_64_decode( signature, (char*)( circuit->client->hsdesc + i + 1 ), 86 );
 
           // proves that this hsdesc was signed by the descriptor signing key
           wolf_succ = wc_ed25519_verify_msg( signature, 64, circuit->client->hsdesc, i - strlen( signature_string ) + 1, &succ, &descriptor_signing_key );
@@ -1043,7 +1042,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
           first_layer_p = malloc( first_layer_length );
 
-          first_layer_length = d_base_64_decode( first_layer_p, circuit->client->hsdesc + superencrypted_start, superencrypted_end - superencrypted_start );
+          first_layer_length = d_base_64_decode( first_layer_p, (char*)( circuit->client->hsdesc + superencrypted_start ), superencrypted_end - superencrypted_start );
 
           free( circuit->client->hsdesc );
           circuit->client->hsdesc = NULL;
@@ -1063,7 +1062,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
           if ( succ < 0 )
           {
-            MINITOR_LOG( CLIENT_TAG, "Failed to decrypt first_layer", wolf_succ );
+            MINITOR_LOG( CLIENT_TAG, "Failed to decrypt first_layer %d", wolf_succ );
 
             free( first_layer_p );
             goto fail;
@@ -1121,7 +1120,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                 second_layer_p = malloc( second_layer_length );
 
-                second_layer_length = d_base_64_decode( second_layer_p, first_layer + encrypted_start, i - strlen( end_message_string ) + 1 - encrypted_start );
+                second_layer_length = d_base_64_decode( second_layer_p, (char*)( first_layer + encrypted_start ), i - strlen( end_message_string ) + 1 - encrypted_start );
 
                 free( first_layer_p );
 
@@ -1140,7 +1139,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                 if ( succ < 0 )
                 {
-                  MINITOR_LOG( CLIENT_TAG, "Failed to decrypt second_layer", wolf_succ );
+                  MINITOR_LOG( CLIENT_TAG, "Failed to decrypt second_layer %d", wolf_succ );
 
                   free( second_layer_p );
                   goto fail;
@@ -1166,7 +1165,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
                 int link_specifiers_length;
                 int link_specifiers_start = 0;
 
-                uint8_t* link_specifiers_p;
+                uint8_t* link_specifiers_p = NULL;
                 LinkSpecifier* link_specifiers;
 
                 bool ipv4_spec_found = false;
@@ -1227,7 +1226,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                           link_specifiers_p = malloc( link_specifiers_length );
 
-                          d_base_64_decode( link_specifiers_p, second_layer + link_specifiers_start, i - link_specifiers_start );
+                          d_base_64_decode( link_specifiers_p, (char*)( second_layer + link_specifiers_start ), i - link_specifiers_start );
 
                           break;
                         }
@@ -1318,7 +1317,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                     if ( onion_key_found == strlen( onion_key_string ) )
                     {
-                      d_base_64_decode( circuit->client->intro_relays[circuit->client->num_intro_relays]->ntor_onion_key, second_layer + i + 1, 43 );
+                      d_base_64_decode( circuit->client->intro_relays[circuit->client->num_intro_relays]->ntor_onion_key, (char*)( second_layer + i + 1 ), 43 );
                     }
                   }
                   else if ( auth_key_found < strlen( auth_key_string ) )
@@ -1360,7 +1359,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                       unpacked_crosscert = malloc( unpacked_crosscert_length );
 
-                      d_base_64_decode( unpacked_crosscert, second_layer + auth_key_start, i - auth_key_start - strlen( end_key_cert_string ) + 1 );
+                      d_base_64_decode( unpacked_crosscert, (char*)( second_layer + auth_key_start ), i - auth_key_start - strlen( end_key_cert_string ) + 1 );
 
                       if ( unpacked_crosscert->version != 1 )
                       {
@@ -1478,7 +1477,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
 
                     if ( enc_key_found == strlen( enc_key_string ) )
                     {
-                      d_base_64_decode( enc_pub_key, second_layer + i + 1, 43 );
+                      d_base_64_decode( enc_pub_key, (char*)( second_layer + i + 1 ), 43 );
 
                       if ( wc_curve25519_import_public_ex( enc_pub_key, CURVE25519_KEYSIZE, &( circuit->client->intro_cryptos[circuit->client->num_intro_relays]->encrypt_key ), EC25519_LITTLE_ENDIAN ) < 0 )
                       {
@@ -1530,7 +1529,7 @@ int d_parse_hsdesc( OnionCircuit* circuit, Cell* cell )
                       unpacked_crosscert = malloc( unpacked_crosscert_length );
 
                       // adding 1 makes it the length, not the end positon
-                      d_base_64_decode( (uint8_t*)unpacked_crosscert, second_layer + enc_cert_start, i - enc_cert_start - strlen( end_key_cert_string ) + 1 );
+                      d_base_64_decode( (uint8_t*)unpacked_crosscert, (char*)( second_layer + enc_cert_start ), i - enc_cert_start - strlen( end_key_cert_string ) + 1 );
 
                       if ( unpacked_crosscert->version != 1 )
                       {
@@ -1859,7 +1858,7 @@ int d_client_send_intro( OnionCircuit* circuit, DlConnection* or_connection )
   wc_Sha3 mac_sha3;
   WC_RNG rng;
   uint8_t* mac;
-  int idx;
+  uint32_t idx;
 
   wc_InitRng( &rng );
   wc_curve25519_init( &circuit->client->client_handshake_key );
@@ -2132,6 +2131,8 @@ int d_client_relay_data( OnionCircuit* circuit, Cell* data_cell )
   memcpy( onion_message->data, data_cell->payload.relay.data, onion_message->length );
 
   MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[data_cell->payload.relay.stream_id], (void*)(&onion_message) );
+
+  return 0;
 }
 
 int d_client_relay_end( OnionCircuit* circuit, Cell* end_cell )
@@ -2149,6 +2150,8 @@ int d_client_relay_end( OnionCircuit* circuit, Cell* end_cell )
   onion_message->type = CLIENT_RELAY_END;
 
   MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[end_cell->payload.relay.stream_id], (void*)(&onion_message) );
+
+  return 0;
 }
 
 int d_client_relay_connected( OnionCircuit* circuit, Cell* connected_cell )
@@ -2166,6 +2169,8 @@ int d_client_relay_connected( OnionCircuit* circuit, Cell* connected_cell )
   onion_message->type = CLIENT_RELAY_CONNECTED;
 
   MINITOR_ENQUEUE_BLOCKING( circuit->client->stream_queues[connected_cell->payload.relay.stream_id], (void*)(&onion_message) );
+
+  return 0;
 }
 
 void v_onion_client_handle_cell( OnionCircuit* circuit, DlConnection* or_connection, Cell* cell )

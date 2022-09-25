@@ -19,14 +19,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdlib.h>
 #include <time.h>
 
-#include "wolfssl/options.h"
+#include "../h/port.h"
 
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/sha3.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 
 #include "../include/config.h"
-#include "../h/port.h"
 
 #include "../h/constants.h"
 #include "../h/consensus.h"
@@ -767,7 +766,7 @@ static int d_parse_date_string( char* date_string )
   tmp_time.tm_min = atoi( date_string + 14 );
   tmp_time.tm_sec = atoi( date_string + 17 );
 
-  return timegm( &tmp_time );
+  return MINITOR_TIMEGM( &tmp_time );
 }
 
 static int d_parse_line( int fd, char* line, int limit )
@@ -849,10 +848,12 @@ static int d_parse_line_to_consensus( NetworkConsensus* consensus, char* line )
   else if ( consensus->valid_after == 0 && memcmp( line, "valid-after ", strlen( "valid-after " ) ) == 0 )
   {
     consensus->valid_after = d_parse_date_string( line + strlen( "valid-after " ) );
+    MINITOR_LOG( MINITOR_TAG, "valid_after %ld %s", consensus->valid_after, line + strlen( "valid-after " ) );
   }
   else if ( consensus->fresh_until == 0 && memcmp( line, "fresh-until ", strlen( "fresh-until " ) ) == 0 )
   {
     consensus->fresh_until = d_parse_date_string( line + strlen( "fresh-until " ) );
+    MINITOR_LOG( MINITOR_TAG, "fresh_until %ld %s", consensus->fresh_until, line + strlen( "fresh-until " ) );
   }
   else if ( consensus->valid_until == 0 && memcmp( line, "valid-until ", strlen( "valid-until " ) ) == 0 )
   {

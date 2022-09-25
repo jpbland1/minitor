@@ -19,7 +19,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../include/config.h"
 #include "../h/port.h"
 
-#include "wolfssl/options.h"
 #include "wolfssl/wolfcrypt/hash.h"
 #include "wolfssl/wolfcrypt/fe_operations.h"
 #include "../h/custom_sc.h"
@@ -529,7 +528,6 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
 
     if ( or_connection == NULL || d_router_extend2( rend_circuit, or_connection, rend_circuit->relay_list.built_length ) < 0 )
     {
-
       wc_Sha3_256_Free( &hs_crypto->hs_running_sha_forward );
       wc_Sha3_256_Free( &hs_crypto->hs_running_sha_backward );
       wc_AesFree( &hs_crypto->hs_aes_forward );
@@ -2055,10 +2053,10 @@ void v_ed_pubkey_from_curve_pubkey( unsigned char* output, const unsigned char* 
   unsigned char input_plus_1[32];
   unsigned char inverse_input_plus_1[32];
 
-  fe_sub( input_minus_1, input, one );
-  fe_add( input_plus_1, input, one );
-  fe_invert( inverse_input_plus_1, input_plus_1 );
-  fe_mul( output, input_minus_1, inverse_input_plus_1 );
+  MINITOR_FE_SUB( input_minus_1, input, one );
+  MINITOR_FE_ADD( input_plus_1, input, one );
+  MINITOR_FE_INVERT( inverse_input_plus_1, input_plus_1 );
+  MINITOR_FE_MUL( output, input_minus_1, inverse_input_plus_1 );
 
   output[31] = (!!sign_bit) << 7;
 }

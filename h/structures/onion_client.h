@@ -19,12 +19,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_ONION_CLIENT_H
 #define MINITOR_STRUCTURES_ONION_CLIENT_H
 
-#include "wolfssl/options.h"
 #include "wolfssl/wolfcrypt/settings.h"
 
 #include "wolfssl/wolfcrypt/ed25519.h"
 #include "wolfssl/wolfcrypt/curve25519.h"
-#include "wolfssl/wolfcrypt/sha3.h"
+//#include "wolfssl/wolfcrypt/sha3.h"
 
 #include "./consensus.h"
 #include "./circuit.h"

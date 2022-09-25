@@ -19,8 +19,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CONSENSUS_H
 #define MINITOR_STRUCTURES_CONSENSUS_H
 
-#include "wolfssl/options.h"
-
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/aes.h"
 
@@ -47,6 +45,7 @@ typedef struct OnionRelay {
   unsigned char identity[ID_LENGTH];
   unsigned char digest[ID_LENGTH];
   unsigned char master_key[H_LENGTH];
+  unsigned char identity_pubkey[H_LENGTH];
   unsigned char ntor_onion_key[H_LENGTH];
   unsigned int address;
   uint16_t or_port;

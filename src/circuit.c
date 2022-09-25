@@ -21,10 +21,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../include/config.h"
 #include "../h/port.h"
 
-#include "wolfssl/options.h"
 #include "wolfssl/wolfcrypt/settings.h"
 
 #include "wolfssl/ssl.h"
+#include "wolfssl/openssl/evp.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 #include "wolfssl/wolfcrypt/hmac.h"
 #include "wolfssl/wolfcrypt/error-crypt.h"
@@ -482,14 +482,32 @@ int d_router_extend2( OnionCircuit* circuit, DlConnection* or_connection, int no
   create2->handshake_length = ID_LENGTH + H_LENGTH + G_LENGTH;
 
   // construct our side of the handshake
-  if ( d_ntor_handshake_start( create2->handshake_data, target_relay->relay, &circuit->create2_handshake_key ) < 0 )
+  // use ntorv3
+  /*
+  if ( target_relay->relay->ntorv3 == true )
   {
-    MINITOR_LOG( MINITOR_TAG, "Failed to compute handshake_data for extend" );
+    if ( d_ntorv3_handshake_start( create2->handshake_data, target_relay->relay, &circuit->create2_handshake_key ) < 0 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute handshake_data for extend" );
 
-    free( extend2_cell );
+      free( extend2_cell );
 
-    goto fail;
+      goto fail;
+    }
   }
+  // use ntorv2
+  else
+  {
+  */
+    if ( d_ntor_handshake_start( create2->handshake_data, target_relay->relay, &circuit->create2_handshake_key ) < 0 )
+    {
+      MINITOR_LOG( MINITOR_TAG, "Failed to compute handshake_data for extend" );
+
+      free( extend2_cell );
+
+      goto fail;
+    }
+  //}
 
   // send the EXTEND2 cell
   if ( d_send_relay_cell_and_free( or_connection, extend2_cell, &circuit->relay_list, NULL ) < 0 )
@@ -704,8 +722,14 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
 
   working_secret_input += 32;
 
+  // TODO it seems this should be master key and not ID, torspec doesn't define ID and it is not 20 bytes in the mainline tor
   memcpy( working_secret_input, db_relay->relay->identity, ID_LENGTH );
   working_secret_input += ID_LENGTH;
+
+  /*
+  memcpy( working_secret_input, db_relay->relay->master_key, H_LENGTH );
+  working_secret_input += H_LENGTH;
+  */
 
   memcpy( working_secret_input, db_relay->relay->ntor_onion_key, H_LENGTH );
   working_secret_input += H_LENGTH;
@@ -735,8 +759,14 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
 
   working_auth_input += WC_SHA256_DIGEST_SIZE;
 
+  // TODO it seems this should also be master key and not ID
   memcpy( working_auth_input, db_relay->relay->identity, ID_LENGTH );
   working_auth_input += ID_LENGTH;
+
+  /*
+  memcpy( working_auth_input, db_relay->relay->master_key, H_LENGTH );
+  working_auth_input += H_LENGTH;
+  */
 
   memcpy( working_auth_input, db_relay->relay->ntor_onion_key, H_LENGTH );
   working_auth_input += H_LENGTH;
@@ -855,6 +885,27 @@ fail:
   return -1;
 }
 
+int d_ntorv3_handshake_start( unsigned char* handshake_data, OnionRelay* relay, curve25519_key* key )
+{
+  int wolf_succ;
+  unsigned int idx;
+
+  memcpy( handshake_data, relay->identity, ID_LENGTH );
+  memcpy( handshake_data + ID_LENGTH, relay->ntor_onion_key, H_LENGTH );
+
+  idx = 32;
+  wolf_succ = wc_curve25519_export_public_ex( key, handshake_data + ID_LENGTH + H_LENGTH, &idx, EC25519_LITTLE_ENDIAN );
+
+  if ( wolf_succ != 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to export curve25519_key into handshake_data, error code: %d", wolf_succ );
+
+    return -1;
+  }
+
+  return 0;
+}
+
 int d_start_v3_handshake( DlConnection* or_connection )
 {
   int i;
@@ -873,21 +924,25 @@ int d_start_v3_handshake( DlConnection* or_connection )
   wc_InitSha256( &or_connection->initiator_sha );
   wc_InitSha256( &or_connection->responder_sha );
 
-  versions_cell = malloc( LEGACY_CIRCID_LEN + 3 + 4 );
+  versions_cell = malloc( LEGACY_CIRCID_LEN + 3 + 2 );
+  //versions_cell = malloc( LEGACY_CIRCID_LEN + 3 + 4 );
 
   // make a versions cell
   versions_cell->circ_id = 0;
   versions_cell->command = VERSIONS;
-  versions_cell->length = 4;
-  versions_cell->payload.versions[0] = 3;
-  versions_cell->payload.versions[1] = 4;
+  versions_cell->length = 2;
+  //versions_cell->length = 4;
+  //versions_cell->payload.versions[0] = 3;
+  versions_cell->payload.versions[0] = 4;
 
   v_networkize_variable_short_cell( versions_cell );
 
-  wc_Sha256Update( &or_connection->initiator_sha, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4 );
+  //wc_Sha256Update( &or_connection->initiator_sha, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4 );
+  wc_Sha256Update( &or_connection->initiator_sha, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 2 );
 
   // send the versions cell
-  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4, 0 );
+  //wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 4, 0 );
+  wolf_succ = wolfSSL_send( or_connection->ssl, (uint8_t*)versions_cell, LEGACY_CIRCID_LEN + 3 + 2, 0 );
 
   free( versions_cell );
 
@@ -969,6 +1024,15 @@ void v_process_versions( DlConnection* or_connection, CellShortVariable* version
 {
   wc_Sha256Update( &or_connection->responder_sha, (uint8_t*)versions_cell, length );
 
+  {
+    int i;
+
+    for ( i = 0; i < ntohs( versions_cell->length ) / 2; i++ )
+    {
+      MINITOR_LOG( MINITOR_TAG, "version supported %d", ntohs( versions_cell->payload.versions[i] ) );
+    }
+  }
+
   // TODO check that our versions are compatable, not neccessary in chutney
 }
 
@@ -1006,13 +1070,14 @@ int d_process_certs( DlConnection* or_connection, CellVariable* certs_cell, int 
 
 fail:
   // I need to free this in the fail states of the other steps of the handshake
-  wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
+  // TODO verify no leak, let the connections daemon clean these up
+  //wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
 
-  free( or_connection->responder_rsa_identity_key_der );
-  free( or_connection->initiator_rsa_identity_key_der );
+  //free( or_connection->responder_rsa_identity_key_der );
+  //free( or_connection->initiator_rsa_identity_key_der );
 
-  wc_Sha256Free( &or_connection->responder_sha );
-  wc_Sha256Free( &or_connection->initiator_sha );
+  //wc_Sha256Free( &or_connection->responder_sha );
+  //wc_Sha256Free( &or_connection->initiator_sha );
 
   return -1;
 }
@@ -1142,15 +1207,18 @@ finish:
   wc_Sha256Free( &reusable_sha );
 
   // I need to free this in the fail states of the other steps of the handshake
-  free( or_connection->responder_rsa_identity_key_der );
-  free( or_connection->initiator_rsa_identity_key_der );
+  if ( ret == 0 )
+  {
+    free( or_connection->responder_rsa_identity_key_der );
+    free( or_connection->initiator_rsa_identity_key_der );
 
-  wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
+    wc_FreeRsaKey( &or_connection->initiator_rsa_auth_key );
 
-  wc_Sha256Free( &or_connection->responder_sha );
-  wc_Sha256Free( &or_connection->initiator_sha );
+    wc_Sha256Free( &or_connection->responder_sha );
+    wc_Sha256Free( &or_connection->initiator_sha );
 
-  wc_FreeRng( &rng );
+    wc_FreeRng( &rng );
+  }
 
   return ret;
 }
@@ -1386,7 +1454,7 @@ int d_verify_certs( CellVariable* certs_cell, WOLFSSL_X509* peer_cert, int* resp
       tmp_pubkey = wolfSSL_X509_get_pubkey( certificate );
 
       idx = 0;
-      wolf_succ = wc_RsaPublicKeyDecode( tmp_pubkey->pkey.ptr, &idx, &responder_rsa_identity_key, tmp_pubkey->pkey_sz );
+      wolf_succ = wc_RsaPublicKeyDecode( (uint8_t*)tmp_pubkey->pkey.ptr, &idx, &responder_rsa_identity_key, tmp_pubkey->pkey_sz );
 
       if ( wolf_succ < 0 )
       {

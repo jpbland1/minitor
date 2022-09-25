@@ -19,10 +19,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CIRCUIT_H
 #define MINITOR_STRUCTURES_CIRCUIT_H
 
-#include "wolfssl/options.h"
+#include "../port.h"
+
 #include "wolfssl/wolfcrypt/settings.h"
 
 #include "wolfssl/ssl.h"
+#define BAD_REDECLARE_FIX
 #include "wolfssl/wolfcrypt/ed25519.h"
 #include "wolfssl/wolfcrypt/curve25519.h"
 #include "wolfssl/wolfcrypt/sha3.h"

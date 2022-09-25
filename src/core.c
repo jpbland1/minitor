@@ -433,15 +433,15 @@ static void v_handle_tor_cell( uint32_t conn_id )
 {
   int succ;
   int recv_index;
-  Cell* cell;
-  DlConnection* or_connection;
-  OnionCircuit* working_circuit;
-  OnionCircuit* tmp_circuit;
-  OnionService* working_service;
-  OnionMessage* onion_message;
-  OnionRelay* target_relay;
-  OnionRelay* start_relay;
-  DoublyLinkedOnionRelay* dl_relay;
+  Cell* cell = NULL;
+  DlConnection* or_connection = NULL;
+  OnionCircuit* working_circuit = NULL;
+  OnionCircuit* tmp_circuit = NULL;
+  OnionService* working_service = NULL;
+  OnionMessage* onion_message = NULL;
+  OnionRelay* target_relay = NULL;
+  OnionRelay* start_relay = NULL;
+  DoublyLinkedOnionRelay* dl_relay = NULL;
   MinitorMutex access_mutex = NULL;
 
   // MUTEX TAKE
@@ -1340,6 +1340,7 @@ static void v_init_service( OnionService* service )
     return;
   }
 
+  /*
   i = d_get_standby_count();
 
   for ( ; i < 2; i++ )
@@ -1356,6 +1357,7 @@ static void v_init_service( OnionService* service )
 
     MINITOR_ENQUEUE_BLOCKING( core_internal_queue, (void*)(&onion_message) );
   }
+  */
 
   for ( i = 0; i < 3; i++ )
   {
@@ -1571,6 +1573,8 @@ void v_handle_conn_handshake( uint32_t conn_id, uint32_t length )
     return;
   }
 
+  MINITOR_LOG( CORE_TAG, "handshake status %d", or_connection->status );
+
   switch ( or_connection->status )
   {
     case CONNECTION_WANT_VERSIONS:
@@ -1686,8 +1690,8 @@ void v_minitor_daemon( void* pv_parameters )
       MINITOR_TASK_DELETE( NULL );
     }
 
-    //MINITOR_LOG( CORE_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
-    MINITOR_LOG( CORE_TAG, "command: %d", onion_message->type );
+    MINITOR_LOG( CORE_TAG, "Heap check %d, command: %d", xPortGetFreeHeapSize(), onion_message->type );
+    //MINITOR_LOG( CORE_TAG, "command: %d", onion_message->type );
 
     switch ( onion_message->type )
     {

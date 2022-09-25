@@ -19,8 +19,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef MINITOR_STRUCTURES_CONNECTIONS_H
 #define MINITOR_STRUCTURES_CONNECTIONS_H
 
-#include "wolfssl/options.h"
-
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/rsa.h"
 

@@ -19,14 +19,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdlib.h>
 #include <string.h>
 
-#include "wolfssl/options.h"
+#include "../h/port.h"
 
 #include "wolfssl/wolfcrypt/aes.h"
 #include "wolfssl/wolfcrypt/sha.h"
 #include "wolfssl/wolfcrypt/sha3.h"
 
 #include "../include/config.h"
-#include "../h/port.h"
 
 #include "../h/cell.h"
 #include "../h/structures/onion_message.h"

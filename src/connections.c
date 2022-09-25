@@ -18,7 +18,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <unistd.h>
 #include <stdlib.h>
 
-#include "wolfssl/options.h"
+#include "../h/port.h"
 
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/settings.h"
@@ -28,7 +28,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../h/wolfssl_internal.h"
 
 #include "../include/config.h"
-#include "../h/port.h"
 
 #include "../h/minitor.h"
 #include "../h/circuit.h"
@@ -266,14 +265,13 @@ void v_poll_daemon( void* pv_parameters )
 
   while ( 1 )
   {
-    count = poll( connections_poll, 16, -1 );
+    count = MINITOR_POLL( connections_poll, 16 );
 
     if ( count > 0 )
     {
       MINITOR_ENQUEUE_BLOCKING( connections_task_queue, (void*)(&ready) );
+      MINITOR_DEQUEUE_BLOCKING( poll_task_queue, &ready );
     }
-
-    MINITOR_DEQUEUE_BLOCKING( poll_task_queue, &ready );
 
     // if false was on queue we need to delete ourself
     if ( ready == false )
@@ -313,17 +311,7 @@ void v_connections_daemon( void* pv_parameters )
     // restart the poll task to include new connections
     if ( ready == false )
     {
-      // delete the poll task
-      MINITOR_TASK_DELETE( poll_daemon_task_handle );
-      // delete the poll queue in case the poll task was blocked on it
-      MINITOR_QUEUE_DELETE( poll_task_queue );
-
-      // create the poll queue and task
-      poll_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
-      b_create_poll_task( &poll_daemon_task_handle );
-
-      MINITOR_LOG( CONN_TAG, "made poll task" );
-
+      //MINITOR_RESTART_POLL();
       continue;
     }
 
@@ -339,6 +327,9 @@ void v_connections_daemon( void* pv_parameters )
 
     while ( dl_connection != NULL )
     {
+      MINITOR_LOG( CONN_TAG, "dl_connection %p", dl_connection );
+      MINITOR_LOG( CONN_TAG, "dl_connection->next %p", dl_connection->next );
+
       if ( dl_connection->is_or == 1 )
       {
         if ( ( connections_poll[dl_connection->poll_index].revents & POLLERR ) != 0 || ( connections_poll[dl_connection->poll_index].revents & POLLHUP ) != 0 )
@@ -630,7 +621,6 @@ int d_attach_or_connection( uint32_t address, uint16_t port, OnionCircuit* circu
 void v_handle_local_connection( void* pv_parameters )
 {
   int len;
-  uint8_t data_buf[RELAY_PAYLOAD_LEN];
   DlConnection* local_connection = pv_parameters;
   OnionMessage* onion_message;
 

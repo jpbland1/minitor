@@ -28,7 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define MINITOR_CHUTNEY_ADDRESS 0x7602a8c0
 #define MINITOR_CHUTNEY_ADDRESS_STR "192.168.2.118"
 #define MINITOR_CHUTNEY_DIR_PORT 7000
-#define FILESYSTEM_PREFIX "./local_data/"
+#define FILESYSTEM_PREFIX "/sdcard/"
 
 extern const char* tor_authorities[];
 extern int tor_authorities_count;

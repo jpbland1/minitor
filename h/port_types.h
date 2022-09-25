@@ -1,11 +1,13 @@
 #ifndef MINITOR_PORT_TYPES
 #define MINITOR_PORT_TYPES
 
-#include <pthread.h>
-#include <stdbool.h>
-#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/timers.h"
 
 // DEFINE TYPES
+/*
 typedef pthread_mutex_t* MinitorMutex;
 
 typedef struct port_timer_t
@@ -33,5 +35,11 @@ typedef struct port_queue_t
 
 typedef port_queue_t* MinitorQueue;
 typedef pthread_t MinitorTask;
+*/
+
+typedef SemaphoreHandle_t MinitorMutex;
+typedef TimerHandle_t MinitorTimer;
+typedef QueueHandle_t MinitorQueue;
+typedef TaskHandle_t MinitorTask;
 
 #endif
