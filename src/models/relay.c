@@ -28,9 +28,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "../../h/port.h"
 
 #include "../../h/constants.h"
+#include "../../h/encoding.h"
 #include "../../h/consensus.h"
 #include "../../h/models/relay.h"
 
+const uint32_t backup_cache_relay_count = 20;
 uint32_t hsdir_relay_count = 0;
 uint32_t cache_relay_count = 0;
 uint32_t fast_relay_count = 0;
@@ -38,18 +40,42 @@ uint32_t fast_relay_count = 0;
 uint32_t staging_hsdir_relay_count = 0;
 uint32_t staging_cache_relay_count = 0;
 uint32_t staging_fast_relay_count = 0;
+uint32_t waiting_relay_count = 0;
+int waiting_relay_index = 0;
 
-static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename )
+static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename, int seek )
 {
   int fd;
+  int ret = 0;
 
-  fd = open( filename, O_WRONLY | O_APPEND );
+  fd = open( filename, O_WRONLY );
 
   if ( fd < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to open %s, errno: %d", filename, errno );
 
     return -1;
+  }
+
+  if ( seek == 0 )
+  {
+    // get the end position
+    ret = lseek( fd, 0, SEEK_END );
+  }
+  else
+  {
+    // go to the seek position
+    ret = lseek( fd, seek, SEEK_SET );
+  }
+
+  if ( ret < 0 )
+  {
+    return ret;
+  }
+
+  if ( seek != 0 )
+  {
+    ret = 0;
   }
 
   if ( write( fd, onion_relay, sizeof( OnionRelay )  ) < 0 )
@@ -63,16 +89,18 @@ static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename )
 
   close( fd );
 
-  return 0;
+  return ret;
 }
 
 int d_create_hsdir_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "hsdir_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "hsdir_list_stg", onion_relay->hsdir_seek );
 
-  if ( ret == 0 )
+  if ( ret > 0 )
   {
     staging_hsdir_relay_count++;
+    onion_relay->hsdir_seek = ret;
+    ret = 0;
   }
 
   return ret;
@@ -80,11 +108,13 @@ int d_create_hsdir_relay( OnionRelay* onion_relay )
 
 int d_create_cache_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "cache_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "cache_list_stg", onion_relay->cache_seek );
 
-  if ( ret == 0 )
+  if ( ret > 0 )
   {
     staging_cache_relay_count++;
+    onion_relay->cache_seek = ret;
+    ret = 0;
   }
 
   return ret;
@@ -92,14 +122,56 @@ int d_create_cache_relay( OnionRelay* onion_relay )
 
 int d_create_fast_relay( OnionRelay* onion_relay )
 {
-  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "fast_list_stg" );
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "fast_list_stg", onion_relay->fast_seek );
 
-  if ( ret == 0 )
+  if ( ret > 0 )
   {
     staging_fast_relay_count++;
+    onion_relay->fast_seek = ret;
+    ret = 0;
   }
 
   return ret;
+}
+
+int d_create_waiting_relay( OnionRelay* onion_relay )
+{
+  int ret = d_add_relay_to_list( onion_relay, FILESYSTEM_PREFIX "waiting_list", 0 );
+
+  if ( ret > 0 )
+  {
+    waiting_relay_count++;
+    ret = 0;
+  }
+
+  return ret;
+}
+
+OnionRelay* px_get_waiting_relay()
+{
+  int fd;
+  int ret;
+  OnionRelay* onion_relay = malloc( sizeof( OnionRelay ) );
+
+  fd = open( FILESYSTEM_PREFIX "waiting_list", O_RDONLY );
+
+  ret = lseek( fd, waiting_relay_index, SEEK_SET );
+
+  if ( ret >= 0 )
+  {
+    ret = read( fd, onion_relay, sizeof( OnionRelay ) );
+  }
+
+  if ( ret == sizeof( OnionRelay ) )
+  {
+    waiting_relay_index += sizeof( OnionRelay );
+    waiting_relay_count--;
+    return onion_relay;
+  }
+
+  free( onion_relay );
+
+  return NULL;
 }
 
 DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t* hs_index, int desired_count, int current, DoublyLinkedOnionRelayList* used_relays )
@@ -362,6 +434,45 @@ OnionRelay* px_get_random_cache_relay( bool staging )
   }
 }
 
+OnionRelay* px_get_random_backup_cache_relay()
+{
+  int i;
+  int j;
+  char tmp_addr[16];
+  int seperator_count = 0;
+  int last_seperator = 0;
+  OnionRelay* relay = malloc( sizeof( OnionRelay ) );
+
+  i = MINITOR_RANDOM() % tor_authorities_count;
+
+  for ( j = 0; j < strlen( tor_authorities[i] ); j++ )
+  {
+    if ( tor_authorities[i][j] == ':' )
+    {
+      switch (seperator_count)
+      {
+        case 0:
+          memcpy( tmp_addr, tor_authorities[i], j );
+          tmp_addr[j] = 0;
+          relay->address = inet_addr( tmp_addr );
+          break;
+        case 1:
+          relay->or_port = atoi( tor_authorities[i] + last_seperator + 1 );
+          break;
+        case 2:
+          d_base_64_decode( relay->identity, tor_authorities[i] + last_seperator + 1, j - last_seperator );
+          d_base_64_decode( relay->ntor_onion_key, tor_authorities[i] + j + 1, strlen( tor_authorities[i] ) - j );
+          break;
+      }
+
+      last_seperator = j;
+      seperator_count++;
+    }
+  }
+
+  return relay;
+}
+
 OnionRelay* px_get_random_fast_relay( bool want_guard, DoublyLinkedOnionRelayList* relay_list, uint8_t* exclude_start, uint8_t* exclude_end )
 {
   OnionRelay* fast_relay = NULL;
@@ -376,7 +487,7 @@ OnionRelay* px_get_random_fast_relay( bool want_guard, DoublyLinkedOnionRelayLis
       return fast_relay;
     }
 
-    if ( want_guard == true && fast_relay->can_guard == false )
+    if ( want_guard == true && fast_relay->guard == false )
     {
       free( fast_relay );
       fast_relay = NULL;
@@ -501,6 +612,11 @@ int d_get_staging_cache_relay_count()
 int d_get_staging_fast_relay_count()
 {
   return staging_fast_relay_count;
+}
+
+int d_get_waiting_relay_count()
+{
+  return waiting_relay_count;
 }
 
 static int d_reset_relay_list( const char* filename )

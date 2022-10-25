@@ -114,11 +114,14 @@ int d_minitor_INIT()
   crypto_insert_finish = MINITOR_MUTEX_CREATE();
   connections_mutex = MINITOR_MUTEX_CREATE();
   circuits_mutex = MINITOR_MUTEX_CREATE();
-  fastest_cache_mutex = MINITOR_MUTEX_CREATE();
+  waiting_relays_lock = MINITOR_MUTEX_CREATE();
 
   core_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   core_internal_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   connections_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+  external_consensus_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
+  fetch_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
+  insert_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
 
   b_create_core_task( &core_task );
 
@@ -163,7 +166,7 @@ int d_minitor_INIT()
   MINITOR_LOG( MINITOR_TAG, "Starting fetch" );
 
   // fetch network consensus
-  while ( d_fetch_consensus_info() < 0 )
+  while ( d_fetch_consensus() < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Fetch failed, retrying" );
   }

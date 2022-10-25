@@ -1731,3 +1731,90 @@ fail:
 
   return -1;
 }
+
+int d_router_begin_dir( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id )
+{
+  int ret;
+  Cell* begin_dir_cell;
+
+  begin_dir_cell = malloc( MINITOR_CELL_LEN );
+
+  begin_dir_cell->circ_id = circuit->circ_id;
+  begin_dir_cell->command = RELAY;
+  begin_dir_cell->payload.relay.relay_command = RELAY_BEGIN_DIR;
+  begin_dir_cell->payload.relay.recognized = 0;
+  begin_dir_cell->payload.relay.stream_id = stream_id;
+  begin_dir_cell->payload.relay.digest = 0;
+  begin_dir_cell->payload.relay.length = 0;
+  begin_dir_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + begin_dir_cell->payload.relay.length;
+
+  if ( d_send_relay_cell_and_free( or_connection, begin_dir_cell, &circuit->relay_list, NULL ) < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int d_rounter_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id, uint8_t* data, uint32_t data_len )
+{
+  Cell* data_cell;
+
+  if ( data_len == 0 || data_len > RELAY_PAYLOAD_LEN )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Invalid data cell payload size" );
+
+    return -1;
+  }
+
+  data_cell = malloc( MINITOR_CELL_LEN );
+
+  data_cell->circ_id = circuit->circ_id;
+  data_cell->command = RELAY;
+  data_cell->payload.relay.relay_command = RELAY_DATA;
+  data_cell->payload.relay.recognized = 0;
+  data_cell->payload.relay.stream_id = stream_id;
+  data_cell->payload.relay.digest = 0;
+  data_cell->payload.relay.length = data_len;
+
+  memcpy( data_cell->payload.relay.data, data, data_cell->payload.relay.length );
+
+  data_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + data_cell->payload.relay.length;
+
+  if ( d_send_relay_cell_and_free( or_connection, data_cell, &circuit->relay_list, NULL ) < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int d_router_relay_end( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id )
+{
+  Cell* end_cell;
+
+  end_cell = malloc( MINITOR_CELL_LEN );
+
+  end_cell->circ_id = circuit->circ_id;
+  end_cell->command = RELAY;
+  end_cell->payload.relay.relay_command = RELAY_END;
+  end_cell->payload.relay.recognized = 0;
+  end_cell->payload.relay.stream_id = stream_id;
+  end_cell->payload.relay.digest = 0;
+  end_cell->payload.relay.length = 0;
+
+  end_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + end_cell->payload.relay.length;
+
+  if ( d_send_relay_cell_and_free( or_connection, end_cell, &circuit->relay_list, NULL ) < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
+
+    return -1;
+  }
+
+  return 0;
+}

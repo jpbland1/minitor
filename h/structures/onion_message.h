@@ -40,6 +40,8 @@ typedef enum OnionMessageType
   CLIENT_RELAY_DATA,
   CLIENT_RELAY_END,
   CLIENT_CLOSED,
+  CONSENSUS_FETCHED,
+  EXTERNAL_CONSENSUS_FETCHED,
 } OnionMessageType;
 
 typedef struct OnionMessage

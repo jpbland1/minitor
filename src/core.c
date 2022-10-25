@@ -189,6 +189,74 @@ int d_get_standby_count()
   return count;
 }
 
+static void v_send_init_circuit_fetch( MinitorQueue queue )
+{
+  OnionMessage* onion_message;
+
+  // check if our consensus is actually out of date
+  if ( b_consensus_outdated() == false )
+  {
+    // if fetch request was from outside the daemon send the done message
+    if ( external_want_consensus == true )
+    {
+      onion_message = malloc( sizeof( OnionMessage ) );
+
+      onion_message->type = CONSENSUS_FETCHED;
+
+      MINITOR_ENQUEUE_BLOCKING( external_consensus_queue, (void*)(&onion_message) );
+    }
+
+    return;
+  }
+
+  // reset the relay files
+  if ( d_reset_relay_files() < 0 )
+  {
+    MINITOR_LOG( CORE_TAG, "Failed to reset relay files" );
+
+    return;
+  }
+
+  // set the tracking globals to false
+  have_network_consensus = false;
+  have_relay_descriptors = false;
+
+  onion_message = malloc( sizeof( OnionMessage ) );
+
+  onion_message->type = INIT_CIRCUIT;
+  onion_message->data = malloc( sizeof( CreateCircuitRequest ) );
+
+  memset( onion_message->data, 0, sizeof( CreateCircuitRequest ) );
+
+  ((CreateCircuitRequest*)onion_message->data)->length = 1;
+  ((CreateCircuitRequest*)onion_message->data)->target_status = CIRCUIT_CONSENSUS_FETCH;
+
+  if ( d_get_cache_relay_count() != 0 )
+  {
+    ((CreateCircuitRequest*)onion_message->data)->end_relay = px_get_random_cache_relay( false );
+  }
+  else if ( d_get_staging_cache_relay_count() != 0 )
+  {
+    ((CreateCircuitRequest*)onion_message->data)->end_relay = px_get_random_cache_relay( true );
+  }
+  else
+  {
+    ((CreateCircuitRequest*)onion_message->data)->end_relay = px_get_random_backup_cache_relay();
+  }
+
+  MINITOR_ENQUEUE_BLOCKING( queue, (void*)(&onion_message) );
+}
+
+static void v_send_init_circuit_fetch_internal()
+{
+  v_send_init_circuit_fetch( core_internal_queue );
+}
+
+void v_send_init_circuit_fetch_external()
+{
+  v_send_init_circuit_fetch( core_task_queue );
+}
+
 static void v_send_init_circuit_intro( OnionService* service )
 {
   OnionCircuit* circuit;
@@ -260,6 +328,10 @@ void v_circuit_rebuild_or_destroy( OnionCircuit* circuit, DlConnection* or_conne
       v_send_init_circuit_intro(
         circuit->service
       );
+    }
+    else if ( circuit->target_status == CIRCUIT_CONSENSUS_FETCH )
+    {
+      v_send_init_circuit_fetch_internal();
     }
     else
     {
@@ -431,7 +503,7 @@ void v_circuit_remove_destroy( OnionCircuit* circuit, DlConnection* or_connectio
 
 static void v_handle_tor_cell( uint32_t conn_id )
 {
-  int succ;
+  int ret;
   int recv_index;
   Cell* cell;
   DlConnection* or_connection;
@@ -496,14 +568,14 @@ static void v_handle_tor_cell( uint32_t conn_id )
   {
     if ( working_circuit->status == CIRCUIT_RENDEZVOUS || working_circuit->status == CIRCUIT_CLIENT_RENDEZVOUS_LIVE )
     {
-      succ = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, working_circuit->hs_crypto );
+      ret = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, working_circuit->hs_crypto );
     }
     else
     {
-      succ = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, NULL );
+      ret = d_decrypt_cell( cell, CIRCID_LEN, &working_circuit->relay_list, NULL );
     }
 
-    if ( succ < 0 )
+    if ( ret < 0 )
     {
       MINITOR_LOG( CORE_TAG, "Failed to decrypt packed cell, discarding" );
 
@@ -556,7 +628,19 @@ static void v_handle_tor_cell( uint32_t conn_id )
       }
       else
       {
-        working_circuit->status = working_circuit->target_status;
+        if ( working_circuit->target_status == CIRCUIT_CONSENSUS_FETCH )
+        {
+          if ( d_router_begin_dir( working_circuit, or_connection, CONSENSUS_STREAM_ID ) < 0 )
+          {
+            goto circuit_rebuild;
+          }
+
+          working_circuit->status = CIRCUIT_DIR_CONNECTED;
+        }
+        else
+        {
+          working_circuit->status = working_circuit->target_status;
+        }
       }
 
       break;
@@ -731,6 +815,71 @@ static void v_handle_tor_cell( uint32_t conn_id )
       }
 
       break;
+    case CIRCUIT_DIR_CONNECTED:
+      if ( cell->command != RELAY )
+      {
+        goto circuit_rebuild;
+      }
+
+      if ( cell->payload.relay.relay_command != RELAY_CONNECTED )
+      {
+        goto circuit_rebuild;
+      }
+
+      // if we lackk the consensus fetch it
+      if ( have_network_consensus == false )
+      {
+        if ( d_consensus_request( working_circuit, or_connection ) < 0 )
+        {
+          goto circuit_rebuild;
+        }
+
+        working_circuit->status = CIRCUIT_CONSENSUS_FETCH;
+      }
+
+      break;
+    case CIRCUIT_CONSENSUS_FETCH:
+      if (
+        cell->command != RELAY ||
+        ( cell->payload.relay.relay_command != RELAY_DATA && cell->payload.relay.relay_command != RELAY_END && cell->payload.relay.relay_command != RELAY_CONNECTED )
+      )
+      {
+        goto circuit_rebuild;
+      }
+
+      if ( cell->payload.relay.stream_id == CONSENSUS_STREAM_ID )
+      {
+        // parse this part of the consensus
+        ret = d_parse_consensus( working_circuit, or_connection, cell );
+      }
+      else
+      {
+        // parse this part of the descriptors
+        ret = d_parse_descriptors( working_circuit, or_connection, cell );
+      }
+
+
+      if ( ret == 1 )
+      {
+        onion_message = malloc( sizeof( OnionMessage ) );
+
+        onion_message->type = EXTERNAL_CONSENSUS_FETCHED;
+
+        // inform the external task that we're done fetching
+        MINITOR_ENQUEUE_BLOCKING( external_consensus_queue, (void*)(&onion_message) );
+
+        v_circuit_remove_destroy( working_circuit, or_connection );
+        // MUTEX GIVE
+
+        access_mutex = NULL;
+        working_circuit = NULL;
+      }
+      else if ( ret < 0 )
+      {
+        goto circuit_rebuild;
+      }
+
+      break;
     case CIRCUIT_INTRO_ESTABLISHED:
       if ( cell->command != RELAY || cell->payload.relay.relay_command != RELAY_COMMAND_INTRO_ESTABLISHED )
       {
@@ -787,10 +936,10 @@ static void v_handle_tor_cell( uint32_t conn_id )
       if ( working_circuit->target_status == CIRCUIT_CLIENT_HSDIR )
       {
         MINITOR_LOG( CORE_TAG, "trying parse" );
-        succ = d_parse_hsdesc( working_circuit, cell );
+        ret = d_parse_hsdesc( working_circuit, cell );
 
         // couldn't parse or desc was invalid
-        if ( succ < 0 )
+        if ( ret < 0 )
         {
           working_circuit->target_relay_index++;
 
@@ -800,7 +949,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
           }
         }
         // success, we sent init for the intro circuit
-        else if ( succ == 0 )
+        else if ( ret == 0 )
         {
           working_circuit->client->rend_circuit = working_circuit;
 
@@ -808,7 +957,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
         }
 
         // parsing but need more cells
-        if ( succ != 1 )
+        if ( ret != 1 )
         {
           if ( d_router_truncate( working_circuit, or_connection, working_circuit->relay_list.built_length - 1 ) < 0 )
           {
@@ -1256,12 +1405,7 @@ static void v_handle_conn_ready( uint32_t conn_id )
 
 static void v_handle_scheduled_consensus()
 {
-  if ( d_fetch_consensus_info() < 0 )
-  {
-    MINITOR_LOG( CORE_TAG, "Failed to fetch consensus" );
-
-    MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, 500 );
-  }
+  v_send_init_circuit_fetch_internal();
 }
 
 static void v_keep_circuitlist_alive()

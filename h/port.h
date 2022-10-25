@@ -78,6 +78,8 @@ void port_fill_random( uint8_t* dest, int length );
 
 #define MINITOR_GET_READABLE( sockfd, readable ) ioctl( sockfd, FIONREAD, readable )
 
+#define MINITOR_TIMEGM( tm ) timegm( tm )
+
 #ifdef DEBUG_MINITOR
 
 #define MINITOR_LOG( tag, format, ... ) { printf( "%s: ", tag ); printf( format, ##__VA_ARGS__ ); printf( "\n" ); }

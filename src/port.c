@@ -315,25 +315,6 @@ bool b_create_local_connection_handler( MinitorTask* handle, void* local_connect
   return false;
 }
 
-bool b_create_fetch_task( MinitorTask* handle, void* consensus )
-{
-  int ret;
-
-  ret = pthread_create(
-    handle,
-    NULL,
-    v_handle_relay_fetch,
-    consensus
-  );
-
-  if ( ret == 0 )
-  {
-    return true;
-  }
-
-  return false;
-}
-
 bool b_create_insert_task( MinitorTask* handle, void* consensus )
 {
   int ret;

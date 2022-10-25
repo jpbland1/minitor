@@ -28,6 +28,36 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "../constants.h"
 
+#define FAST_RELAY_MAX 100
+#define CACHE_RELAY_MAX 100
+
+typedef enum ConsensusStreams
+{
+  CONSENSUS_STREAM_ID = 1,
+  DESCRIPTORS_STREAM_ID = 2,
+} ConsensusStreams;
+
+typedef enum ConsensusState
+{
+  FIND_R,
+  FIND_S,
+  FIND_PR,
+  FIND_W,
+} ConsensusState;
+
+typedef enum DescriptorState
+{
+  REQUEST_DESCRIPTORS,
+  FIND_STATUS,
+  FIND_ROUTER,
+  FIND_MASTER_KEY_ED25519,
+  FIND_PROTO,
+  FIND_SIGNING_KEY,
+  PARSE_SIGNING_RSA_BEGIN,
+  PARSE_SIGNING_RSA_END,
+  NTOR_ONION_KEY,
+} DescriptorState;
+
 typedef struct DoublyLinkedOnionRelay DoublyLinkedOnionRelay;
 
 typedef struct NetworkConsensus {
@@ -53,11 +83,16 @@ typedef struct OnionRelay {
   uint16_t dir_port;
   unsigned char id_hash[H_LENGTH];
   unsigned char id_hash_previous[H_LENGTH];
-  bool suitable;
+  bool fast;
+  bool stable;
   bool hsdir;
   bool dir_cache;
-  bool can_guard;
-  bool can_exit;
+  bool guard;
+  bool exit;
+  int bandwidth;
+  int hsdir_seek;
+  int cache_seek;
+  int fast_seek;
 } OnionRelay;
 
 typedef struct RelayCrypto {
