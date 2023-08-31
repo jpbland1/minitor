@@ -671,6 +671,14 @@ int d_reset_staging_fast_relays()
   return d_reset_relay_list( FILESYSTEM_PREFIX "fast_list_stg" );
 }
 
+int d_reset_waiting_relays()
+{
+  waiting_relay_count = 0;
+  waiting_relay_index = 0;
+
+  return d_reset_relay_list( FILESYSTEM_PREFIX "waiting_list" );
+}
+
 static int d_get_relay_list_valid_until( const char* filename )
 {
   int fd;

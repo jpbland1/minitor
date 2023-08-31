@@ -37,6 +37,7 @@ int d_get_waiting_relay_count();
 int d_reset_staging_hsdir_relays();
 int d_reset_staging_cache_relays();
 int d_reset_staging_fast_relays();
+int d_reset_waiting_relays();
 int d_get_hsdir_relay_valid_until();
 int d_get_cache_relay_valid_until();
 int d_get_fast_relay_valid_until();

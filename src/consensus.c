@@ -150,6 +150,10 @@ void v_handle_crypto_and_insert( void* pv_parameters )
 
     needs_desc = onion_relay->hsdir_seek == 0 && onion_relay->cache_seek == 0 && onion_relay->fast_seek == 0;
 
+#ifdef MINITOR_CHUTNEY
+    onion_relay->address = MINITOR_CHUTNEY_ADDRESS;
+#endif
+
     if ( onion_relay->hsdir == true )
     {
       if ( !needs_desc )
@@ -1427,6 +1431,11 @@ int d_reset_relay_files()
   }
 
   if ( d_reset_staging_fast_relays() < 0 )
+  {
+    return -1;
+  }
+
+  if ( d_reset_waiting_relays() < 0 )
   {
     return -1;
   }
