@@ -113,6 +113,8 @@ void v_handle_crypto_and_insert( void* pv_parameters )
   OnionRelay* onion_relay;
   NetworkConsensus* working_consensus = (NetworkConsensus*)pv_parameters;
 
+  MINITOR_LOG( MINITOR_TAG, "START v_handle_crypto_and_insert", process_count );
+
   // MUTEX TAKE
   MINITOR_MUTEX_TAKE_BLOCKING( crypto_insert_finish );
 
@@ -121,6 +123,7 @@ void v_handle_crypto_and_insert( void* pv_parameters )
     if ( onion_relay == NULL )
     {
       null_count++;
+      MINITOR_LOG( MINITOR_TAG, "NULL count %d", null_count );
 
       if ( null_count == 2 )
       {
@@ -129,7 +132,9 @@ void v_handle_crypto_and_insert( void* pv_parameters )
         MINITOR_MUTEX_GIVE( crypto_insert_finish );
         // MUTEX GIVE
 
+        MINITOR_QUEUE_DELETE( insert_relays_queue );
         MINITOR_TASK_DELETE( NULL );
+        return;
       }
 
       continue;
@@ -200,7 +205,7 @@ void v_handle_crypto_and_insert( void* pv_parameters )
       MINITOR_MUTEX_TAKE_BLOCKING( waiting_relays_lock );
 
       // if we're not fetching or all relays are waiting
-      if ( !fetch_in_progress )
+      if ( !fetch_in_progress && fetch_relays_length < 9 )
       {
         // enqueue to the relay to be fetched
         MINITOR_ENQUEUE_BLOCKING( fetch_relays_queue, &onion_relay );
@@ -420,7 +425,7 @@ int d_consensus_request( OnionCircuit* circuit, DlConnection* or_connection )
 
   close( fd );
 
-  return d_rounter_relay_data_cell( circuit, or_connection, 1, REQUEST, strlen( REQUEST ) );
+  return d_router_relay_data_cell( circuit, or_connection, CONSENSUS_STREAM_ID, REQUEST, strlen( REQUEST ) );
 }
 
 static int d_parse_consensus_r( char* line, int line_length, OnionRelay* parse_relay )
@@ -591,7 +596,7 @@ int d_parse_consensus( OnionCircuit* circuit, DlConnection* or_connection, Cell*
 
     all_relays_waiting = true;
 
-    // if we have 9 and are not already fetching descriptors
+    // if we are not already fetching descriptors
     if ( !fetch_in_progress )
     {
       ret = d_router_begin_dir( circuit, or_connection, DESCRIPTORS_STREAM_ID );
@@ -650,41 +655,11 @@ int d_parse_consensus( OnionCircuit* circuit, DlConnection* or_connection, Cell*
       {
         have_network_consensus = true;
 
-        // copy the new new consenus
-        // BEGIN MUTEX
-        MINITOR_MUTEX_TAKE_BLOCKING( network_consensus_mutex );
-
-        memcpy( &network_consensus, &working_network_consensus, sizeof( NetworkConsensus ) );
-
-        // if we didn't find these values explicitly set
-        if ( network_consensus.hsdir_interval == 0 )
-        {
-#ifdef MINITOR_CHUTNEY
-          network_consensus.hsdir_interval = 8;
-#else
-          network_consensus.hsdir_interval = HSDIR_INTERVAL_DEFAULT;
-#endif
-        }
-
-        if ( network_consensus.hsdir_n_replicas == 0 )
-        {
-          network_consensus.hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
-        }
-
-        if ( network_consensus.hsdir_spread_store == 0 )
-        {
-#ifdef MINITOR_CHUTNEY
-          network_consensus.hsdir_spread_store = 3;
-#else
-          network_consensus.hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
-#endif
-        }
-
-        MINITOR_MUTEX_GIVE( network_consensus_mutex );
-        // END MUTEX
+        // create the insert queue
+        insert_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
 
         // create the insert queue and task
-        b_create_insert_task( &crypto_insert_handle, &network_consensus );
+        b_create_insert_task( &crypto_insert_handle, &working_network_consensus );
       }
       else if ( have_network_consensus == true )
       {
@@ -760,9 +735,12 @@ int d_parse_consensus( OnionCircuit* circuit, DlConnection* or_connection, Cell*
   return 0;
 
 fail:
+  MINITOR_LOG( MINITOR_TAG, "failed" );
+
   if ( crypto_insert_handle != NULL )
   {
     MINITOR_TASK_DELETE( crypto_insert_handle );
+    MINITOR_QUEUE_DELETE( insert_relays_queue );
   }
 
   return -1;
@@ -776,7 +754,7 @@ int d_descriptors_request( OnionCircuit* circuit, DlConnection* or_connection, O
   const char* REQUEST_2 = " HTTP/1.0\r\nHost: 127.0.0.1\r\n"
       "User-Agent: esp-idf/1.0 esp3266\r\n"
       "\r\n";
-  char REQUEST[440];
+  char REQUEST[600];
 
   sprintf( REQUEST, REQUEST_1 );
 
@@ -812,7 +790,7 @@ int d_descriptors_request( OnionCircuit* circuit, DlConnection* or_connection, O
   // 41 for each digest+, -1 for the last one
   sprintf( REQUEST + 18 + list_length * 41 - 1, REQUEST_2 );
 
-  return d_rounter_relay_data_cell( circuit, or_connection, DESCRIPTORS_STREAM_ID, REQUEST, strlen( REQUEST ) );
+  return d_router_relay_data_cell( circuit, or_connection, DESCRIPTORS_STREAM_ID, REQUEST, strlen( REQUEST ) );
 }
 
 static int d_parse_http_version_line( char* line, int line_len )
@@ -974,6 +952,9 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
   int j;
   int space_count;
   int ret = 0;
+  time_t now;
+  time_t voting_interval;
+  time_t srv_start_time;
   bool more_relays;
   bool all_waiting;
   OnionRelay* send_relay;
@@ -1025,16 +1006,67 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
         MINITOR_MUTEX_GIVE( crypto_insert_finish );
         // MUTEX GIVE
 
-        ret = d_finalize_staged_relay_lists();
+        // MUTEX TAKE
+        MINITOR_MUTEX_TAKE_BLOCKING( network_consensus_mutex );
 
-        if ( ret < 0 )
+        memcpy( &network_consensus, &working_network_consensus, sizeof( NetworkConsensus ) );
+
+        // if we didn't find these values explicitly set
+        if ( network_consensus.hsdir_interval == 0 )
         {
-          MINITOR_LOG( MINITOR_TAG, "Failed to d_finalize_staged_relay_lists" );
+#ifdef MINITOR_CHUTNEY
+          network_consensus.hsdir_interval = 8;
+#else
+          network_consensus.hsdir_interval = HSDIR_INTERVAL_DEFAULT;
+#endif
         }
-        else
+
+        if ( network_consensus.hsdir_n_replicas == 0 )
         {
+          network_consensus.hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
+        }
+
+        if ( network_consensus.hsdir_spread_store == 0 )
+        {
+#ifdef MINITOR_CHUTNEY
+          network_consensus.hsdir_spread_store = 3;
+#else
+          network_consensus.hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
+#endif
+        }
+
+        ret = d_finalize_staged_relay_lists( network_consensus.valid_until );
+
+        if ( ret == 0 )
+        {
+          time( &now );
+
+#ifdef MINITOR_CHUTNEY
+          voting_interval = network_consensus.fresh_until - network_consensus.valid_after;
+
+          // 24 is SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES
+          srv_start_time = network_consensus.valid_after - ( ( ( ( network_consensus.valid_after / voting_interval ) ) % ( SHARED_RANDOM_N_ROUNDS * SHARED_RANDOM_N_PHASES ) ) * voting_interval );
+
+          // start the update timer a half second after the consensus update
+          if ( now > ( srv_start_time + ( 25 * voting_interval ) ) )
+          {
+            MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, 1000 * ( 25 * voting_interval ) );
+          }
+          else
+          {
+            MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, 1000 * ( ( srv_start_time + ( 25 * voting_interval ) ) - now ) );
+          }
+#else
+          MINITOR_TIMER_SET_MS_BLOCKING( consensus_timer, ( network_consensus.valid_until - now ) * 1000 );
+#endif
+        }
+
+        MINITOR_MUTEX_GIVE( network_consensus_mutex );
+        // MUTEX GIVE
+
+        // MUTEX GIVE
+        if ( ret == 0 )
           ret = 1;
-        }
       }
     }
 
@@ -1071,10 +1103,9 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
 
     fetch_in_progress = true;
 
+    ret = d_descriptors_request( circuit, or_connection, fetch_relays, fetch_relays_length );
     MINITOR_MUTEX_GIVE( waiting_relays_lock );
     // MUTEX GIVE
-
-    ret = d_descriptors_request( circuit, or_connection, fetch_relays, fetch_relays_length );
 
     if ( ret == 0 )
     {
@@ -1248,6 +1279,9 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
             // parse the onion key
             d_base_64_decode( working_ntor_onion_key, working_desc_line + strlen( "ntor-onion-key " ), 43 );
 
+            // MUTEX TAKE
+            MINITOR_MUTEX_TAKE_BLOCKING( waiting_relays_lock );
+
             for ( j = 0; j < fetch_relays_length; j++ )
             {
               // match the digest
@@ -1261,7 +1295,10 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
               }
             }
 
-            if ( j == fetch_relays_length )
+            MINITOR_MUTEX_GIVE( waiting_relays_lock );
+            // MUTEX GIVE
+
+            if ( j >= fetch_relays_length )
             {
               goto fail;
             }
@@ -1279,9 +1316,11 @@ int d_parse_descriptors( OnionCircuit* circuit, DlConnection* or_connection, Cel
   return 0;
 
 fail:
+  MINITOR_LOG( MINITOR_TAG, "failed desc" );
   if ( crypto_insert_handle != NULL )
   {
     MINITOR_TASK_DELETE( crypto_insert_handle );
+    MINITOR_QUEUE_DELETE( insert_relays_queue );
   }
 
   return -1;
@@ -1387,7 +1426,7 @@ bool b_consensus_outdated()
             network_consensus.hsdir_n_replicas = HSDIR_N_REPLICAS_DEFAULT;
             network_consensus.hsdir_spread_store = HSDIR_SPREAD_STORE_DEFAULT;
 
-            if ( d_parse_network_consensus_from_file( fd, &network_consensus ) )
+            if ( d_parse_network_consensus_from_file( fd, &network_consensus ) < 0 )
             {
               MINITOR_LOG( MINITOR_TAG, "Failed to parse network consensus from file" );
 
@@ -1420,17 +1459,12 @@ bool b_consensus_outdated()
 
 int d_reset_relay_files()
 {
-  if ( d_reset_staging_hsdir_relays() < 0 )
-  {
-    return -1;
-  }
-
-  if ( d_reset_staging_cache_relays() < 0 )
-  {
-    return -1;
-  }
-
-  if ( d_reset_staging_fast_relays() < 0 )
+  if (
+    d_reset_staging_hsdir_relays() < 0 ||
+    d_reset_staging_cache_relays() < 0 ||
+    d_reset_staging_fast_relays() < 0 ||
+    d_reset_waiting_relays() < 0
+  )
   {
     return -1;
   }
@@ -1490,12 +1524,14 @@ int d_fetch_consensus()
     return -1;
   }
 
-  if ( onion_message->type != EXTERNAL_CONSENSUS_FETCHED )
+  if ( onion_message->type != CONSENSUS_FETCHED )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to fetch the network consensus" );
 
     ret = -1;
   }
+
+  external_want_consensus = false;
 
   free( onion_message );
 

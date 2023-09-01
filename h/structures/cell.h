@@ -461,6 +461,13 @@ typedef union __attribute__((__packed__)) CellPayload
       uint8_t destroy_code;
 
       uint8_t data[RELAY_PAYLOAD_LEN];
+
+      struct __attribute__((__packed__))
+      {
+        uint8_t version;
+        uint16_t data_len;
+        uint8_t data[];
+      } sendme;
     };
   } relay;
 

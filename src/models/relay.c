@@ -41,14 +41,14 @@ uint32_t staging_hsdir_relay_count = 0;
 uint32_t staging_cache_relay_count = 0;
 uint32_t staging_fast_relay_count = 0;
 uint32_t waiting_relay_count = 0;
-int waiting_relay_index = 0;
+int waiting_relay_index = sizeof(time_t);
 
 static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename, int seek )
 {
   int fd;
   int ret = 0;
 
-  fd = open( filename, O_WRONLY );
+  fd = open( filename, O_WRONLY | O_CREAT, 0600 );
 
   if ( fd < 0 )
   {
@@ -70,6 +70,8 @@ static int d_add_relay_to_list( OnionRelay* onion_relay, const char* filename, i
 
   if ( ret < 0 )
   {
+    close(fd);
+
     return ret;
   }
 
@@ -166,10 +168,13 @@ OnionRelay* px_get_waiting_relay()
   {
     waiting_relay_index += sizeof( OnionRelay );
     waiting_relay_count--;
+    close(fd);
     return onion_relay;
   }
 
   free( onion_relay );
+
+  close(fd);
 
   return NULL;
 }
@@ -288,6 +293,8 @@ DoublyLinkedOnionRelayList* px_get_responsible_hsdir_relays_by_hs_index( uint8_t
 
     new_db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
     memset( new_db_relay, 0, sizeof( DoublyLinkedOnionRelay ) );
+    new_db_relay->package_window = RELAY_WINDOW_DEFAULT;
+    new_db_relay->deliver_window = RELAY_WINDOW_DEFAULT;
     new_db_relay->relay = onion_relay;
 
     if ( db_relay == NULL )
@@ -674,7 +681,7 @@ int d_reset_staging_fast_relays()
 int d_reset_waiting_relays()
 {
   waiting_relay_count = 0;
-  waiting_relay_index = 0;
+  waiting_relay_index = sizeof(time_t);
 
   return d_reset_relay_list( FILESYSTEM_PREFIX "waiting_list" );
 }
@@ -756,7 +763,7 @@ static int d_set_relay_list_valid_until( time_t valid_until, const char* filenam
     return -1;
   }
 
-  return valid_until;
+  return 0;
 }
 
 int d_set_staging_hsdir_relay_valid_until( time_t valid_until )
@@ -810,9 +817,18 @@ int d_load_fast_relay_count()
   return fast_relay_count;
 }
 
-int d_finalize_staged_relay_lists()
+int d_finalize_staged_relay_lists( time_t valid_until )
 {
+  int ret;
   struct stat st;
+
+  ret = d_set_staging_hsdir_relay_valid_until( valid_until );
+
+  if ( ret == 0 )
+    ret = d_set_staging_cache_relay_valid_until( valid_until );
+
+  if ( ret == 0 )
+    ret = d_set_staging_fast_relay_valid_until( valid_until );
 
   if ( stat( FILESYSTEM_PREFIX "hsdir_list", &st ) == 0 )
   {

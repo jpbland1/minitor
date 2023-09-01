@@ -161,6 +161,9 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   if ( start_relay != NULL )
   {
     dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    memset(dl_relay, 0, sizeof(DoublyLinkedOnionRelay));
+    dl_relay->package_window = RELAY_WINDOW_DEFAULT;
+    dl_relay->deliver_window = RELAY_WINDOW_DEFAULT;
     dl_relay->relay = start_relay;
 
     dl_relay->next = circuit->relay_list.head;
@@ -183,8 +186,10 @@ int d_prepare_onion_circuit( OnionCircuit* circuit, int length, OnionRelay* star
   // append the destination_relay to the list
   if ( end_relay != NULL )
   {
-
     dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    memset(dl_relay, 0, sizeof(DoublyLinkedOnionRelay));
+    dl_relay->package_window = RELAY_WINDOW_DEFAULT;
+    dl_relay->deliver_window = RELAY_WINDOW_DEFAULT;
     dl_relay->relay = end_relay;
 
     v_add_relay_to_list( dl_relay, &circuit->relay_list );
@@ -207,21 +212,24 @@ fail:
 
 int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uint8_t* exclude_start, uint8_t* exclude_end )
 {
-  DoublyLinkedOnionRelay* db_relay;
+  DoublyLinkedOnionRelay* dl_relay;
 
-  db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
-  db_relay->relay = px_get_random_fast_relay( guard, relay_list, exclude_start, exclude_end );
+  dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+  memset(dl_relay, 0, sizeof(DoublyLinkedOnionRelay));
+  dl_relay->package_window = RELAY_WINDOW_DEFAULT;
+  dl_relay->deliver_window = RELAY_WINDOW_DEFAULT;
+  dl_relay->relay = px_get_random_fast_relay( guard, relay_list, exclude_start, exclude_end );
 
-  if ( db_relay->relay == NULL )
+  if ( dl_relay->relay == NULL )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to get guard relay" );
 
-    free( db_relay );
+    free( dl_relay );
 
     return -1;
   }
 
-  v_add_relay_to_list( db_relay, relay_list );
+  v_add_relay_to_list( dl_relay, relay_list );
 
   return 0;
 }
@@ -229,26 +237,26 @@ int d_get_suitable_relay( DoublyLinkedOnionRelayList* relay_list, int guard, uin
 int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int desired_length, uint8_t* exclude_start, uint8_t* exclude_end )
 {
   int i;
-  DoublyLinkedOnionRelay* db_relay;
+  DoublyLinkedOnionRelay* dl_relay;
 
   for ( i = relay_list->length; i < desired_length; i++ )
   {
-    db_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
 
     if ( i == 0 )
     {
-      db_relay->relay = px_get_random_fast_relay( 1, NULL, exclude_start, exclude_end );
+      dl_relay->relay = px_get_random_fast_relay( 1, NULL, exclude_start, exclude_end );
     }
     else
     {
-      db_relay->relay = px_get_random_fast_relay( 0, relay_list, exclude_start, exclude_end );
+      dl_relay->relay = px_get_random_fast_relay( 0, relay_list, exclude_start, exclude_end );
     }
 
-    if ( db_relay->relay == NULL )
+    if ( dl_relay->relay == NULL )
     {
       MINITOR_LOG( MINITOR_TAG, "Failed to get guard relay" );
 
-      free( db_relay );
+      free( dl_relay );
 
       while ( relay_list->length > 0 )
       {
@@ -258,7 +266,7 @@ int d_get_suitable_onion_relays( DoublyLinkedOnionRelayList* relay_list, int des
       return -1;
     }
 
-    v_add_relay_to_list( db_relay, relay_list );
+    v_add_relay_to_list( dl_relay, relay_list );
   }
 
   return 0;
@@ -632,7 +640,7 @@ int d_ntor_handshake_start( unsigned char* handshake_data, OnionRelay* relay, cu
   return 0;
 }
 
-int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db_relay, curve25519_key* key )
+int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* dl_relay, curve25519_key* key )
 {
   int wolf_succ;
   unsigned int idx;
@@ -654,12 +662,12 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
   wc_curve25519_init( &responder_handshake_public_key );
   wc_curve25519_init( &ntor_onion_key );
 
-  db_relay->relay_crypto = malloc( sizeof( RelayCrypto ) );
+  dl_relay->relay_crypto = malloc( sizeof( RelayCrypto ) );
 
-  wc_InitSha( &db_relay->relay_crypto->running_sha_forward );
-  wc_InitSha( &db_relay->relay_crypto->running_sha_backward );
-  wc_AesInit( &db_relay->relay_crypto->aes_forward, NULL, INVALID_DEVID );
-  wc_AesInit( &db_relay->relay_crypto->aes_backward, NULL, INVALID_DEVID );
+  wc_InitSha( &dl_relay->relay_crypto->running_sha_forward );
+  wc_InitSha( &dl_relay->relay_crypto->running_sha_backward );
+  wc_AesInit( &dl_relay->relay_crypto->aes_forward, NULL, INVALID_DEVID );
+  wc_AesInit( &dl_relay->relay_crypto->aes_backward, NULL, INVALID_DEVID );
 
   wolf_succ = wc_curve25519_import_public_ex( handshake_data, G_LENGTH, &responder_handshake_public_key, EC25519_LITTLE_ENDIAN );
 
@@ -670,7 +678,7 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
     goto fail;
   }
 
-  wolf_succ = wc_curve25519_import_public_ex( db_relay->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
+  wolf_succ = wc_curve25519_import_public_ex( dl_relay->relay->ntor_onion_key, H_LENGTH, &ntor_onion_key, EC25519_LITTLE_ENDIAN );
 
   if ( wolf_succ < 0 )
   {
@@ -704,10 +712,10 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
 
   working_secret_input += 32;
 
-  memcpy( working_secret_input, db_relay->relay->identity, ID_LENGTH );
+  memcpy( working_secret_input, dl_relay->relay->identity, ID_LENGTH );
   working_secret_input += ID_LENGTH;
 
-  memcpy( working_secret_input, db_relay->relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_secret_input, dl_relay->relay->ntor_onion_key, H_LENGTH );
   working_secret_input += H_LENGTH;
 
   idx = 32;
@@ -735,10 +743,10 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
 
   working_auth_input += WC_SHA256_DIGEST_SIZE;
 
-  memcpy( working_auth_input, db_relay->relay->identity, ID_LENGTH );
+  memcpy( working_auth_input, dl_relay->relay->identity, ID_LENGTH );
   working_auth_input += ID_LENGTH;
 
-  memcpy( working_auth_input, db_relay->relay->ntor_onion_key, H_LENGTH );
+  memcpy( working_auth_input, dl_relay->relay->ntor_onion_key, H_LENGTH );
   working_auth_input += H_LENGTH;
 
   memcpy( working_auth_input, handshake_data, G_LENGTH );
@@ -788,9 +796,9 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
   wc_HmacFree( &reusable_hmac );
 
   // seed the forward sha
-  wc_ShaUpdate( &db_relay->relay_crypto->running_sha_forward, reusable_hmac_digest, HASH_LEN );
+  wc_ShaUpdate( &dl_relay->relay_crypto->running_sha_forward, reusable_hmac_digest, HASH_LEN );
   // seed the first 16 bytes of backwards sha
-  wc_ShaUpdate( &db_relay->relay_crypto->running_sha_backward, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
+  wc_ShaUpdate( &dl_relay->relay_crypto->running_sha_backward, reusable_hmac_digest + HASH_LEN, WC_SHA256_DIGEST_SIZE - HASH_LEN );
   // mark how many bytes we've written to the backwards sha and how many remain
   bytes_written = WC_SHA256_DIGEST_SIZE - HASH_LEN;
   bytes_remaining = HASH_LEN - bytes_written;
@@ -804,10 +812,10 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
   wc_HmacFree( &reusable_hmac );
 
   // seed the last 8 bytes of backward sha
-  wc_ShaUpdate( &db_relay->relay_crypto->running_sha_backward, reusable_hmac_digest, bytes_remaining );
+  wc_ShaUpdate( &dl_relay->relay_crypto->running_sha_backward, reusable_hmac_digest, bytes_remaining );
   // set the forward aes key
   memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining, KEY_LEN );
-  wc_AesSetKeyDirect( &db_relay->relay_crypto->aes_forward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+  wc_AesSetKeyDirect( &dl_relay->relay_crypto->aes_forward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
   // copy the first part of the backward key into the buffer
   memcpy( reusable_aes_key, reusable_hmac_digest + bytes_remaining + KEY_LEN, WC_SHA256_DIGEST_SIZE - bytes_remaining - KEY_LEN );
   // mark how many bytes we've written to the backwards key and how many remain
@@ -824,10 +832,10 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
 
   // copy the last part of the key into the buffer and initialize the key
   memcpy( reusable_aes_key + bytes_written, reusable_hmac_digest, bytes_remaining );
-  wc_AesSetKeyDirect( &db_relay->relay_crypto->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
+  wc_AesSetKeyDirect( &dl_relay->relay_crypto->aes_backward, reusable_aes_key, KEY_LEN, aes_iv, AES_ENCRYPTION );
 
   // copy the nonce
-  memcpy( db_relay->relay_crypto->nonce, reusable_hmac_digest + bytes_remaining, DIGEST_LEN );
+  memcpy( dl_relay->relay_crypto->nonce, reusable_hmac_digest + bytes_remaining, DIGEST_LEN );
 
   // free all the heap resources
   wc_curve25519_free( &responder_handshake_public_key );
@@ -839,12 +847,12 @@ int d_ntor_handshake_finish( uint8_t* handshake_data, DoublyLinkedOnionRelay* db
   return 0;
 
 fail:
-  wc_ShaFree( &db_relay->relay_crypto->running_sha_forward );
-  wc_ShaFree( &db_relay->relay_crypto->running_sha_backward );
-  wc_AesFree( &db_relay->relay_crypto->aes_forward );
-  wc_AesFree( &db_relay->relay_crypto->aes_backward );
+  wc_ShaFree( &dl_relay->relay_crypto->running_sha_forward );
+  wc_ShaFree( &dl_relay->relay_crypto->running_sha_backward );
+  wc_AesFree( &dl_relay->relay_crypto->aes_forward );
+  wc_AesFree( &dl_relay->relay_crypto->aes_backward );
 
-  free( db_relay->relay_crypto );
+  free( dl_relay->relay_crypto );
 
   wc_curve25519_free( &responder_handshake_public_key );
   wc_curve25519_free( &ntor_onion_key );
@@ -1737,7 +1745,7 @@ int d_router_begin_dir( OnionCircuit* circuit, DlConnection* or_connection, uint
   int ret;
   Cell* begin_dir_cell;
 
-  begin_dir_cell = malloc( MINITOR_CELL_LEN );
+  begin_dir_cell = malloc(MINITOR_CELL_LEN);
 
   begin_dir_cell->circ_id = circuit->circ_id;
   begin_dir_cell->command = RELAY;
@@ -1748,17 +1756,19 @@ int d_router_begin_dir( OnionCircuit* circuit, DlConnection* or_connection, uint
   begin_dir_cell->payload.relay.length = 0;
   begin_dir_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + begin_dir_cell->payload.relay.length;
 
-  if ( d_send_relay_cell_and_free( or_connection, begin_dir_cell, &circuit->relay_list, NULL ) < 0 )
+  if (d_send_relay_cell_and_free(or_connection, begin_dir_cell, &circuit->relay_list, NULL) < 0)
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_EXTEND2 cell" );
 
     return -1;
   }
 
+  circuit->stream_deliver_windows[stream_id - 1] = STREAM_RELAY_WINDOW_DEFAULT;
+
   return 0;
 }
 
-int d_rounter_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id, uint8_t* data, uint32_t data_len )
+int d_router_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id, uint8_t* data, uint32_t data_len )
 {
   Cell* data_cell;
 
@@ -1793,11 +1803,12 @@ int d_rounter_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connectio
   return 0;
 }
 
-int d_router_relay_end( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id )
+int d_router_relay_end(OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id)
 {
   Cell* end_cell;
 
   end_cell = malloc( MINITOR_CELL_LEN );
+  memset(end_cell, 0, MINITOR_CELL_LEN);
 
   end_cell->circ_id = circuit->circ_id;
   end_cell->command = RELAY;
@@ -1812,6 +1823,36 @@ int d_router_relay_end( OnionCircuit* circuit, DlConnection* or_connection, uint
   if ( d_send_relay_cell_and_free( or_connection, end_cell, &circuit->relay_list, NULL ) < 0 )
   {
     MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_DATA cell" );
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int d_router_relay_sendme(OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id)
+{
+  Cell* sendme_cell;
+
+  sendme_cell = malloc( MINITOR_CELL_LEN );
+  memset(sendme_cell, 0, MINITOR_CELL_LEN);
+
+  sendme_cell->circ_id = circuit->circ_id;
+  sendme_cell->command = RELAY;
+  sendme_cell->payload.relay.relay_command = RELAY_SENDME;
+  sendme_cell->payload.relay.recognized = 0;
+  sendme_cell->payload.relay.stream_id = stream_id;
+  sendme_cell->payload.relay.digest = 0;
+  sendme_cell->payload.relay.length = 3;
+
+  sendme_cell->payload.relay.sendme.version = 0;
+  sendme_cell->payload.relay.sendme.data_len = 0;
+
+  sendme_cell->length = FIXED_CELL_HEADER_SIZE + RELAY_CELL_HEADER_SIZE + sendme_cell->payload.relay.length;
+
+  if ( d_send_relay_cell_and_free( or_connection, sendme_cell, &circuit->relay_list, NULL ) < 0 )
+  {
+    MINITOR_LOG( MINITOR_TAG, "Failed to send RELAY_SENDME cell" );
 
     return -1;
   }

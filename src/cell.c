@@ -632,5 +632,6 @@ int d_decrypt_cell( Cell* cell, int circ_id_length, DoublyLinkedOnionRelayList* 
     }
   }
 
-  return 0;
+  // return the circuit index that sent this cell
+  return i;
 }

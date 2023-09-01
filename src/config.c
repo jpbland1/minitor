@@ -30,6 +30,7 @@ const char* tor_authorities[] =
 // the identity can be found at /tor/status-vote/current/consensus
 // the ntor-onion-key can be found at /tor/server/all
 #ifdef MINITOR_CHUTNEY
+// ip:port:identity:nto_onion_key
 MINITOR_CHUTNEY_ADDRESS_STR ":5000:JM022IGoVYCo1n4HRKNmEyRJflI:jq+kM4ZFUbZqYWym4+sCmr9zOUn8DDlPSP0JP1crbBg",
 MINITOR_CHUTNEY_ADDRESS_STR ":5001:Ewduz4NDJe1DNGMPLcMZVB/U7oc:z5Yd0lVNE8VLmNjG0Wp3ui9Czbc6E60wKGDb5hQy6B0",
 MINITOR_CHUTNEY_ADDRESS_STR ":5002:biV7oePe1m9MXWyQteX44pcEnPI:HMHNA06WJOv/ywNk+6Hw/SUvOse4e12L7Z0/evLS1RI"

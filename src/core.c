@@ -534,10 +534,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
 
   if ( cell == NULL )
   {
-    MINITOR_MUTEX_GIVE( access_mutex );
-    // MUTEX GIVE
-
-    return;
+    goto cleanup;
   }
 
   // MUTEX TAKE
@@ -552,12 +549,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
   {
     MINITOR_LOG( CORE_TAG, "Discarding circuitless cell %d", cell->circ_id );
 
-    MINITOR_MUTEX_GIVE( access_mutex );
-    // MUTEX GIVE
-
-    free( cell );
-
-    return;
+    goto cleanup;
   }
 
   MINITOR_LOG( CORE_TAG, "status %d target %d", working_circuit->status, working_circuit->target_status );
@@ -591,15 +583,44 @@ static void v_handle_tor_cell( uint32_t conn_id )
   // after decryption we need to change from network byte order to our byte order
   v_hostize_cell( cell );
 
+  /* do flow control logic */
+  if (cell->command == RELAY)
+  {
+    if (cell->payload.relay.relay_command == RELAY_DATA)
+    {
+      // decrement the deliver window
+      dl_relay = px_get_dl_relay_by_index(&working_circuit->relay_list, ret);
+      dl_relay->deliver_window--;
+      working_circuit->stream_deliver_windows[cell->payload.relay.stream_id - 1]--;
+
+      // send a RELAY_SENDME to increment deliver window
+      if (dl_relay->deliver_window < RELAY_WINDOW_DEFAULT - 100)
+      {
+        ret = d_router_relay_sendme(working_circuit, or_connection, 0);
+
+        if (ret == 0)
+          dl_relay->deliver_window += 100;
+      }
+
+      if (working_circuit->stream_deliver_windows[cell->payload.relay.stream_id - 1] < STREAM_RELAY_WINDOW_DEFAULT - 50)
+      {
+        ret = d_router_relay_sendme(working_circuit, or_connection, cell->payload.relay.stream_id);
+
+        if (ret == 0)
+          working_circuit->stream_deliver_windows[cell->payload.relay.stream_id - 1] += 50;
+      }
+    }
+    else if (cell->payload.relay.relay_command == RELAY_SENDME)
+    {
+      // TODO ignore sendme for now, not sure if we care about this since we're always polling to read new data
+      goto cleanup;
+    }
+  }
+
   // discard padding cell
   if ( cell->command == PADDING )
   {
-    MINITOR_MUTEX_GIVE( access_mutex );
-    // MUTEX GIVE
-
-    free( cell );
-
-    return;
+    goto cleanup;
   }
 
   switch ( working_circuit->status )
@@ -802,6 +823,9 @@ static void v_handle_tor_cell( uint32_t conn_id )
       else
       {
         dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+        memset(dl_relay, 0, sizeof(DoublyLinkedOnionRelay));
+        dl_relay->package_window = RELAY_WINDOW_DEFAULT;
+        dl_relay->deliver_window = RELAY_WINDOW_DEFAULT;
         dl_relay->relay = target_relay;
 
         v_add_relay_to_list( dl_relay, &working_circuit->relay_list );
@@ -844,6 +868,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
         ( cell->payload.relay.relay_command != RELAY_DATA && cell->payload.relay.relay_command != RELAY_END && cell->payload.relay.relay_command != RELAY_CONNECTED )
       )
       {
+        MINITOR_LOG( CORE_TAG, "CIRCUIT_CONSENSUS_FETCH ERROR" );
         goto circuit_rebuild;
       }
 
@@ -851,22 +876,27 @@ static void v_handle_tor_cell( uint32_t conn_id )
       {
         // parse this part of the consensus
         ret = d_parse_consensus( working_circuit, or_connection, cell );
+        MINITOR_LOG( CORE_TAG, "d_parse_consensus %d %d", ret, cell->payload.relay.relay_command );
+
       }
       else
       {
         // parse this part of the descriptors
         ret = d_parse_descriptors( working_circuit, or_connection, cell );
+        MINITOR_LOG( CORE_TAG, "d_parse_descriptors %d %d", ret, cell->payload.relay.stream_id );
       }
-
 
       if ( ret == 1 )
       {
         onion_message = malloc( sizeof( OnionMessage ) );
 
-        onion_message->type = EXTERNAL_CONSENSUS_FETCHED;
+        onion_message->type = CONSENSUS_FETCHED;
 
-        // inform the external task that we're done fetching
-        MINITOR_ENQUEUE_BLOCKING( external_consensus_queue, (void*)(&onion_message) );
+        if ( external_want_consensus == true )
+        {
+          // inform the external task that we're done fetching
+          MINITOR_ENQUEUE_BLOCKING( external_consensus_queue, (void*)(&onion_message) );
+        }
 
         v_circuit_remove_destroy( working_circuit, or_connection );
         // MUTEX GIVE
@@ -1136,6 +1166,7 @@ static void v_handle_tor_cell( uint32_t conn_id )
     }
   }
 
+cleanup:
   if ( access_mutex != NULL )
   {
     MINITOR_MUTEX_GIVE( access_mutex );

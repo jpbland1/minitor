@@ -121,7 +121,6 @@ int d_minitor_INIT()
   connections_task_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   external_consensus_queue = MINITOR_QUEUE_CREATE( 25, sizeof( OnionMessage* ) );
   fetch_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
-  insert_relays_queue = MINITOR_QUEUE_CREATE( 9, sizeof( OnionRelay* ) );
 
   b_create_core_task( &core_task );
 

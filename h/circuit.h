@@ -52,7 +52,8 @@ int d_process_certs( DlConnection* or_connection, CellVariable* certs_cell, int 
 int d_process_challenge( DlConnection* or_connection, CellVariable* challenge_cell, int length );
 int d_process_netinfo( DlConnection* or_connection, Cell* netinfo_cell );
 int d_router_begin_dir( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id );
-int d_rounter_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id, uint8_t* data, uint32_t data_len );
-int d_router_relay_end( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id );
+int d_router_relay_data_cell( OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id, uint8_t* data, uint32_t data_len );
+int d_router_relay_end(OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id);
+int d_router_relay_sendme(OnionCircuit* circuit, DlConnection* or_connection, uint16_t stream_id);
 
 #endif

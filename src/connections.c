@@ -96,6 +96,7 @@ static void v_cleanup_connection_in_lock( DlConnection* dl_connection )
       if ( dl_connection->cell_ring_buf[i] != NULL )
       {
         free( dl_connection->cell_ring_buf[i] );
+        dl_connection->cell_ring_buf[i] = NULL;
       }
     }
 
@@ -339,16 +340,19 @@ void v_connections_daemon( void* pv_parameters )
 
     while ( dl_connection != NULL )
     {
+      access_mutex = connection_access_mutex[dl_connection->mutex_index];
+      tmp_connection = dl_connection->next;
+
       if ( dl_connection->is_or == 1 )
       {
         if ( ( connections_poll[dl_connection->poll_index].revents & POLLERR ) != 0 || ( connections_poll[dl_connection->poll_index].revents & POLLHUP ) != 0 )
         {
           // MUTEX TAKE
-          MINITOR_MUTEX_TAKE_BLOCKING( connection_access_mutex[dl_connection->mutex_index] );
+          MINITOR_MUTEX_TAKE_BLOCKING(access_mutex);
 
           v_cleanup_connection_in_lock( dl_connection );
 
-          MINITOR_MUTEX_GIVE( connection_access_mutex[dl_connection->mutex_index] );
+          MINITOR_MUTEX_GIVE(access_mutex);
           // MUTEX GIVE
         }
         else if
@@ -362,7 +366,7 @@ void v_connections_daemon( void* pv_parameters )
         }
       }
 
-      dl_connection = dl_connection->next;
+      dl_connection = tmp_connection;
     }
 
     MINITOR_MUTEX_GIVE( connections_mutex );

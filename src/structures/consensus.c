@@ -94,7 +94,7 @@ void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list )
   list->length--;
 }
 
-OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index )
+DoublyLinkedOnionRelay* px_get_dl_relay_by_index(DoublyLinkedOnionRelayList* list, int index)
 {
   int i;
   DoublyLinkedOnionRelay* dl_relay;
@@ -106,10 +106,17 @@ OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index )
     dl_relay = dl_relay->next;
   }
 
-  if ( dl_relay == NULL )
-  {
+  return dl_relay;
+}
+
+OnionRelay* px_get_relay_by_index(DoublyLinkedOnionRelayList* list, int index)
+{
+  DoublyLinkedOnionRelay* dl_relay;
+
+  dl_relay = px_get_dl_relay_by_index(list, index);
+
+  if (dl_relay == NULL)
     return NULL;
-  }
 
   return dl_relay->relay;
 }

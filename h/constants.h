@@ -70,4 +70,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #define WATCHDOG_TIMEOUT_PERIOD 30
 
+#define RELAY_WINDOW_DEFAULT 1000
+#define STREAM_RELAY_WINDOW_DEFAULT 500
+
 #endif

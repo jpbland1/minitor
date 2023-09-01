@@ -520,6 +520,9 @@ int d_onion_service_handle_introduce_2( OnionCircuit* intro_circuit, Cell* intro
   else
   {
     dl_relay = malloc( sizeof( DoublyLinkedOnionRelay ) );
+    memset(dl_relay, 0, sizeof(DoublyLinkedOnionRelay));
+    dl_relay->package_window = RELAY_WINDOW_DEFAULT;
+    dl_relay->deliver_window = RELAY_WINDOW_DEFAULT;
     dl_relay->relay = rend_relay;
 
     v_add_relay_to_list( dl_relay, &rend_circuit->relay_list );

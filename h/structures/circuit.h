@@ -96,6 +96,8 @@ typedef struct OnionCircuit
   int desc_index;
   int target_relay_index;
   int relay_early_count;
+  uint16_t stream_package_windows[5];
+  uint16_t stream_deliver_windows[5];
 } OnionCircuit;
 
 extern unsigned int circ_id_counter;

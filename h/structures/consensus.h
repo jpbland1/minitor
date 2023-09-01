@@ -108,6 +108,8 @@ struct DoublyLinkedOnionRelay {
   DoublyLinkedOnionRelay* next;
   OnionRelay* relay;
   RelayCrypto* relay_crypto;
+  unsigned int package_window;
+  unsigned int deliver_window;
 };
 
 typedef struct DoublyLinkedOnionRelayList {
@@ -119,7 +121,8 @@ typedef struct DoublyLinkedOnionRelayList {
 
 void v_add_relay_to_list( DoublyLinkedOnionRelay* node, DoublyLinkedOnionRelayList* list );
 void v_pop_relay_from_list_back( DoublyLinkedOnionRelayList* list );
-OnionRelay* px_get_relay_by_index( DoublyLinkedOnionRelayList* list, int index );
+DoublyLinkedOnionRelay* px_get_dl_relay_by_index(DoublyLinkedOnionRelayList* list, int index);
+OnionRelay* px_get_relay_by_index(DoublyLinkedOnionRelayList* list, int index);
 
 // shared state must be protected by mutex
 extern NetworkConsensus network_consensus;
